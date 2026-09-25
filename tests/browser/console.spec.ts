@@ -84,32 +84,34 @@ test('password login clears rejected input and opens the admin workspace on succ
   expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
 });
 
-test('employee copies connector instructions without secrets and copies a key separately', async ({ page }, testInfo) => {
+test('employee follows the three-step setup and copies URL and key separately', async ({ page }, testInfo) => {
   const mutations = await mockConsole(page);
   await expect(page.getByRole('button', { name: 'Knowledge', exact: true })).toHaveCount(0);
   await expect(page.locator('input#personal-key')).toHaveAttribute('type', 'password');
-  await expect(page.getByLabel('MCP server URL')).toHaveValue('https://context.example.test/mcp');
-  await page.getByRole('button', { name: 'Copy MCP URL', exact: true }).click();
+  await expect(page.getByRole('list', { name: 'Connect Claude in three steps' }).locator(':scope > li')).toHaveCount(3);
+  await expect(page.getByLabel('Connector URL')).toHaveValue('https://context.example.test/mcp');
+  await expect(page.getByLabel('REST instructions')).not.toBeVisible();
+  await expect(page.getByText('This key gives access as')).toContainText('alex@example.test');
+  await page.getByRole('button', { name: 'Copy URL', exact: true }).click();
   expect(await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText)).toBe('https://context.example.test/mcp');
-  await page.getByRole('button', { name: 'Copy connector steps', exact: true }).click();
-  const connectorSteps = await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText);
-  expect(connectorSteps).toContain('custom connector');
-  expect(connectorSteps).toContain('Do not paste your API key');
-  expect(connectorSteps).not.toContain(token);
-  await expect(page.getByRole('button', { name: 'Copy complete setup', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Copy key', exact: true }).click();
+  expect(await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText)).toBe(token);
+  expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
+  await page.screenshot({ path: testInfo.outputPath('agent-access.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('agent-access-mobile.png'), fullPage: true });
+  await page.getByText('Other AI tools & API details', { exact: true }).click();
   await page.getByRole('button', { name: 'Copy instructions', exact: true }).click();
   const prompt = await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText);
   expect(prompt).toContain('verification');
   expect(prompt).toContain('Pasting this text into an ordinary chat does not connect the API');
   expect(prompt).not.toContain(token);
-  await page.getByRole('button', { name: 'Copy API key', exact: true }).click();
-  expect(await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText)).toBe(token);
-  expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
-  await page.screenshot({ path: testInfo.outputPath('agent-access.png'), fullPage: true });
-  await page.getByRole('button', { name: 'Rotate key', exact: true }).click();
+  await page.getByText('Key settings', { exact: true }).click();
+  await page.getByRole('button', { name: 'Replace key', exact: true }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
   expect(mutations).toHaveLength(0);
-  await page.getByRole('dialog').getByRole('button', { name: 'Rotate key', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Replace key', exact: true }).click();
   await expect(page.locator('input#personal-key')).toHaveValue(rotatedToken);
   expect(mutations).toEqual([{ path: '/api/console/key', method: 'POST', body: null }]);
 });
@@ -120,7 +122,7 @@ test('admin edits with revisions and protects unsaved work', async ({ page }, te
   await page.getByRole('button', { name: /Sample guide/ }).click();
   await expect(page.getByLabel('Page ID')).toBeDisabled();
   await page.getByLabel('Markdown content').fill('# Sample guide\n\nEdited synthetic information.');
-  await page.getByRole('button', { name: 'Agent access', exact: true }).click();
+  await page.getByRole('button', { name: 'Connect Claude', exact: true }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
   await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(page.getByLabel('Markdown content')).toContainText('Edited synthetic');

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ConsoleApiError, consoleRequest, displayDate, errorMessage, makeConnectorSetup, makeSystemPrompt, mcpServerUrl } from './helpers';
+import { ConsoleApiError, consoleRequest, displayDate, errorMessage, makeSystemPrompt, mcpServerUrl } from './helpers';
 import { Icon } from './icons';
 import { ConfirmDialog, Notice, Spinner } from './ui';
 import { SCOPE_OPTIONS, type ConsoleSession, type PersonalKey } from './types';
@@ -69,40 +69,61 @@ export function AgentAccess({ session, onSessionExpired }: { session: ConsoleSes
     } finally { setBusy(false); }
   }
 
-  return <div className="access-workspace">
-    <div className="page-heading"><div><p className="eyebrow">YOUR WORKSPACE, CONNECTED</p><h1>Give your agent the context.</h1><p>Connect your AI tool, then ask questions using the context your key can read.</p></div><span className="status-pill"><span />Read-only access</span></div>
-    {!writesEnabled && <Notice tone="info">Your workspace is ready to explore. Personal keys and knowledge editing will be available when an administrator completes setup.</Notice>}
-    {copyError && <Notice>{copyError}</Notice>}
-    <section className="panel mcp-connect-panel" aria-labelledby="mcp-heading">
-      <div className="mcp-connect-heading"><span className="mcp-connect-symbol"><Icon name="code" size={23} /></span><div><p className="eyebrow">FOR CLAUDE & MCP CLIENTS</p><h2 id="mcp-heading">Connect Claude to your context.</h2><p>Add this server as a custom connector. A chat message alone cannot connect it.</p></div><span className="small-tag">REMOTE MCP</span></div>
-      <label className="field-label" htmlFor="mcp-url">MCP SERVER URL</label>
-      <div className="mcp-url-row"><input id="mcp-url" readOnly value={mcpUrl} aria-label="MCP server URL" /><button className="button button-primary" onClick={() => void copy(mcpUrl, 'mcp')}><Icon name={copied === 'mcp' ? 'check' : 'copy'} size={16} />{copied === 'mcp' ? 'Copied MCP URL' : 'Copy MCP URL'}</button></div>
-      <ol className="mcp-connect-steps"><li><span>01</span><div><strong>Add a custom connector</strong><p>In Claude, use the server URL above when adding a custom connector.</p></div></li><li><span>02</span><div><strong>Authorize on Wareongo Context</strong><p>Review the app and permissions. Enter your own employee API key on our authorization page and select Connect.</p></div></li><li><span>03</span><div><strong>Use it in your conversation</strong><p>Return to Claude and enable the connector. Your employee permissions still apply to every read.</p></div></li></ol>
-      <div className="mcp-connect-footer"><p><Icon name="shield" size={15} />Keep API keys and the admin password out of chat.</p><button className="text-button" onClick={() => void copy(makeConnectorSetup(session.apiBaseUrl), 'connector')}>{copied === 'connector' ? <Icon name="check" size={14} /> : <Icon name="copy" size={14} />}{copied === 'connector' ? 'Copied connector steps' : 'Copy connector steps'}</button></div>
-    </section>
-    <div className="access-grid">
-      <section className="panel prompt-panel" aria-labelledby="prompt-heading">
-        <div className="panel-heading"><div className="step-heading"><span className="step-number"><Icon name="code" size={15} /></span><div><h2 id="prompt-heading">REST client instructions</h2><p>For tools already equipped with authenticated HTTP access.</p></div></div><span className="small-tag">ADVANCED</span></div>
-        <div className="prompt-text-wrap"><textarea className="prompt-text" aria-label="Agent system instructions" value={prompt} readOnly spellCheck={false} /></div>
-        <div className="panel-footer"><span className="muted">Instructions alone do not provide an HTTP tool.</span><button className="button button-primary" onClick={() => void copy(prompt, 'prompt')}><Icon name={copied === 'prompt' ? 'check' : 'copy'} />{copied === 'prompt' ? 'Copied instructions' : 'Copy instructions'}</button></div>
-      </section>
-      <div className="access-side">
-        <section className="panel key-panel" aria-labelledby="key-heading">
-          <div className="step-heading"><span className="step-number">02</span><div><h2 id="key-heading">Personal API key</h2><p>Your access, wherever you work.</p></div></div>
-          {error && <Notice action={<button className="text-button" onClick={() => void loadKey()}>Retry</button>}>{error}</Notice>}
-          {loading ? <div className="key-loading"><Spinner label="Loading your key…" /></div> : key ? <>
-            <label className="field-label" htmlFor="personal-key">API KEY</label>
-            <div className="secret-field"><input id="personal-key" type={revealed ? 'text' : 'password'} value={key.token} readOnly autoComplete="off" spellCheck={false} aria-label="Personal API key" /><button className="icon-button" onClick={() => setRevealed(!revealed)} aria-label={revealed ? 'Hide API key' : 'Reveal API key'} aria-pressed={revealed}><Icon name={revealed ? 'eye-off' : 'eye'} /></button></div>
-            <div className="key-meta"><span>Expires {displayDate(key.expiresAt)}</span><button className="text-button" disabled={busy || !writesEnabled} onClick={() => setConfirmRotation(true)}><Icon name="refresh" size={13} />Rotate key</button></div>
-            <button className="button button-secondary full-width" onClick={() => void copy(key.token, 'key')}><Icon name={copied === 'key' ? 'check' : 'copy'} />{copied === 'key' ? 'Copied API key' : 'Copy API key'}</button>
-          </> : <div className="key-empty"><span className="empty-icon"><Icon name="key" size={25} /></span><h3>Your personal connection</h3><p>Create a key to let your agent read the context available to you.</p><button className="button button-primary full-width" disabled={!writesEnabled || busy || Boolean(error)} onClick={() => void createKey()}>{busy ? <Spinner label="Creating…" /> : <><Icon name="plus" />Create API key</>}</button></div>}
-          <p className="key-hint"><Icon name="shield" size={15} /><span>Use your own key on the Wareongo Context authorization page, or in a REST tool’s credential settings. Never paste it into chat.</span></p>
-        </section>
-        <section className="panel connection-panel" aria-labelledby="connection-heading"><div className="connection-heading"><Icon name="code" /><h2 id="connection-heading">Connection details</h2></div><label className="field-label" htmlFor="api-base">API BASE URL</label><div className="endpoint-field"><input id="api-base" readOnly value={session.apiBaseUrl} aria-label="API base URL" /><button className="icon-button" aria-label="Copy API base URL" onClick={() => void copy(session.apiBaseUrl, 'base')}><Icon name={copied === 'base' ? 'check' : 'copy'} size={16} /></button></div><div className="scope-list" aria-label="Your permissions">{SCOPE_OPTIONS.filter(scope => session.employee.scopes.includes(scope.value)).map(scope => <span className="scope-chip" key={scope.value}><Icon name="check" size={12} />{scope.label}</span>)}</div><a className="text-link" href="/api/v1/openapi.json" target="_blank" rel="noreferrer">View API reference<Icon name="external" size={14} /></a></section>
-      </div>
+  return <div className="access-workspace simple-setup">
+    <div className="setup-intro">
+      <h1>Connect Claude to Wareongo</h1>
+      <p>Let Claude answer questions using company guides, warehouse details and your permitted CRM leads. It can read this information, but cannot change records.</p>
     </div>
-    <div className="access-footnote"><Icon name="shield" size={15} /><p>Agents can read permitted context. They cannot change records or take actions through this API.</p></div>
-    <span className="sr-only" role="status" aria-live="polite">{copied ? `${copied === 'base' ? 'API base URL' : copied} copied to clipboard` : ''}</span>
-    {confirmRotation && <ConfirmDialog title="Rotate your API key?" confirmLabel="Rotate key" destructive busy={busy} onCancel={() => setConfirmRotation(false)} onConfirm={() => void createKey()}><p>Your current key will stop working. Update every tool that uses it with the new key.</p></ConfirmDialog>}
+    {!writesEnabled && <Notice tone="info">Connections are not available yet. An administrator needs to finish server setup.</Notice>}
+    {copyError && <Notice>{copyError}</Notice>}
+    <ol className="setup-steps" aria-label="Connect Claude in three steps">
+      <li className="setup-step">
+        <span className="setup-number" aria-hidden="true">1</span>
+        <section aria-labelledby="add-connector-heading">
+          <div className="setup-step-title"><h2 id="add-connector-heading">Add the connector in Claude</h2><a className="text-link" href="https://claude.ai" target="_blank" rel="noreferrer">Open Claude<Icon name="external" size={14} /></a></div>
+          <p>Go to <strong>Customize → Connectors → + → Add custom connector</strong>.</p>
+          <p>Name it <strong>Wareongo Context</strong> and paste this URL:</p>
+          <label className="field-label" htmlFor="mcp-url">Connector URL</label>
+          <div className="setup-copy-row"><input id="mcp-url" readOnly value={mcpUrl} /><button className="button button-primary" onClick={() => void copy(mcpUrl, 'url')}><Icon name={copied === 'url' ? 'check' : 'copy'} size={16} />{copied === 'url' ? 'Copied URL' : 'Copy URL'}</button></div>
+          <p className="setup-hint">Leave OAuth Client ID and Client Secret blank, then click <strong>Add</strong>.</p>
+        </section>
+      </li>
+      <li className="setup-step">
+        <span className="setup-number" aria-hidden="true">2</span>
+        <section aria-labelledby="connect-account-heading">
+          <h2 id="connect-account-heading">Connect your account</h2>
+          <p>Click <strong>Connect</strong> beside Wareongo Context in Claude. On the Wareongo page that opens, paste this key and click <strong>Connect</strong>.</p>
+          <p className="setup-identity">This key gives access as <strong>{session.employee.email}</strong>.</p>
+          {error && <Notice action={<button className="text-button" onClick={() => void loadKey()}>Retry</button>}>{error}</Notice>}
+          {loading ? <div className="setup-key-loading"><Spinner label="Loading your key…" /></div> : key ? <>
+            <label className="field-label" htmlFor="personal-key">Employee API key</label>
+            <div className="setup-copy-row"><div className="secret-field"><input id="personal-key" type={revealed ? 'text' : 'password'} value={key.token} readOnly autoComplete="off" spellCheck={false} /><button className="icon-button" onClick={() => setRevealed(!revealed)} aria-label={revealed ? 'Hide API key' : 'Reveal API key'} aria-pressed={revealed}><Icon name={revealed ? 'eye-off' : 'eye'} /></button></div><button className="button button-primary" disabled={busy} onClick={() => void copy(key.token, 'key')}><Icon name={copied === 'key' ? 'check' : 'copy'} size={16} />{copied === 'key' ? 'Copied key' : 'Copy key'}</button></div>
+            <p className="setup-hint">This key goes on the Wareongo connection page, never in chat.</p>
+            <details className="setup-key-settings"><summary>Key settings</summary><div><span>Expires {displayDate(key.expiresAt)}</span><button className="text-button" disabled={busy || !writesEnabled} onClick={() => setConfirmRotation(true)}>Replace key</button></div></details>
+          </> : <div className="setup-key-empty"><p>Create your employee key to complete this step.</p><button className="button button-primary" disabled={!writesEnabled || busy || Boolean(error)} onClick={() => void createKey()}>{busy ? <Spinner label="Creating…" /> : 'Create API key'}</button></div>}
+        </section>
+      </li>
+      <li className="setup-step">
+        <span className="setup-number" aria-hidden="true">3</span>
+        <section aria-labelledby="ask-claude-heading">
+          <h2 id="ask-claude-heading">Ask Claude</h2>
+          <p>In a chat, open <strong>+ → Connectors</strong> and enable <strong>Wareongo Context</strong>. Then ask normally.</p>
+          <p className="setup-example">Try: “{session.employee.scopes.includes('crm:read') ? 'Show my leads needing follow-up.' : session.employee.scopes.includes('warehouses:read') ? 'Find warehouses in Bengaluru with at least 5 docks.' : 'What company guides can you read?'}”</p>
+        </section>
+      </li>
+    </ol>
+    <details className="setup-advanced">
+      <summary>Other AI tools & API details</summary>
+      <div className="setup-advanced-content">
+        <p>Other MCP apps can use this connector URL once an administrator enables them.</p>
+        <h2>Direct REST access</h2><p>For tools that can already send authenticated HTTP requests. These instructions are not needed for the Claude connector.</p>
+        <label className="field-label" htmlFor="api-base">API base URL</label><div className="setup-copy-row"><input id="api-base" readOnly value={session.apiBaseUrl} /><button className="button button-secondary" onClick={() => void copy(session.apiBaseUrl, 'base')}>{copied === 'base' ? 'Copied API URL' : 'Copy API URL'}</button></div>
+        <div className="scope-list" aria-label="Your permissions">{SCOPE_OPTIONS.filter(scope => session.employee.scopes.includes(scope.value)).map(scope => <span className="scope-chip" key={scope.value}>{scope.label}</span>)}</div>
+        <label className="field-label" htmlFor="rest-instructions">REST instructions</label><textarea id="rest-instructions" className="prompt-text" value={prompt} readOnly spellCheck={false} />
+        <div className="setup-advanced-actions"><button className="button button-secondary" onClick={() => void copy(prompt, 'prompt')}>{copied === 'prompt' ? 'Copied instructions' : 'Copy instructions'}</button><a className="text-link" href="/api/v1/openapi.json" target="_blank" rel="noreferrer">API reference<Icon name="external" size={14} /></a></div>
+      </div>
+    </details>
+    <span className="sr-only" role="status" aria-live="polite">{copied ? `${copied === 'base' ? 'API URL' : copied} copied to clipboard` : ''}</span>
+    {confirmRotation && <ConfirmDialog title="Replace this API key?" confirmLabel="Replace key" destructive busy={busy} onCancel={() => setConfirmRotation(false)} onConfirm={() => void createKey()}><p>Connections using this key will stop working. Reconnect them with the new key.</p></ConfirmDialog>}
   </div>;
 }

@@ -6,6 +6,7 @@ coverage/
 .env*
 !.env.example
 .local/
+previews/
 # Private organisational knowledge belongs in PostgreSQL, never in the repo.
 content/
 knowledge-imports/

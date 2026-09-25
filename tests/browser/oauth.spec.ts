@@ -27,11 +27,11 @@ async function mockAuthorization(page: Page, options: { rejectKey?: boolean; uns
 
 test('consent shows the application, complete redirect, and read permissions before any grant', async ({ page }, testInfo) => {
   const { posts } = await mockAuthorization(page);
-  await expect(page.getByRole('heading', { name: 'Synthetic AI client' })).toBeVisible();
-  await expect(page.getByText(redirectUri, { exact: true })).toBeVisible();
-  await expect(page.getByText('Company knowledge', { exact: true })).toBeVisible();
-  await expect(page.getByText('CRM context', { exact: true })).toBeVisible();
-  await expect(page.getByText('Warehouse context', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Synthetic AI client wants to read Wareongo context' })).toBeVisible();
+  await expect(page.getByText(redirectUri, { exact: true })).not.toBeVisible();
+  await expect(page.getByText('Company guides', { exact: true })).toBeVisible();
+  await expect(page.getByText('CRM records', { exact: true })).toBeVisible();
+  await expect(page.getByText('Warehouse listings', { exact: true })).toHaveCount(0);
   await expect(page.getByLabel('Employee API key')).toHaveAttribute('type', 'password');
   await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeDisabled();
   await expect(page.getByLabel('Admin password')).toHaveCount(0);
@@ -40,6 +40,8 @@ test('consent shows the application, complete redirect, and read permissions bef
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('oauth-consent-mobile.png'), fullPage: true });
+  await page.getByText('Connection details', { exact: true }).click();
+  await expect(page.getByText(redirectUri, { exact: true })).toBeVisible();
 });
 
 test('connect submits the employee key only in the approval body and follows the validated callback', async ({ page }) => {
@@ -57,7 +59,7 @@ test('a rejected employee key clears the input without exposing diagnostics', as
   await mockAuthorization(page, { rejectKey: true });
   await page.getByLabel('Employee API key').fill(apiKey);
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
-  await expect(page.getByRole('region', { name: 'Approve a connection.' }).getByRole('alert')).toContainText('invalid or expired');
+  await expect(page.locator('.consent-card').getByRole('alert')).toContainText('invalid or expired');
   await expect(page.getByLabel('Employee API key')).toHaveValue('');
   await expect(page.getByText('Synthetic private diagnostic must not be shown.')).toHaveCount(0);
   expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
@@ -75,7 +77,7 @@ test('unexpected redirect destinations fail closed and keep the key out of navig
   await mockAuthorization(page, { unsafeRedirect: true });
   await page.getByLabel('Employee API key').fill(apiKey);
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
-  await expect(page.getByRole('region', { name: 'Approve a connection.' }).getByRole('alert')).toContainText('could not be verified');
+  await expect(page.locator('.consent-card').getByRole('alert')).toContainText('could not be verified');
   await expect(page.getByLabel('Employee API key')).toHaveValue('');
   expect(new URL(page.url()).pathname).toBe('/oauth/authorize');
   expect(page.url()).not.toContain(apiKey);
@@ -83,6 +85,6 @@ test('unexpected redirect destinations fail closed and keep the key out of navig
 
 test('unavailable OAuth setup does not render a credential input', async ({ page }) => {
   await mockAuthorization(page, { unavailable: true });
-  await expect(page.getByRole('region', { name: 'Approve a connection.' }).getByRole('alert')).toContainText('temporarily unavailable');
+  await expect(page.locator('.consent-card').getByRole('alert')).toContainText('temporarily unavailable');
   await expect(page.getByLabel('Employee API key')).toHaveCount(0);
 });
