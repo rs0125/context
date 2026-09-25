@@ -74,7 +74,7 @@ export const WAREHOUSE_FILTER_CATALOG: readonly WarehouseFilterDefinition[] = [
   { name: 'date_to', type: 'string', description: 'Inclusive India calendar date YYYY-MM-DD. The query includes that complete day; cannot combine with period.' },
   { name: 'sort', type: 'string', enum: WAREHOUSE_SORTS, default: 'id_asc', description: 'Stable sort with warehouse ID as a tie-breaker and missing dates last. updated_desc uses the Dashboard Warehouse-row timestamp status_updated_at; related WarehouseData edits may not advance it, so this is not complete edit history. Follow nextCursor unchanged.' },
   { name: 'limit', type: 'integer', minimum: 1, maximum: 25, default: 10, description: 'Maximum records per page.' },
-  { name: 'cursor', type: 'string', description: 'Use nextCursor unchanged. id_asc preserves the legacy positive integer ID cursor; date sorts use an opaque cursor bound to the same filters and sort.' },
+  { name: 'cursor', type: 'string', description: 'Opaque cursor bound to the same filters, sort and resolved date window for every sort mode. Use nextCursor unchanged. Legacy record IDs require restarting without a cursor; page size may change.' },
 ];
 
 export const WAREHOUSE_SUMMARY_CATALOG: readonly WarehouseFilterDefinition[] = [

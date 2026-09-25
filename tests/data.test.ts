@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 import type { Principal } from '../src/lib/auth';
 import type { CrmAccess } from '../src/lib/crm-live';
+import { buildPagination } from '../src/lib/query-pagination';
 import {
   ACTIVE_STAGES, getFreshness, getMyBriefing, getOpportunity, getWarehouse,
   searchOpportunities, searchWarehouses, validateCrmQuery,
@@ -19,6 +20,13 @@ const all: CrmAccess = { mode: 'all', memberId: principal.twentyUserId! };
 function database(rows: Record<string, unknown>[] = []) {
   const query = vi.fn().mockResolvedValue({ rows });
   return { client: { query } as unknown as PoolClient, query };
+}
+
+function queryCursor(query: URLSearchParams, id: number | string) {
+  const warehouse = typeof id === 'number';
+  return buildPagination(query, { idColumn: warehouse ? 'w.id' : 'o.opportunity_id', idType: warehouse ? 'integer' : 'uuid', sortColumns: {},
+    filterContext: { start_at: null, end_before: null, ...(!warehouse ? { follow_up: null } : {}) },
+  }, () => '$unused').cursorFor({ id });
 }
 
 function warehouseRow(id: number) {
@@ -42,10 +50,12 @@ function opportunityRow(id: string = ID_1) {
 describe('warehouse reads', () => {
   it('queries visible inventory with bound filters and a single matching area', async () => {
     const { client, query } = database([warehouseRow(1)]);
-    const output = await searchWarehouses(client, new URLSearchParams({
+    const parameters = new URLSearchParams({
       city: 'Bengaluru', state: 'Karnataka', type: 'Industrial',
-      area_min_sqft: '30000', area_max_sqft: '50000', max_rate: '25', cursor: '8', limit: '25',
-    }));
+      area_min_sqft: '30000', area_max_sqft: '50000', max_rate: '25', limit: '25',
+    });
+    parameters.set('cursor', queryCursor(parameters, 8));
+    const output = await searchWarehouses(client, parameters);
     const [sql, values] = query.mock.calls[0];
     expect(sql).toContain('w.visibility IS TRUE');
     expect(sql).toContain('unnest(w."totalSpaceSqft")');
@@ -60,10 +70,13 @@ describe('warehouse reads', () => {
   });
 
   it('uses a lookahead row without exposing it or skipping the next record', async () => {
-    const { client } = database([warehouseRow(4), warehouseRow(9), warehouseRow(15)]);
+    const { client, query } = database([warehouseRow(4), warehouseRow(9), warehouseRow(15)]);
     const output = await searchWarehouses(client, new URLSearchParams('limit=2'));
     expect(output.items.map((item) => item.id)).toEqual([4, 9]);
-    expect(output.nextCursor).toBe('9');
+    expect(output.nextCursor).toBeTruthy();
+    expect(output.nextCursor).not.toBe('9');
+    await searchWarehouses(client, new URLSearchParams({ limit: '2', cursor: output.nextCursor! }));
+    expect(query.mock.calls[1][1]).toEqual([9, 3]);
   });
 
   it('strips contacts, unknown fields, malformed measurements, and oversized phone-like numbers', async () => {
@@ -120,9 +133,10 @@ describe('warehouse reads', () => {
 describe('employee-scoped CRM reads', () => {
   it('uses the live created-or-assigned union before filters and pagination without stale assignment restrictions', async () => {
     const { client, query } = database([opportunityRow(ID_1), opportunityRow(ID_2)]);
-    const output = await searchOpportunities(client, principal, new URLSearchParams({
-      city: 'Bengaluru', stage: 'RFQ_RECEIVED', view: 'accessible', limit: '1', cursor: ID_1,
-    }), related());
+    const parameters = new URLSearchParams({ city: 'Bengaluru', stage: 'RFQ_RECEIVED', view: 'accessible', limit: '1' });
+    const cursor = queryCursor(parameters, ID_1);
+    parameters.set('cursor', cursor);
+    const output = await searchOpportunities(client, principal, parameters, related());
     const [sql, values] = query.mock.calls[0];
     expect(sql).toContain('o.deleted_at IS NULL');
     expect(sql).toContain('o.opportunity_id = ANY($1::text[])');
@@ -130,7 +144,7 @@ describe('employee-scoped CRM reads', () => {
     expect(sql).toContain('ORDER BY o.opportunity_id ASC');
     expect(values).toEqual([[ID_1, ID_2], 'Bengaluru', 'RFQ_RECEIVED', ID_1, 2]);
     expect(output.items).toHaveLength(1);
-    expect(output.nextCursor).toBe(ID_1);
+    expect(output.nextCursor).toBe(cursor);
   });
 
   it('uses the same live access boundary on detail and does not expose source JSON', async () => {

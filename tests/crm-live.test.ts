@@ -94,6 +94,103 @@ describe('live CRM authorization', () => {
     expect((fetcher.mock.calls[3][0] as URL).searchParams.get('starting_after')).toBe('opaque-cursor-1');
   });
 
+  describe('exact opportunity authorization', () => {
+    it.each([
+      { view: 'accessible' as const, row: opportunity(1001), filter: `or(createdBy.workspaceMemberId[eq]:"${MEMBER_ID}",assignedTo[containsAny]:["ALEX"])` },
+      { view: 'created' as const, row: { ...opportunity(1001), assignedTo: ['OTHER'], createdBy: { workspaceMemberId: MEMBER_ID } }, filter: `createdBy.workspaceMemberId[eq]:"${MEMBER_ID}"` },
+      { view: 'assigned' as const, row: opportunity(1001), filter: 'assignedTo[containsAny]:["ALEX"]' },
+    ])('checks only the requested ID while retaining $view constraints', async ({ view, row, filter }) => {
+      const { fetcher, options } = responses(response('workspaceMembers', [member()]), response('opportunities', [row]));
+      const result = await getLiveCrmAccess(principal, { ...options, view, opportunityId: opportunityId(1001) });
+      expect(result).toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1001)] });
+      expect(fetcher).toHaveBeenCalledTimes(3);
+      const target = fetcher.mock.calls[2][0] as URL;
+      expect(target.pathname).toBe('/rest/opportunities');
+      expect(target.searchParams.get('filter')).toBe(`id[eq]:"${opportunityId(1001)}",${filter},deletedAt[is]:NULL`);
+      expect(target.searchParams.get('limit')).toBe('1');
+      expect(target.searchParams.get('depth')).toBe('0');
+      expect(target.searchParams.has('starting_after')).toBe(false);
+    });
+
+    it('normalizes valid UUID casing for lookup and returned IDs', async () => {
+      const id = 'abcdef12-abcd-4abc-8abc-abcdef123456';
+      const { fetcher, options } = responses(response('workspaceMembers', [member()]),
+        response('opportunities', [{ ...opportunity(1), id: id.toUpperCase() }]));
+      expect(await getLiveCrmAccess(principal, { ...options, opportunityId: id.toUpperCase() }))
+        .toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [id] });
+      expect((fetcher.mock.calls[2][0] as URL).searchParams.get('filter')).toContain(`id[eq]:"${id}"`);
+    });
+
+    it.each(['', 'not-a-uuid', ` ${opportunityId(1)}`, `${opportunityId(1)},deletedAt[is]:NULL`, null, 123])(
+      'rejects invalid target %j before any HTTP request', async (id) => {
+        const fetcher = vi.fn<typeof fetch>();
+        await expect(getLiveCrmAccess(principal, { fetch: fetcher, env: {}, opportunityId: id as string }))
+          .rejects.toMatchObject({ status: 400, code: 'INVALID_QUERY' });
+        expect(fetcher).not.toHaveBeenCalled();
+      },
+    );
+
+    it('returns no authorized IDs when the specific record is absent or not related', async () => {
+      const { fetcher, options } = responses(response('workspaceMembers', [member()]), response('opportunities', []));
+      expect(await getLiveCrmAccess(principal, { ...options, opportunityId: opportunityId(1) }))
+        .toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [] });
+      expect(fetcher).toHaveBeenCalledTimes(3);
+    });
+
+    it.each([
+      { rows: [opportunity(2)] },
+      { rows: [{ ...opportunity(1), id: 'invalid' }] },
+      { rows: [opportunity(1), opportunity(1)] },
+      { rows: [opportunity(1)], more: true },
+      { rows: [{ ...opportunity(1), deletedAt: '2026-09-25T00:00:00Z' }] },
+      { rows: [{ ...opportunity(1), deletedAt: undefined }] },
+      { rows: [{ ...opportunity(1), assignedTo: ['OTHER'], ownerId: MEMBER_ID }] },
+      { rows: [{ ...opportunity(1), assignedTo: ['ALEX', 7] }] },
+      { rows: [{ ...opportunity(1), assignedTo: null, createdBy: { workspaceMemberId: OTHER_MEMBER_ID } }] },
+    ])('fails closed on a malformed, misfiltered, or incomplete exact result (%#)', async ({ rows, more }) => {
+      const { fetcher, options } = responses(response('workspaceMembers', [member()]),
+        response('opportunities', rows, more ?? false, more ? 'unexpected-more' : null));
+      await expect(getLiveCrmAccess(principal, { ...options, opportunityId: opportunityId(1) }))
+        .rejects.toMatchObject({ status: 503, code: 'CRM_AUTHORIZATION_UNAVAILABLE' });
+      expect(fetcher).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not let created ownership satisfy an assigned-only exact read', async () => {
+      const { options } = responses(response('workspaceMembers', [member()]), response('opportunities', [
+        { ...opportunity(1), assignedTo: ['OTHER'], createdBy: { workspaceMemberId: MEMBER_ID } },
+      ]));
+      await expect(getLiveCrmAccess(principal, { ...options, view: 'assigned', opportunityId: opportunityId(1) }))
+        .rejects.toMatchObject({ status: 503, code: 'CRM_AUTHORIZATION_UNAVAILABLE' });
+    });
+
+    it('still permits an exact creator-only read with ambiguous assignment names', async () => {
+      const { options } = responses(response('workspaceMembers', [member(), {
+        ...member(), id: OTHER_MEMBER_ID, userEmail: 'other@example.test',
+      }]), response('opportunities', [{ ...opportunity(1), assignedTo: null, createdBy: { workspaceMemberId: MEMBER_ID } }]));
+      expect(await getLiveCrmAccess(principal, { ...options, view: 'created', opportunityId: opportunityId(1) }))
+        .toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1)] });
+    });
+
+    it('checks live roles on exact reads and loses administrator access immediately after revocation', async () => {
+      const before = responsesWithRoles(rolesResponse([adminRole()]), response('workspaceMembers', [member()]));
+      const after = responsesWithRoles(rolesResponse([memberRole()]), response('workspaceMembers', [member()]), response('opportunities', []));
+      expect(await getLiveCrmAccess(principal, { ...before.options, opportunityId: opportunityId(1) }))
+        .toEqual({ mode: 'all', memberId: MEMBER_ID });
+      expect(before.fetcher).toHaveBeenCalledTimes(2);
+      expect((before.fetcher.mock.calls[1][0] as URL).pathname).toBe('/metadata');
+      expect(await getLiveCrmAccess(principal, { ...after.options, opportunityId: opportunityId(1) }))
+        .toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [] });
+      expect(after.fetcher).toHaveBeenCalledTimes(3);
+    });
+
+    it('requires the current unique employee identity before checking an exact ID', async () => {
+      const { fetcher, options } = responses(response('workspaceMembers', [{ ...member(), userEmail: 'someone-else@example.test' }]));
+      await expect(getLiveCrmAccess(principal, { ...options, opportunityId: opportunityId(1) }))
+        .rejects.toMatchObject({ status: 403, code: 'CRM_IDENTITY_UNAVAILABLE' });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('grants all-record access only for current membership in the verified built-in Twenty Admin role', async () => {
     const { fetcher, options } = responsesWithRoles(rolesResponse([adminRole()]), response('workspaceMembers', [member()]));
     expect(await getLiveCrmAccess(principal, options)).toEqual({ mode: 'all', memberId: MEMBER_ID });

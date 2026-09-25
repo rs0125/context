@@ -85,10 +85,10 @@ describe('CRM task queries', () => {
     expect(first.items[0]).not.toHaveProperty('sort_value');
     expect(first.query_context.has_more).toBe(true);
   });
-  it.each(['today', 'overdue', 'upcoming'])('binds %s follow-up cursors to their resolved India day', async status => {
+  it.each(['id_asc', 'created_desc'].flatMap(sort => ['today', 'overdue', 'upcoming'].map(status => ({ sort, status }))))('binds $sort/$status follow-up cursors to their resolved India day', async ({ status, sort }) => {
     vi.setSystemTime(new Date('2026-09-25T18:29:50Z'));
     const db = database([{ opportunity_id: id, sort_value: '2026-09-25T00:00:00.123Z' }, { opportunity_id: id2 }]);
-    const query = new URLSearchParams({ follow_up_status: status, sort: 'created_desc', limit: '1' });
+    const query = new URLSearchParams({ follow_up_status: status, sort, limit: '1' });
     const first = await searchOpportunities(db.client, principal, query, access);
     expect(first.query_context.follow_up).toEqual({ status, timezone: 'Asia/Kolkata',
       start_at: status === 'today' ? '2026-09-24T18:30:00.000Z' : status === 'upcoming' ? '2026-09-25T18:30:00.000Z' : null,

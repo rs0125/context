@@ -87,13 +87,29 @@ async function main() {
     check(tools.tools.length >= 3 && tools.tools.every(tool => tool.annotations?.readOnlyHint === true), 'TOOL_DISCOVERY_FAILED');
     const context = await client.callTool({ name: 'get_context', arguments: {} });
     check(!context.isError && data(context).data.read_only === true, 'CONTEXT_READ_FAILED');
+    check(data(context).data.knowledge_discovery?.status === 'not_checked' && !('knowledge' in data(context).data), 'CONTEXT_NOT_COMPACT');
     const result = { tools: tools.tools.length, context: true, warehouse: 'not_granted', crm: 'not_granted' };
+    if (tools.tools.some(tool => tool.name === 'search_knowledge')) {
+      const index = await client.callTool({ name: 'search_knowledge', arguments: { limit: 1 } });
+      check(!index.isError && Array.isArray(data(index).data.items) && 'nextCursor' in data(index).data, 'KNOWLEDGE_INDEX_FAILED');
+      const cursor = data(index).data.nextCursor;
+      if (cursor) {
+        const next = await client.callTool({ name: 'search_knowledge', arguments: { limit: 1, cursor } });
+        check(!next.isError && data(next).data.items.every(item => !data(index).data.items.some(previous => previous.id === item.id)), 'KNOWLEDGE_PAGINATION_FAILED');
+      }
+      result.knowledge = 'paged';
+    }
     if (tools.tools.some(tool => tool.name === 'search_warehouses')) {
       const warehouses = await client.callTool({ name: 'search_warehouses', arguments: { limit: 1, docks_min: 2 } });
       check(!warehouses.isError && Array.isArray(data(warehouses).data.items), 'WAREHOUSE_READ_FAILED');
+      check(data(warehouses).data.response_format === 'concise', 'WAREHOUSE_NOT_CONCISE');
       for (const item of data(warehouses).data.items) {
         check(!Object.keys(item).some(field => /phone|contact|email|media/i.test(field)), 'WAREHOUSE_PRIVATE_FIELD');
         check(typeof item.verification_required === 'boolean', 'WAREHOUSE_EVIDENCE_MISSING');
+      }
+      if (data(warehouses).data.nextCursor) {
+        const next = await client.callTool({ name: 'search_warehouses', arguments: { limit: 1, docks_min: 2, cursor: data(warehouses).data.nextCursor } });
+        check(!next.isError && data(next).data.items.every(item => !data(warehouses).data.items.some(previous => previous.id === item.id)), 'WAREHOUSE_PAGINATION_FAILED');
       }
       result.warehouse = 'read';
       if (tools.tools.some(tool => tool.name === 'warehouse_summary')) {
@@ -113,6 +129,11 @@ async function main() {
       const value = data(crm);
       check(crm.isError ? typeof value.error?.code === 'string' : Boolean(value.data.access_scope && value.data.source_status), 'CRM_RESULT_INVALID');
       result.crm = crm.isError ? value.error.code : 'read';
+      if (!crm.isError && value.data.items[0]) {
+        const detail = await client.callTool({ name: 'read_crm_lead', arguments: { id: value.data.items[0].id } });
+        check(!detail.isError && data(detail).data.id === value.data.items[0].id && data(detail).data.access_scope, 'CRM_TARGETED_DETAIL_FAILED');
+        result.crm_detail = 'live-authorized';
+      }
       if (!crm.isError && tools.tools.some(tool => tool.name === 'crm_summary')) {
         const monthlyResult = await client.callTool({ name: 'search_crm_leads', arguments: { view: 'created', period: 'this_month', sort: 'created_desc', limit: 2 } });
         const monthly = data(monthlyResult).data;

@@ -54,8 +54,8 @@ describe('stable date pagination', () => {
     query.set('cursor', cursor);
     expect(buildPagination(query, config, bind().fn).where).toEqual(['(w.created IS NULL AND w.id > $1)']);
   });
-  it('retains old numeric cursors for ID sorting but rejects them for date sorting', () => {
-    expect(buildPagination(new URLSearchParams('cursor=12'), config, bind().fn).where).toEqual(['w.id > $1']);
-    expect(() => buildPagination(new URLSearchParams('cursor=12&sort=created_desc'), config, bind().fn)).toThrow();
+  it('rejects legacy numeric cursors for every sort with an explicit restart instruction', () => {
+    expect(() => buildPagination(new URLSearchParams('cursor=12'), config, bind().fn)).toThrow('Restart the search');
+    expect(() => buildPagination(new URLSearchParams('cursor=12&sort=created_desc'), config, bind().fn)).toThrow('Restart the search');
   });
 });

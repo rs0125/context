@@ -14,7 +14,7 @@ const origin = 'https://context.example.test';
 const employee = { id: 7, email: 'employee@example.test', is_active: true, dashboardAccess: true, adminAccess: false, twenty_user_id: null };
 const now = new Date('2026-09-25T00:00:00Z');
 const meta = { requestId: 'synthetic-mcp-test', generatedAt: now.toISOString() };
-const contextData = { employee_id: 7, read_only: true, scopes: ['knowledge:read'], knowledge: [], server_clock: clockContext(now) };
+const contextData = { employee_id: 7, read_only: true, scopes: ['knowledge:read'], knowledge_discovery: { permitted: true, status: 'not_checked', index_path: '/api/v1/wiki/pages', search_path: '/api/v1/wiki/search' }, server_clock: clockContext(now) };
 const queryContext = { ...resolveDateQuery(new URLSearchParams(), ['created'], now), sort: 'id_asc', returned_count: 1, has_more: true };
 const matchingPolicy = { mode: 'permissive', include_unknown: false, range_matching: 'overlap', guidance: 'Verify uncertain candidates.' };
 const sourceStream = { source_watermark_at: now.toISOString(), last_run_at: now.toISOString(), status: 'ok' };
@@ -97,7 +97,7 @@ describe('MCP read-only protocol', () => {
     expect(warehouse.inputSchema.additionalProperties).toBe(false);
     expect(warehouse.inputSchema.properties).toHaveProperty('docks_min');
     expect(warehouse.inputSchema.properties).toHaveProperty('power_min_kva');
-    expect(Object.keys(warehouse.inputSchema.properties).sort()).toEqual(WAREHOUSE_FILTER_CATALOG.map(field => field.name).sort());
+    expect(Object.keys(warehouse.inputSchema.properties).sort()).toEqual([...WAREHOUSE_FILTER_CATALOG.map(field => field.name), 'response_format'].sort());
     expect(warehouse.inputSchema.properties.cursor.maxLength).toBe(1024);
     expect(warehouse.outputSchema.properties.data.required).toEqual(expect.arrayContaining(['items', 'nextCursor', 'query_context', 'matching_policy']));
     const crm = result.tools.find((tool: { name: string }) => tool.name === 'search_crm_leads');
@@ -134,6 +134,47 @@ describe('MCP read-only protocol', () => {
     expect(body.result.structuredContent).toMatchObject({ source_path: '/api/v1/warehouses?city=Bengaluru&docks_min=5&limit=2', meta });
     expect(JSON.parse(body.result.content[0].text).data.items[0].verification_required).toBe(true);
     expect(read).toHaveBeenCalledOnce();
+  });
+  it('keeps concise candidates small without hiding requested unknowns or uncertain measurements', async () => {
+    const item = { id: 12, city: 'Bengaluru', created_at: now.toISOString(), updated_at: now.toISOString(),
+      dock_count: null, clear_height_ft: 30, power_kva: null, washroom_count: 8, land_type: 'Industrial',
+      verification_required: true, field_evidence: {
+        dock_count: { kind: 'range', lower: 2, upper: 6 }, clear_height_ft: { kind: 'exact', value: 30 },
+        power_kva: { kind: 'unknown' }, gate_size_ft: { kind: 'approximate', value: 20 },
+        washroom_count: { kind: 'exact', value: 8 },
+      } };
+    const read = vi.fn(async (request: Request) => {
+      expect(new URL(request.url).searchParams.has('response_format')).toBe(false);
+      return Response.json({ data: { items: [item], nextCursor: null, matching_policy: matchingPolicy, query_context: queryContext }, meta });
+    });
+    const args = { power_min_kva: 100, include_unknown: 'true' };
+    const concise = await wire(await handleMcpRequest(rpc('tools/call', { name: 'search_warehouses', arguments: args }), { authenticate: async () => key(), read }));
+    expect(concise.result.isError).not.toBe(true);
+    const data = concise.result.structuredContent.data;
+    expect(data.response_format).toBe('concise');
+    expect(data.items[0]).toMatchObject({ id: 12, created_at: now.toISOString(), verification_required: true, power_kva: null,
+      field_evidence: { dock_count: { kind: 'range', lower: 2, upper: 6 }, power_kva: { kind: 'unknown' }, gate_size_ft: { kind: 'approximate', value: 20 } } });
+    expect(data.items[0]).not.toHaveProperty('land_type');
+    expect(data.items[0].field_evidence).not.toHaveProperty('washroom_count');
+    const detailed = await wire(await handleMcpRequest(rpc('tools/call', { name: 'search_warehouses', arguments: { ...args, response_format: 'detailed' } }), { authenticate: async () => key(), read }));
+    expect(detailed.result.structuredContent.data).toMatchObject({ response_format: 'detailed', items: [item] });
+  });
+  it('browses knowledge without a mandatory query and preserves pagination', async () => {
+    const read = vi.fn(async (request: Request, path: string[]) => {
+      expect(path).toEqual(['wiki', 'pages']);
+      expect(new URL(request.url).searchParams.get('cursor')).toBe('opaque-next-page');
+      return Response.json({ data: { items: [], nextCursor: null }, meta });
+    });
+    const result = await wire(await handleMcpRequest(rpc('tools/call', { name: 'search_knowledge', arguments: { cursor: 'opaque-next-page' } }), { authenticate: async () => key(), read }));
+    expect(result.result.isError).not.toBe(true);
+    expect(result.result.structuredContent.data).toEqual({ items: [], nextCursor: null });
+    expect(result.result.structuredContent.source_path).toBe('/api/v1/wiki/pages');
+    expect(result.result.structuredContent.meta.requestId).toBe(meta.requestId);
+  });
+  it('returns recorded filter options without repeating the input schema catalog', async () => {
+    const read = vi.fn(async () => Response.json({ data: { catalog: WAREHOUSE_FILTER_CATALOG, options: { city: ['Bengaluru'] }, truncated: false }, meta }));
+    const result = await wire(await handleMcpRequest(rpc('tools/call', { name: 'warehouse_filters', arguments: {} }), { authenticate: async () => key(), read }));
+    expect(result.result.structuredContent.data).toEqual({ options: { city: ['Bengaluru'] }, truncated: false });
   });
   it.each([{ phone: '9876543210' }, { limit: 1000 }, { docks_min: -1 }])('rejects unsupported filters before business reads: %j', async args => {
     const read = vi.fn();
@@ -214,11 +255,12 @@ describe('MCP read-only protocol', () => {
     expect(JSON.stringify(body)).not.toMatch(/9876543210|contactNumber|media|secret/);
   });
   it('keeps failures as tool errors rather than an empty list', async () => {
-    const read = vi.fn(async () => Response.json({ error: { code: 'CRM_SOURCE_STALE', message: 'CRM needs a recent sync.' } }, { status: 503 }));
+    const read = vi.fn(async () => Response.json({ error: { code: 'CRM_SOURCE_STALE', message: 'CRM needs a recent sync.' } }, { status: 503, headers: { 'Retry-After': '10' } }));
     const body = await wire(await handleMcpRequest(rpc('tools/call', { name: 'search_crm_leads', arguments: {} }), { authenticate: async () => key(), read }));
     expect(body.result.isError).toBe(true);
     expect(body.result.structuredContent.status).toBe(503);
     expect(body.result.structuredContent.error.code).toBe('CRM_SOURCE_STALE');
+    expect(body.result.structuredContent.retry_after_seconds).toBe(10);
     expect(body.result.structuredContent).not.toHaveProperty('data');
   });
   it('does not share identity between simultaneous requests', async () => {

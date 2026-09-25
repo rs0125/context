@@ -151,9 +151,10 @@ Authorization: Bearer YOUR_EMPLOYEE_CONTEXT_KEY
 
 | Endpoint | Purpose | Required access |
 | --- | --- | --- |
-| `GET /api/v1/context` | Employee capabilities, wiki index, and API entry points | Valid employee key |
+| `GET /api/v1/context` | Employee capabilities, server clock, and discovery links (no wiki query) | Valid employee key |
 | `GET /api/v1/context.md` | Markdown starting context for an agent | `knowledge:read` |
-| `GET /api/v1/wiki/search?q=shortlisting&limit=5` | Search reviewed knowledge pages | `knowledge:read` |
+| `GET /api/v1/wiki/pages?limit=10` | Browse reviewed metadata; follow `nextCursor` | `knowledge:read` |
+| `GET /api/v1/wiki/search?q=shortlisting&limit=5` | Search reviewed knowledge; follow `nextCursor` with the same query | `knowledge:read` |
 | `GET /api/v1/wiki/pages/{id}` | Read a page; add `?format=markdown` for Markdown text | `knowledge:read` |
 | `GET /api/v1/warehouses` | Filter warehouse specifications | `warehouses:read` |
 | `GET /api/v1/warehouses/filters` | Discover filter definitions and current category options; optionally narrow by city/state | `warehouses:read` |
@@ -169,7 +170,7 @@ Authorization: Bearer YOUR_EMPLOYEE_CONTEXT_KEY
 
 CRM search accepts `q` (permitted lead/company labels), `city`, `stage`, `view`, `assigned_to=me`, `active_only`, `priority_min`, `follow_up_status`, date filters, `sort`, `limit`, and `cursor`. Discover supported values at `/api/v1/crm/filters`. The default `view=accessible` returns created-or-assigned leads for employees and all mirrored leads for verified Twenty admins. `view=created` and `view=assigned` narrow both roles to their own records. `assigned_to=me` aliases `view=assigned`; combining `view` with `assigned_to` is rejected.
 
-Warehouse and CRM searches accept `period` (including `today`, `this_month`, `tomorrow`) or inclusive India-calendar `date_from`/`date_to`. `date_field` defaults to `created`; CRM also supports follow-up and activity clocks. Responses echo resolved UTC bounds and server time. Source creation dates are warehouse `created_at` and CRM `source_created_at`; mirror poll/insertion dates never substitute for them. Date sorting uses opaque cursors; ID sorting retains existing ID cursors. Keep filters and sort unchanged between pages. Collections default to 10 records, maximum 25; their size is not a total. Wiki search requires a query of at most 120 characters and permits at most 10 results.
+Warehouse and CRM searches accept `period` (including `today`, `this_month`, `tomorrow`) or inclusive India-calendar `date_from`/`date_to`. `date_field` defaults to `created`; CRM also supports follow-up and activity clocks. Responses echo resolved UTC bounds and server time. Source creation dates are warehouse `created_at` and CRM `source_created_at`; mirror poll/insertion dates never substitute for them. Every sort uses opaque cursors bound to the collection, filters and resolved dates. Legacy cursors require restarting without a cursor; a relative window crossing midnight requires a new search. Keep filters and sort unchanged between pages. Collections default to 10 records, maximum 25; their size is not a total. Wiki search requires a query of at most 120 characters; search and index pages permit at most 10 results and return `nextCursor`. They search the full permitted collection without a 500-document cutoff.
 
 `/api/v1/warehouses/summary` and `/api/v1/crm/summary` apply the same search predicates and permissions, returning full `total`, bounded `groups`, `groups_truncated` and `other_count`. They accept `group_by`/`group_limit`, without pagination or sorting. Dates and warehouse uncertainty still apply to these counts. No endpoint exposes raw SQL, arbitrary field selection or writes.
 
@@ -222,7 +223,7 @@ JSON success responses follow this shape:
 }
 ```
 
-`data` contains the endpoint's payload; the `items` and `nextCursor` fields apply to paginated record collections. The context index returns the employee's internal ID, effective scopes, permitted knowledge index, API links, and access constraints. It does not return the employee's email.
+`data` contains the endpoint's payload; the `items` and `nextCursor` fields apply to paginated record collections. The context response returns the employee's internal ID, effective scopes, clock, discovery links, and access constraints. `knowledge_discovery.status=not_checked` means knowledge health is checked only when queried; a wiki failure does not prevent capability discovery. It does not return the employee's email.
 
 `generatedAt` is response time, not proof that a source record was recently checked. Use record-level timestamps and verification fields when present. Every successful CRM response includes `data.source_status` with the `opportunities`, `notes`, and `tasks` streams' source watermark, last run time, and status, plus `data.access_scope` (`all`, `created_or_assigned`, `created`, or `assigned`). CRM facts come from the local CRM mirror and inherit its synchronisation delay. `all` means all non-deleted mirrored records, not proof of complete real-time replication. Live Twenty establishes record visibility; the mirror alone cannot grant access.
 
@@ -256,7 +257,7 @@ Use Supabase's **transaction pooler**, not the direct database endpoint or sessi
 
 Released pooler connections can stay warm for 30 seconds across agent-thinking gaps; they are recycled after five minutes. Checkout/connection establishment has a five-second budget; database statements retain a four-second limit. Idle connections do not retain an open database transaction. Overload or unavailable connections return a retryable 503. Vercel's pool lifecycle helper remains enabled; its idle cleanup can extend background execution up to the function deadline.
 
-Before authentication, database-backed key lookups share a fixed budget of 120 attempts per minute per process, including invalid keys. Exhausted requests return 429 before database access. Environment-registered keys bypass this lookup budget; authenticated keys retain their normal per-key limit (30 requests per minute by default).
+REST and MCP track repeated failed credentials in bounded, separate per-process maps. After five proven failures for the same credential, further identical attempts return 429 before a database lookup while the entry remains in the bounded cache for that minute; heavy credential rotation can evict entries. Invalid credentials do not consume authenticated per-key quotas, including clients sharing an egress IP. Randomly changing credentials still require bounded database lookups; configure Vercel Firewall controls for deployment-wide abuse protection. Authenticated API keys retain their normal per-key limit (30 requests per minute by default).
 
 That pool size is **per instance**, not a global connection cap. Vercel can start several instances, each with its own pool. Before a wider employee rollout, set an appropriate Supabase pool limit, configure Vercel Firewall/rate controls, and check database connection usage under the expected concurrency. Keep production and preview credentials separate; preview deployments should not silently inherit production access.
 
@@ -308,3 +309,18 @@ When CRM returns `503 CRM_SOURCE_STALE`, the smoke check reports that CRM access
 To deploy on Vercel, import this repository or select `Context_Engine` as the root directory when importing its parent. Use the Next.js preset and add the server-side environment variables in Vercel. Set a deployment region appropriate for the Supabase region. The public health route checks process liveness; use an authenticated context request to verify the configured employee and database path.
 
 Deployments are not created automatically by this scaffold. Deploy application code and server-side configuration without copying private knowledge documents into the build. Knowledge changes are read from PostgreSQL; changing environment-based key registrations still requires updating the deployment configuration and redeploying.
+
+
+### MCP hardening and remaining deployment checks
+
+MCP keeps the same twelve tools. `get_context` supplies capabilities and the clock without loading company pages. `search_knowledge` accepts an optional `q`: omit it to browse, or supply it for ranked snippets. Both return a bounded page and `nextCursor`. Read full documents only when relevant.
+
+`search_warehouses` defaults to `response_format=concise`. It returns location, core measurements, measurements constrained by the query, source timestamps, verification flags and relevant evidence. Every recorded estimate/range that triggers verification remains present. Use `response_format=detailed` or `read_warehouse` for all permitted fields. Omitted fields are not evidence of absence. REST warehouse results retain their detailed format. MCP `warehouse_filters` returns recorded category options without repeating the catalog already present in the search schema.
+
+Unused OAuth registrations expire after 30 minutes and are cleaned up during registration only when they have no grants. Clients with grants are preserved and do not count toward the 2,000 pending-registration cap. Anonymous DCR has a bounded per-source, per-process allowance using Vercel's trusted client-IP header; local deployments share an unattributed fallback. Active connections, PKCE, audience binding, token rotation and immediate key/grant checks remain intact. Sanitized OAuth lifecycle events omit credentials, IPs, identities and source payloads. No new environment variable or database migration is required for these changes.
+
+Single-lead CRM reads verify only that requested ID against live Twenty permissions. Bulk created/assigned reads (including non-admin accessible reads) still require a complete authorization set and fail closed above the existing 1,000-record bound; they do not silently return a partial total. Larger bulk workloads require a separately designed authorization/query path. No permission cache was introduced.
+
+Pool limits of 1–2 sockets and local request queues apply to each Node instance. Keep Supabase transaction mode on port 6543. Before increasing employee traffic, review the project's Supabase pooler capacity and Vercel instance/concurrency settings and configure deployment-wide WAF rules. This repository does not establish a fleet-wide connection budget. [Vercel pooling guidance](https://vercel.com/kb/guide/connection-pooling-with-functions), [WAF rate limiting](https://vercel.com/docs/vercel-firewall/vercel-waf/rate-limiting).
+
+After deployment, refresh the connector's tool definitions or reconnect if the harness caches schemas. Restart any in-progress query carrying an old cursor. Employee keys and connected OAuth grants remain valid. MCP citation paths retain the endpoint and filters but omit pagination cursors; record IDs and `meta.requestId` identify the returned evidence.

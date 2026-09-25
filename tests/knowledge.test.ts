@@ -13,7 +13,7 @@ function page(overrides: Record<string, unknown> = {}) {
   return {
     id: "synthetic-guide", title: "Synthetic guide", summary: "Synthetic test summary",
     updatedAt: "2026-09-25", status: "reviewed", scopes: ["knowledge:read"],
-    body_length: 40, body: "Synthetic document used only in tests.", ...overrides,
+    body_length: 40, score: 0, body: "Synthetic document used only in tests.", ...overrides,
   };
 }
 
@@ -29,8 +29,8 @@ function database(rows: unknown[]) {
   return { query, client: { query } as unknown as PoolClient };
 }
 
-function collection(pages: unknown[], pageCount = pages.length) {
-  return database([{ page_count: pageCount, pages }]);
+function collection(pages: unknown[]) {
+  return database(pages);
 }
 
 function assertSqlAccess(sql: string) {
@@ -43,30 +43,29 @@ function assertSqlAccess(sql: string) {
 describe("private database knowledge publication and permissions", () => {
   it("lists only safe metadata using the existing client and bounded authorized SQL", async () => {
     const db = collection([page()]);
-    expect(await listKnowledge(db.client, scopes)).toEqual([{
+    expect(await listKnowledge(db.client, scopes)).toEqual({ items: [{
       id: "synthetic-guide", title: "Synthetic guide", summary: "Synthetic test summary", updatedAt: "2026-09-25",
-    }]);
+    }], nextCursor: null });
     const [sql, parameters] = db.query.mock.calls[0];
     assertSqlAccess(sql);
-    expect(sql).toContain("LIMIT 501");
-    expect(sql).toContain("LIMIT 500");
-    expect(sql).not.toContain("THEN body");
-    expect(parameters).toEqual([scopes]);
+    expect(sql).toContain("LIMIT $4");
+    expect(sql).not.toContain("LIMIT 501");
+    expect(parameters).toEqual([scopes, [], [], 11, null, null]);
   });
 
   it("performs no database query without knowledge:read", async () => {
     const db = database([]);
-    expect(await listKnowledge(db.client, [])).toEqual([]);
+    expect(await listKnowledge(db.client, [])).toEqual({ items: [], nextCursor: null });
     expect(await readKnowledge(db.client, "synthetic-guide", ["crm:read"])).toBeNull();
-    expect(await searchKnowledge(db.client, "warehouse", ["warehouses:read"])).toEqual([]);
+    expect(await searchKnowledge(db.client, "warehouse", ["warehouses:read"])).toEqual({ items: [], nextCursor: null });
     expect(db.query).not.toHaveBeenCalled();
   });
 
   it("defensively excludes draft and insufficiently scoped rows from every output", async () => {
     const rows = [page(), page({ id: "unpublished", status: "draft" }),
       page({ id: "restricted", scopes: ["knowledge:read", "crm:read"] })];
-    expect((await listKnowledge(collection(rows).client, scopes)).map(({ id }) => id)).toEqual(["synthetic-guide"]);
-    expect((await searchKnowledge(collection(rows.map(searchPage)).client, "warehouse", scopes)).map(({ id }) => id))
+    expect((await listKnowledge(collection(rows).client, scopes)).items.map(({ id }) => id)).toEqual(["synthetic-guide"]);
+    expect((await searchKnowledge(collection(rows.map(searchPage)).client, "warehouse", scopes)).items.map(({ id }) => id))
       .toEqual(["synthetic-guide"]);
     for (const row of rows.slice(1)) {
       expect(await readKnowledge(database([row]).client, row.id, scopes)).toBeNull();
@@ -113,12 +112,10 @@ describe("knowledge database validation and failure boundaries", () => {
       .rejects.toMatchObject(unavailable);
   });
 
-  it("rejects duplicate ids, mismatched reads, and more than 500 accessible reviewed pages", async () => {
+  it("rejects duplicate ids and mismatched reads", async () => {
     await expect(listKnowledge(collection([page(), page()]).client, scopes)).rejects.toMatchObject(unavailable);
     await expect(readKnowledge(database([page({ id: "wrong-page" })]).client, "synthetic-guide", scopes))
       .rejects.toMatchObject(unavailable);
-    await expect(listKnowledge(collection([], 501).client, scopes)).rejects.toMatchObject(unavailable);
-    await expect(searchKnowledge(collection([], 501).client, "warehouse", scopes)).rejects.toMatchObject(unavailable);
   });
 
   it("returns null for an absent page and exposes no driver error or local fallback", async () => {
@@ -130,35 +127,34 @@ describe("knowledge database validation and failure boundaries", () => {
     await expect(searchKnowledge(db.client, "warehouse", scopes)).rejects.toMatchObject(unavailable);
   });
 
-  it.each([
-    [], [{ page_count: -1, pages: [] }], [{ page_count: "1", pages: [] }],
-    [{ page_count: 0, pages: [page()] }], [{ page_count: 1, pages: null }],
-  ])("rejects malformed collection envelopes", async (...rows) => {
-    await expect(listKnowledge(database(rows).client, scopes)).rejects.toMatchObject(unavailable);
+  it("rejects oversized result pages", async () => {
+    await expect(listKnowledge(database(Array.from({ length: 12 }, (_, i) => page({ id: `page-${i}` }))).client, scopes))
+      .rejects.toMatchObject(unavailable);
   });
+
 });
 
 describe("bounded SQL knowledge search", () => {
   it("ranks title, summary, and body in SQL and returns only a compact plain-text snippet", async () => {
     const db = collection([searchPage({ snippet_source: "## Synthetic **warehouse** [guidance](https://example.invalid)." })]);
     const results = await searchKnowledge(db.client, "warehouse Warehouse", scopes, 3);
-    expect(results).toEqual([{
+    expect(results).toEqual({ items: [{
       id: "synthetic-guide", title: "Synthetic guide", summary: "Synthetic test summary", updatedAt: "2026-09-25",
       snippet: "Synthetic warehouse guidance.",
-    }]);
+    }], nextCursor: null });
     const [sql, parameters] = db.query.mock.calls[0];
     assertSqlAccess(sql);
     expect(sql).toContain("p.title ILIKE term.pattern ESCAPE '!' THEN 8");
     expect(sql).toContain("p.summary ILIKE term.pattern ESCAPE '!' THEN 4");
     expect(sql).toContain("p.body ILIKE term.pattern ESCAPE '!' THEN 1");
-    expect(sql).toContain("ORDER BY score DESC, id LIMIT $4");
+    expect(sql).toContain("ORDER BY score DESC, id COLLATE \"C\" LIMIT $4");
     expect(sql).toContain("substring(body FROM snippet_start FOR 320)");
-    expect(parameters).toEqual([scopes, ["warehouse"], ["%warehouse%"], 3]);
+    expect(parameters).toEqual([scopes, ["warehouse"], ["%warehouse%"], 4, null, null]);
   });
 
   it("adds omission markers while keeping snippets bounded", async () => {
     const db = collection([searchPage({ snippet_source: "warehouse ".repeat(32), snippet_before: true, snippet_after: true })]);
-    const [result] = await searchKnowledge(db.client, "warehouse", scopes);
+    const { items: [result] } = await searchKnowledge(db.client, "warehouse", scopes);
     expect(result.snippet.length).toBeLessThanOrEqual(242);
     expect(result.snippet.startsWith("…")).toBe(true);
     expect(result.snippet.endsWith("…")).toBe(true);
@@ -173,16 +169,49 @@ describe("bounded SQL knowledge search", () => {
     const [sql, parameters] = db.query.mock.calls[0];
     expect(sql).not.toContain(input);
     expect(sql).toContain("ESCAPE '!'");
-    expect(parameters).toEqual([scopes, ["warehouse", "or", "1"], ["%warehouse%", "%or%", "%1%"], 10]);
+    expect(parameters).toEqual([scopes, ["1", "or", "warehouse"], ["%1%", "%or%", "%warehouse%"], 11, null, null]);
   });
 
   it("skips empty searches and clamps result limits", async () => {
     const db = collection([]);
-    expect(await searchKnowledge(db.client, " %_ ", scopes)).toEqual([]);
+    expect(await searchKnowledge(db.client, " %_ ", scopes)).toEqual({ items: [], nextCursor: null });
     expect(db.query).not.toHaveBeenCalled();
     await searchKnowledge(db.client, "warehouse", scopes, 1000);
-    expect(db.query.mock.calls[0][1][3]).toBe(25);
+    expect(db.query.mock.calls[0][1][3]).toBe(26);
     await searchKnowledge(db.client, "warehouse", scopes, Number.NaN);
-    expect(db.query.mock.calls[1][1][3]).toBe(10);
+    expect(db.query.mock.calls[1][1][3]).toBe(11);
+  });
+});
+
+
+describe("knowledge pagination", () => {
+  it("continues a bounded index instead of imposing a 500-document collection limit", async () => {
+    const db = database([page({ id: 'guide-a' }), page({ id: 'guide-b' })]);
+    const first = await listKnowledge(db.client, scopes, 1);
+    expect(first.items.map(item => item.id)).toEqual(['guide-a']);
+    expect(first.nextCursor).toBeTypeOf('string');
+    db.query.mockResolvedValueOnce({ rows: [page({ id: 'guide-b' })] });
+    const next = await listKnowledge(db.client, scopes, 5, first.nextCursor!);
+    expect(next.items.map(item => item.id)).toEqual(['guide-b']);
+    expect(next.nextCursor).toBeNull();
+    expect(db.query.mock.calls[1][1]).toEqual([scopes, [], [], 6, 'guide-a', 0]);
+    expect(db.query.mock.calls[0][0]).not.toContain('LIMIT 501');
+  });
+
+  it("binds ranking cursors to normalized terms and permission scopes", async () => {
+    const db = database([searchPage({ id: 'guide-a' }), searchPage({ id: 'guide-b' })]);
+    const first = await searchKnowledge(db.client, 'warehouse', scopes, 1);
+    const changed = database([]);
+    await expect(searchKnowledge(changed.client, 'pricing', scopes, 1, first.nextCursor!)).rejects.toMatchObject({ code: 'INVALID_QUERY' });
+    await expect(searchKnowledge(changed.client, 'warehouse', [...scopes, 'crm:read'], 1, first.nextCursor!)).rejects.toMatchObject({ code: 'INVALID_QUERY' });
+    expect(changed.query).not.toHaveBeenCalled();
+    expect(await searchKnowledge(changed.client, 'WAREHOUSE warehouse', scopes, 4, first.nextCursor!)).toEqual({ items: [], nextCursor: null });
+    expect(changed.query.mock.calls[0][1]).toEqual([scopes, ['warehouse'], ['%warehouse%'], 5, 'guide-a', 8]);
+  });
+
+  it.each(['', 'plain-id', 'x'.repeat(1025), Buffer.from(JSON.stringify({ v: 1, id: '../secret', score: 0 })).toString('base64url')])('rejects malformed cursor %s before querying', async cursor => {
+    const db = database([]);
+    await expect(listKnowledge(db.client, scopes, 1, cursor)).rejects.toMatchObject({ code: 'INVALID_QUERY' });
+    expect(db.query).not.toHaveBeenCalled();
   });
 });

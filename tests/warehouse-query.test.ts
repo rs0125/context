@@ -23,7 +23,8 @@ describe('warehouse calendar queries and stable pagination', () => {
     expect(sql).toContain(`(w."createdAt" AT TIME ZONE 'UTC') >= $1::timestamptz`);
     expect(sql).toContain(`(w."createdAt" AT TIME ZONE 'UTC') < $2::timestamptz`);
     expect(values).toEqual(['2026-08-31T18:30:00.000Z', '2026-09-30T18:30:00.000Z', 2]);
-    expect(response.nextCursor).toBe('3');
+    expect(response.nextCursor).toBeTruthy();
+    expect(response.nextCursor).not.toBe('3');
     expect(response.query_context).toMatchObject({
       timezone: 'Asia/Kolkata', date_field: 'created', date_from: '2026-09-01', date_to: '2026-09-30',
       start_at: values[0], end_before: values[1], returned_count: 1, has_more: true, sort: 'id_asc',
@@ -84,10 +85,10 @@ describe('warehouse calendar queries and stable pagination', () => {
     expect(query.mock.calls[1][1]).toEqual([3, 2]);
   });
 
-  it('does not bind a relative date cursor to the changing request clock', async () => {
+  it.each(['id_asc', 'created_desc'])('binds the relative window, not the request clock, for %s', async sort => {
     vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-25T12:00:00Z'));
     const { client, query } = database([record(3), record(8)]);
-    const params = new URLSearchParams('period=this_month&sort=created_desc&limit=1');
+    const params = new URLSearchParams({ period: 'this_month', sort, limit: '1' });
     const first = await searchWarehouses(client, params);
     params.set('cursor', first.nextCursor!);
     vi.setSystemTime(new Date('2026-09-25T12:00:05Z'));

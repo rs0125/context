@@ -7,6 +7,9 @@ export const MCP_ACCESS_SECONDS = 15 * 60;
 export const MCP_REFRESH_SECONDS = 30 * 24 * 60 * 60;
 export const MCP_CODE_SECONDS = 5 * 60;
 export const MCP_CONSENT_SECONDS = 10 * 60;
+// An unconsented DCR registration need not live forever. Once any grant exists,
+// its client identity is retained so active and reconnecting clients still work.
+export const MCP_UNUSED_CLIENT_SECONDS = 30 * 60;
 export const OAUTH_SCHEMA = 'context_mcp_private';
 export const hashOAuth = (value: string) => createHash('sha256').update(value).digest('hex');
 export const randomOAuth = (prefix: string) => prefix + randomBytes(32).toString('base64url');
@@ -70,6 +73,7 @@ export function oauthHeaders(request?: Request) {
   }
   headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  headers.set('Access-Control-Expose-Headers', 'X-Request-ID, Retry-After');
   return headers;
 }
 export function oauthResponse(body: unknown, status = 200, request?: Request) { return Response.json(body, { status, headers: oauthHeaders(request) }); }

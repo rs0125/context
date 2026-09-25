@@ -42,7 +42,7 @@ const collectionSchema = {
       required: ["items", "nextCursor"],
       properties: {
         items: { type: "array", items: { type: "object", additionalProperties: true } },
-        nextCursor: { type: ["string", "integer", "null"] },
+        nextCursor: { type: ["string", "null"] },
       },
     },
   },
@@ -271,7 +271,7 @@ export function getOpenApiDocument() {
     openapi: "3.1.0",
     info: {
       title: "Wareongo Context API",
-      version: "0.2.0",
+      version: "0.3.0",
       description: "Read-only company knowledge, warehouse specifications, and permitted CRM opportunities. Employees see created or assigned leads; verified Twenty admins see all mirrored leads. Send an employee API key in the Authorization header. The service enforces employee permissions and field allowlists before returning data. Authenticated responses must not be cached. Free-text notes, contact details, and raw media are not exposed. Start with GET /context or GET /context.md.",
     },
     servers: [{ url: "/api/v1" }],
@@ -288,15 +288,18 @@ export function getOpenApiDocument() {
         get: {
           operationId: "getContext",
           tags: ["Context"],
-          summary: "Get the employee's context index",
-          description: "Returns allowed capabilities, the permitted knowledge index, and API entry points for this authenticated employee.",
+          summary: "Get employee capabilities and server clock",
+          description: "Returns capabilities, clock and discovery links without querying the knowledge source. knowledge_discovery.status=not_checked does not assert source health.",
           responses: jsonResponses("Context index for the authenticated employee.", false, {
             type: "object",
-            required: ["employee_id", "scopes", "knowledge", "read_only", "server_clock", "query_guidance", "api_specification", "context_markdown", "constraints"],
+            required: ["employee_id", "scopes", "knowledge_discovery", "read_only", "server_clock", "query_guidance", "api_specification", "context_markdown", "constraints"],
             properties: {
               employee_id: { type: "integer", description: "Internal employee identifier; no email or contact information is returned." },
               scopes: { type: "array", items: { type: "string", enum: ["knowledge:read", "warehouses:read", "crm:read"] } },
-              knowledge: { type: "array", items: { $ref: "#/components/schemas/KnowledgeSummary" } },
+              knowledge_discovery: { type: "object", required: ["permitted", "status", "index_path", "search_path"], properties: {
+                permitted: { type: "boolean" }, status: { type: "string", enum: ["not_checked", "not_permitted"] },
+                index_path: { type: "string", const: "/api/v1/wiki/pages" }, search_path: { type: "string", const: "/api/v1/wiki/search" },
+              } },
               read_only: { type: "boolean", const: true },
               server_clock: { $ref: "#/components/schemas/ServerClock" },
               query_guidance: { type: "string", description: "Examples and interpretation guidance for the current query tools." },
@@ -320,7 +323,7 @@ export function getOpenApiDocument() {
           operationId: "getContextMarkdown",
           tags: ["Context"],
           summary: "Read the Markdown bootstrap",
-          description: "Requires knowledge:read. A compact starting page for an HTTP-capable agent, including the permitted wiki index and API usage instructions.",
+          description: "Requires knowledge:read. A compact starting page for an HTTP-capable agent, including knowledge discovery links and API usage instructions; it does not query the wiki.",
           responses: {
             "200": { description: "Markdown bootstrap for the authenticated employee.", content: { "text/markdown": { schema: { type: "string" } } } },
             ...errorResponses,
@@ -335,11 +338,13 @@ export function getOpenApiDocument() {
           parameters: [
             { name: "q", in: "query", required: true, description: "Words to find in the knowledge library.", schema: { type: "string", minLength: 1, maxLength: 120 } },
             { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 10, default: 10 } },
+            { name: "cursor", in: "query", description: "Unchanged nextCursor from the same search.", schema: { type: "string", minLength: 1, maxLength: 1024 } },
           ],
           responses: jsonResponses("Matching permitted knowledge pages.", false, {
             type: "object",
-            required: ["items"],
+            required: ["items", "nextCursor"],
             properties: {
+              nextCursor: { type: ["string", "null"] },
               items: {
                 type: "array",
                 items: {
@@ -352,13 +357,23 @@ export function getOpenApiDocument() {
           }),
         },
       },
+      "/wiki/pages": {
+        get: {
+          operationId: "listKnowledge", tags: ["Knowledge"], summary: "Browse one page of permitted knowledge metadata",
+          parameters: [
+            { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 10, default: 10 } },
+            { name: "cursor", in: "query", description: "Unchanged nextCursor from the index.", schema: { type: "string", minLength: 1, maxLength: 1024 } },
+          ],
+          responses: jsonResponses("One index page; follow nextCursor for more. Concurrent page edits may change later pages.", true, knowledgeSummarySchema),
+        },
+      },
       "/wiki/pages/{id}": {
         get: {
           operationId: "readKnowledgePage",
           tags: ["Knowledge"],
           summary: "Read a permitted knowledge page",
           parameters: [
-            { name: "id", in: "path", required: true, description: "Page identifier from context discovery or knowledge search.", schema: { type: "string" } },
+            { name: "id", in: "path", required: true, description: "Page identifier from the knowledge index or knowledge search.", schema: { type: "string" } },
             { name: "format", in: "query", description: "Set markdown to receive the page as Markdown text.", schema: { type: "string", enum: ["markdown"] } },
           ],
           responses: {
@@ -378,7 +393,7 @@ export function getOpenApiDocument() {
           operationId: "searchWarehouses",
           tags: ["Warehouses"],
           summary: "Search warehouses using permitted filters",
-          description: "Returns visible warehouse candidates satisfying all supplied filters. Example: city=Bengaluru&docks_min=4&clear_height_min_ft=25. For records added this month use date_field=created&period=this_month. Calendar boundaries use Asia/Kolkata and inclusive date_from/date_to; inspect query_context. Date sorts use unchanged opaque nextCursor with identical filters; id_asc retains the legacy ID cursor. Results are not ranked by cheapest rate or suitability. Category values match exactly after trimming/case folding; Bangalore/Bengaluru and Gurgaon/Gurugram are city aliases. Area bounds match one total_space_sqft entry, not the sum. Default match_mode=permissive admits approximate values and overlapping ranges; explain verification_required and preserve field_evidence. strict excludes approximate/range constrained measurements; include_unknown=true independently admits missing numeric values and requires disclosure. Discover stored categories via /warehouses/filters and use /warehouses/summary for counts. Contacts, arbitrary text/SQL, addresses, notes and media are unavailable.",
+          description: "Returns visible warehouse candidates satisfying all supplied filters. Example: city=Bengaluru&docks_min=4&clear_height_min_ft=25. For records added this month use date_field=created&period=this_month. Calendar boundaries use Asia/Kolkata and inclusive date_from/date_to; inspect query_context. Every sort uses an opaque nextCursor bound to the filters, sort and resolved dates. Legacy cursors require restarting the search. Results are not ranked by cheapest rate or suitability. Category values match exactly after trimming/case folding; Bangalore/Bengaluru and Gurgaon/Gurugram are city aliases. Area bounds match one total_space_sqft entry, not the sum. Default match_mode=permissive admits approximate values and overlapping ranges; explain verification_required and preserve field_evidence. strict excludes approximate/range constrained measurements; include_unknown=true independently admits missing numeric values and requires disclosure. Discover stored categories via /warehouses/filters and use /warehouses/summary for counts. Contacts, arbitrary text/SQL, addresses, notes and media are unavailable.",
           parameters: WAREHOUSE_FILTER_CATALOG.map(({ name, description, ...schema }) => ({
             name, in: "query", description, schema,
           })),
@@ -435,7 +450,7 @@ export function getOpenApiDocument() {
             ...crmFilterParameters,
             { name: "sort", in: "query", description: "Stable ordering; date sorts use the ID as a tie-breaker and place missing dates last.", schema: { type: "string", enum: CRM_SORTS, default: "id_asc" } },
             limitParameter,
-            { name: "cursor", in: "query", description: "Unchanged nextCursor from the same filters and sort. id_asc accepts the legacy UUID cursor; other sorts use opaque cursors.", schema: { type: "string", minLength: 1, maxLength: 1024 } },
+            { name: "cursor", in: "query", description: "Unchanged opaque nextCursor from the same filters, sort and resolved dates. Restart without cursor if the query or relative date window changes.", schema: { type: "string", minLength: 1, maxLength: 1024 } },
           ],
           responses: jsonResponses("Permitted opportunities with resolved dates, pagination, access scope and mirror freshness.", true, { $ref: "#/components/schemas/Opportunity" }, { access_scope: accessScopeSchema, source_status: sourceStatusReference, query_context: { $ref: "#/components/schemas/QueryContext" } }),
         },

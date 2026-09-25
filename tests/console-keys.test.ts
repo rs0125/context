@@ -111,29 +111,45 @@ describe('database-backed business bearer keys', () => {
     await expect(resolvePrincipal({ query } as unknown as PoolClient, key!)).rejects.toMatchObject({ status: 403 });
   });
 
-  it('bounds all unknown-token lookups with one shared budget, while environment keys bypass it', async () => {
-    // Move beyond any preceding test's window without needing a production
-    // reset/export or allocating new limiter keys for each synthetic token.
+  it('keeps valid database keys usable after more than120 unrelated invalid credentials', async () => {
     const time = vi.spyOn(Date, 'now').mockReturnValue(now + 120_000);
     const lookup = vi.fn().mockResolvedValue(null);
     try {
-      for (let index = 0; index < 120; index += 1) {
-        const unknownToken = `wog_ctx_${Buffer.alloc(32, index).toString('base64url')}`;
+      for (let index = 0; index < 150; index += 1) {
+        const unknownToken = `wog_ctx_${Buffer.alloc(32, index + 10).toString('base64url')}`;
         await expect(authenticateRequestKey(request(unknownToken), lookup)).rejects.toMatchObject({ status: 401 });
       }
-      expect(lookup).toHaveBeenCalledTimes(120);
-      await expect(authenticateRequestKey(request(), lookup)).rejects.toMatchObject({ status: 429, code: 'RATE_LIMITED' });
-      expect(lookup).toHaveBeenCalledTimes(120);
+      expect(lookup).toHaveBeenCalledTimes(150);
+      lookup.mockResolvedValueOnce({ id, hash, employeeEmail: identity.email, scopes: identity.scopes, expiresAt: new Date(now + KEY_LIFETIME_MS).toISOString(), source: 'database', employeeId: 7 });
+      expect(await authenticateRequestKey(request(), lookup)).toMatchObject({ id, source: 'database' });
+      expect(lookup).toHaveBeenCalledTimes(151);
 
       vi.stubEnv('CONTEXT_API_KEYS_JSON', JSON.stringify([{ id: 'legacy-budget-bypass', hash, employeeEmail: identity.email,
         scopes: identity.scopes, expiresAt: new Date(now + KEY_LIFETIME_MS).toISOString() }]));
       expect(await authenticateRequestKey(request(), lookup)).toMatchObject({ id: 'legacy-budget-bypass' });
-      expect(lookup).toHaveBeenCalledTimes(120);
+      expect(lookup).toHaveBeenCalledTimes(151);
 
       vi.stubEnv('CONTEXT_API_KEYS_JSON', '[]');
       time.mockReturnValue(now + 180_000);
       await expect(authenticateRequestKey(request(), lookup)).rejects.toMatchObject({ status: 401 });
-      expect(lookup).toHaveBeenCalledTimes(121);
+      expect(lookup).toHaveBeenCalledTimes(152);
+    } finally { time.mockRestore(); }
+  });
+  it('stops repeated failed keys before lookup without poisoning valid keys or caching source failures', async () => {
+    const time = vi.spyOn(Date, 'now').mockReturnValue(now + 300_000);
+    const bad = `wog_ctx_${Buffer.alloc(32, 199).toString('base64url')}`;
+    const lookup = vi.fn().mockResolvedValue(null);
+    try {
+      for (let index = 0; index < 5; index++) await expect(authenticateRequestKey(request(bad), lookup)).rejects.toMatchObject({ status: 401 });
+      await expect(authenticateRequestKey(request(bad), lookup)).rejects.toMatchObject({ status: 429 });
+      expect(lookup).toHaveBeenCalledTimes(5);
+      lookup.mockRejectedValue(new Error('Synthetic unavailable database'));
+      for (let index = 0; index < 6; index++) await expect(authenticateRequestKey(request(), lookup)).rejects.toThrow('Synthetic unavailable database');
+      expect(lookup).toHaveBeenCalledTimes(11);
+      time.mockReturnValue(now + 360_000);
+      lookup.mockResolvedValue(null);
+      await expect(authenticateRequestKey(request(bad), lookup)).rejects.toMatchObject({ status: 401 });
+      expect(lookup).toHaveBeenCalledTimes(12);
     } finally { time.mockRestore(); }
   });
 });

@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 import { getWarehouse, getWarehouseFilterOptions, searchWarehouses } from '../src/lib/warehouse-data';
 import { WAREHOUSE_FILTER_CATALOG, WAREHOUSE_NUMERIC_FIELDS } from '../src/lib/warehouse-fields';
+import { buildPagination } from '../src/lib/query-pagination';
 
 function database(rows: Record<string, unknown>[] = []) {
   const query = vi.fn().mockResolvedValue({ rows });
@@ -65,7 +66,10 @@ describe('warehouse candidate evidence', () => {
 describe('warehouse query boundary', () => {
   it('uses possible interval overlap and keeps categorical filters, visibility and pagination conjunctive', async () => {
     const { client, query } = database();
-    await searchWarehouses(client, new URLSearchParams({ city: 'Bangalore', micromarket: "King's Road", docks_min: '4', docks_max: '6', verified: 'true', fire_noc: 'unknown', lift_access: 'false', cursor: '12' }));
+    const parameters = new URLSearchParams({ city: 'Bangalore', micromarket: "King's Road", docks_min: '4', docks_max: '6', verified: 'true', fire_noc: 'unknown', lift_access: 'false' });
+    const cursor = buildPagination(parameters, { idColumn: 'w.id', idType: 'integer', sortColumns: {}, filterContext: { start_at: null, end_before: null } }, () => '$unused').cursorFor({ id: 12 });
+    parameters.set('cursor', cursor);
+    await searchWarehouses(client, parameters);
     const [sql, values] = query.mock.calls[0];
     const where = sql.slice(sql.indexOf('WHERE w.visibility'));
     expect(where).toContain('w.visibility IS TRUE');

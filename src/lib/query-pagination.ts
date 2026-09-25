@@ -4,8 +4,13 @@ import { HttpError } from './errors';
 type Config = { idColumn: string; idType: 'integer' | 'uuid'; sortColumns: Record<string, string>; defaultSort?: string; filterContext?: unknown };
 function invalid(message: string): never { throw new HttpError(400, 'INVALID_QUERY', message); }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CURSOR_VERSION = 2;
+type Cursor = { v: number; sort: string; id: string | number; date: string | null; filter: string };
 function validId(value: unknown, type: Config['idType']) {
-  return type === 'integer' ? /^[1-9]\d{0,9}$/.test(String(value)) && Number(value) <= 2147483647 : typeof value === 'string' && UUID.test(value);
+  return type === 'integer'
+    ? ((typeof value === 'number' && Number.isSafeInteger(value)) || (typeof value === 'string' && /^[1-9]\d{0,9}$/.test(value)))
+      && Number(value) >= 1 && Number(value) <= 2147483647
+    : typeof value === 'string' && UUID.test(value);
 }
 function iso(value: unknown): string | null {
   if (value == null) return null;
@@ -15,32 +20,55 @@ function iso(value: unknown): string | null {
   return date.toISOString();
 }
 
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value)
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([key, item]) => [key, canonical(item)]));
+  return value;
+}
+
 /** Keysets are data bounds, never authority. IDs stay subject to the read scope.
- * New sort cursors bind filters/date windows to catch accidental cross-search reuse.
+ * Every emitted cursor binds the collection, sort, normalized query and resolved
+ * date windows. Page size may change. Domain-specific aliases/defaults are not
+ * guessed here: callers must keep filter values unchanged. Bare record IDs and
+ * v1 cursors require a restart; accepting them would lose these guarantees.
  */
 export function buildPagination(query: URLSearchParams, config: Config, bind: (value: unknown) => string) {
   const sort = query.get('sort') ?? config.defaultSort ?? 'id_asc';
   if (sort !== 'id_asc' && !Object.hasOwn(config.sortColumns, sort)) invalid(`sort must be ${['id_asc', ...Object.keys(config.sortColumns)].join(', ')}.`);
   const sortColumn = sort === 'id_asc' ? null : config.sortColumns[sort];
   const direction = sort.endsWith('_desc') ? 'DESC' : 'ASC';
-  const entries = [...query.entries()].filter(([key]) => !['cursor', 'limit', 'sort'].includes(key)).sort(([a], [b]) => a.localeCompare(b));
-  const fingerprint = createHash('sha256').update(JSON.stringify([entries, config.filterContext ?? null])).digest('hex').slice(0, 24);
+  const seen = new Set<string>();
+  const filters: Record<string, string> = Object.create(null);
+  for (const [key, value] of query) {
+    if (seen.has(key)) invalid(`Duplicate query parameter: ${key}`);
+    seen.add(key);
+    if (!['cursor', 'limit', 'sort'].includes(key)) filters[key] = value.trim();
+  }
+  const fingerprint = createHash('sha256').update(JSON.stringify(canonical({
+    collection: config.idColumn, id_type: config.idType, sort,
+    filters, resolved: config.filterContext ?? null,
+  }))).digest('hex').slice(0, 24);
   const raw = query.get('cursor');
   const where: string[] = [];
   if (raw !== null) {
-    if (sortColumn === null) {
-      if (!validId(raw, config.idType)) invalid('Use the nextCursor from this search. ID order requires a valid record ID.');
-      where.push(`${config.idColumn} > ${bind(config.idType === 'integer' ? Number(raw) : raw.toLowerCase())}`);
-    } else {
-      let cursor: { v: number; sort: string; id: string | number; date: string | null; filter: string };
-      try {
-        if (raw.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(raw)) throw new Error();
-        cursor = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
-        if (!cursor || cursor.v !== 1 || cursor.sort !== sort || cursor.filter !== fingerprint || !validId(cursor.id, config.idType)
-          || !Object.hasOwn(cursor, 'date') || (cursor.date !== null && typeof cursor.date !== 'string')) throw new Error();
-      } catch { invalid('Cursor does not match this search. Keep the same filters and sort, or restart without cursor.'); }
-      const date = iso(cursor.date);
-      const id = bind(config.idType === 'integer' ? Number(cursor.id) : String(cursor.id).toLowerCase());
+    if (/^[0-9]+$/.test(raw) || UUID.test(raw)) invalid('Legacy record-ID cursors are no longer supported. Restart the search without a cursor.');
+    let cursor: Cursor;
+    try {
+      if (raw.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(raw)) throw new Error();
+      const decoded = Buffer.from(raw, 'base64url');
+      if (decoded.toString('base64url') !== raw) throw new Error();
+      cursor = JSON.parse(decoded.toString('utf8'));
+      if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor) || Object.keys(cursor).length !== 5
+        || cursor.v !== CURSOR_VERSION || cursor.sort !== sort || cursor.filter !== fingerprint || !validId(cursor.id, config.idType)
+        || (config.idType === 'integer' && typeof cursor.id !== 'number') || !Object.hasOwn(cursor, 'date')
+        || (cursor.date !== null && typeof cursor.date !== 'string') || (!sortColumn && cursor.date !== null)) throw new Error();
+    } catch { invalid('Cursor does not match this search or is no longer supported. Keep the same filters and sort, or restart without a cursor.'); }
+    const date = iso(cursor.date);
+    if (date !== cursor.date) invalid('Invalid date cursor. Restart the search without a cursor.');
+    const id = bind(config.idType === 'integer' ? Number(cursor.id) : String(cursor.id).toLowerCase());
+    if (sortColumn === null) where.push(`${config.idColumn} > ${id}`);
+    else {
       if (date === null) where.push(`(${sortColumn} IS NULL AND ${config.idColumn} > ${id})`);
       else {
         const dateParam = `${bind(date)}::timestamptz`;
@@ -53,7 +81,10 @@ export function buildPagination(query: URLSearchParams, config: Config, bind: (v
     orderBy: sortColumn ? `${sortColumn} ${direction} NULLS LAST, ${config.idColumn} ASC` : `${config.idColumn} ASC`,
     cursorFor(row: { id: string | number; sort_value?: unknown }) {
       if (!validId(row.id, config.idType)) invalid('Invalid source identifier.');
-      return sortColumn === null ? String(row.id) : Buffer.from(JSON.stringify({ v: 1, sort, id: row.id, date: iso(row.sort_value), filter: fingerprint })).toString('base64url');
+      return Buffer.from(JSON.stringify({ v: CURSOR_VERSION, sort,
+        id: config.idType === 'integer' ? Number(row.id) : String(row.id).toLowerCase(),
+        date: sortColumn ? iso(row.sort_value) : null, filter: fingerprint,
+      })).toString('base64url');
     },
   };
 }

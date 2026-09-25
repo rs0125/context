@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { authenticateMcpRequest, handleMcpOAuthRequest, revalidateMcpGrant, type McpOAuthDependencies } from '../src/lib/mcp-oauth';
 import { authorizationServerMetadata, createConsent, hashOAuth, parseAuthorization, protectedResourceMetadata, readConsent, validateRedirect } from '../src/lib/mcp-oauth-protocol';
 import type { KeyRegistration } from '../src/lib/auth';
+import { createAnonymousLimiter } from '../src/lib/rate-limit';
+import { HttpError } from '../src/lib/errors';
 
 const origin = 'https://context.example.test';
 const resource = `${origin}/mcp`;
@@ -39,14 +41,24 @@ function database() {
       }
       return { rows: dbKeys.has(values[0]) ? [dbKeys.get(values[0])] : [] };
     }
+    if (sql.startsWith('DELETE FROM context_mcp_private.oauth_clients')) {
+      let removed = 0;
+      for (const [id, row] of state.clients) if (Date.parse(row.created_at) <= Date.now() - values[0] * 1000
+        && ![...state.grants.values()].some(grant => grant.client_id === id) && removed < 2000) { state.clients.delete(id); removed++; }
+      return { rows: [], rowCount: removed };
+    }
     if (sql.startsWith('SELECT count(*)')) {
       const rows = sql.includes('oauth_clients') ? state.clients : sql.includes('oauth_grants') ? state.grants : state.tokens;
-      return { rows: [{ count: [...rows.values()].filter(row => !values.length || row.grant_id === values[0]).length }] };
+      return { rows: [{ count: [...rows.values()].filter(row => (!values.length || row.grant_id === values[0])
+        && (!sql.includes('WHERE NOT EXISTS') || ![...state.grants.values()].some(grant => grant.client_id === row.id))).length }] };
     }
-    if (sql.startsWith('SELECT id, name')) return { rows: state.clients.has(values[0]) ? [state.clients.get(values[0])] : [] };
+    if (sql.startsWith('SELECT id, name')) {
+      const row = state.clients.get(values[0]);
+      return { rows: row && (Date.parse(row.created_at) > Date.now() - values[1] * 1000 || [...state.grants.values()].some(grant => grant.client_id === row.id)) ? [row] : [] };
+    }
     if (sql.startsWith('INSERT INTO context_mcp_private.oauth_clients')) {
       const [id, name, redirect_uris, scopes] = values;
-      state.clients.set(id, { id, name, redirect_uris, scopes }); return { rows: [] };
+      state.clients.set(id, { id, name, redirect_uris, scopes, created_at: new Date().toISOString() }); return { rows: [] };
     }
     if (sql.startsWith('INSERT INTO context_mcp_private.oauth_grants')) {
       const [id, client_id, key_id, key_hash, key_source, employee_id, employee_email, scopes, resource, expires_at, consent_hash] = values;
@@ -70,7 +82,7 @@ function database() {
         if (grant?.client_id !== values[1]) grant = undefined;
       }
       if (grant) { if (sql.includes('SET scopes')) grant.scopes = values[1]; else grant.revoked_at = new Date(); }
-      return { rows: [] };
+      return { rows: grant && sql.includes('RETURNING g.id') ? [{ id: grant.id, key_id: grant.key_id }] : [] };
     }
     if (sql.startsWith('UPDATE context_mcp_private.oauth_codes')) { const row = state.codes.get(values[0]); if (row) row.used_at = new Date(); return { rows: [] }; }
     if (sql.startsWith('UPDATE context_mcp_private.oauth_tokens')) { const row = state.tokens.get(values[0]); if (row) row.used_at = new Date(); return { rows: [] }; }
@@ -101,7 +113,9 @@ function database() {
     try { const result = await work(client); commits(); return result; }
     catch (error) { state = snapshot; rollbacks(); throw error; }
   };
-  const deps: McpOAuthDependencies = { readTransaction: transaction, writeTransaction: transaction, limit: vi.fn() };
+  const failures = createAnonymousLimiter();
+  const deps: McpOAuthDependencies = { readTransaction: transaction, writeTransaction: transaction, limit: vi.fn(), anonymousLimit: vi.fn(),
+    checkFailed: (namespace, credential) => failures.check(namespace, credential, 5), noteFailed: (namespace, credential) => failures.record(namespace, credential), audit: vi.fn() };
   return { deps, query, client, roster, dbKeys, commits, rollbacks, state: () => state };
 }
 function jsonRequest(path: string, body: unknown, headers: Record<string, string> = {}) {
@@ -141,6 +155,100 @@ async function refresh(db: ReturnType<typeof database>, clientId: string, token:
   return handleMcpOAuthRequest(tokenRequest({ grant_type: 'refresh_token', client_id: clientId, refresh_token: token, resource, ...extra }), 'token', db.deps);
 }
 const accessRequest = (token: string) => new Request(resource, { headers: { Authorization: `Bearer ${token}` } });
+
+describe('OAuth availability and lifecycle audit', () => {
+  it('does not let unrelated invalid tokens consume the authenticated quota, including shared client egress', async () => {
+    const db = database(); const auth = await authorized(db); const issued = await (await exchange(db, auth)).json();
+    vi.mocked(db.deps.limit).mockClear();
+    for (let index = 0; index < 150; index++) {
+      const bogus = `wog_mcp_at_${Buffer.alloc(32, index).toString('base64url')}`;
+      const request = new Request(resource, { headers: { Authorization: `Bearer ${bogus}`, 'x-vercel-forwarded-for': '203.0.113.8' } });
+      await expect(authenticateMcpRequest(request, db.deps)).rejects.toMatchObject({ status: 401 });
+    }
+    expect(db.deps.limit).not.toHaveBeenCalled();
+    const valid = new Request(resource, { headers: { Authorization: `Bearer ${issued.access_token}`, 'x-vercel-forwarded-for': '203.0.113.8' } });
+    expect(await authenticateMcpRequest(valid, db.deps)).toMatchObject({ id: key.id });
+    expect(db.deps.limit).toHaveBeenCalledExactlyOnceWith(`access:${key.id}`, 120);
+  });
+  it('rejects repeated proven bad tokens before DB work and never caches source outages as bad credentials', async () => {
+    const db = database(), invalid = `wog_mcp_at_${Buffer.alloc(32, 211).toString('base64url')}`;
+    for (let i = 0; i < 5; i++) await expect(authenticateMcpRequest(accessRequest(invalid), db.deps)).rejects.toMatchObject({ status: 401 });
+    const before = db.query.mock.calls.length;
+    await expect(authenticateMcpRequest(accessRequest(invalid), db.deps)).rejects.toMatchObject({ status: 429 });
+    expect(db.query).toHaveBeenCalledTimes(before);
+    const unavailable = database();
+    unavailable.deps.readTransaction = vi.fn(async () => { throw new HttpError(503, 'SOURCE_UNAVAILABLE', 'Synthetic outage'); });
+    for (let i = 0; i < 7; i++) await expect(authenticateMcpRequest(accessRequest(invalid), unavailable.deps)).rejects.toMatchObject({ status: 503 });
+    expect(unavailable.deps.readTransaction).toHaveBeenCalledTimes(7);
+  });
+  it('does not let failed PKCE proofs block the valid proof for the same code', async () => {
+    const db = database(); const auth = await authorized(db);
+    for (let i = 0; i < 5; i++) expect((await exchange(db, auth, { code_verifier: 'b'.repeat(64) })).status).toBe(400);
+    expect((await exchange(db, auth, { code_verifier: 'b'.repeat(64) })).status).toBe(429);
+    expect((await exchange(db, auth)).status).toBe(200);
+  });
+  it('recovers pending registration capacity while preserving old clients and all issued grants/tokens', async () => {
+    const db = database(); const auth = await authorized(db); const issued = await (await exchange(db, auth)).json();
+    const old = new Date(Date.now() - 31 * 60_000).toISOString();
+    db.state().clients.get(auth.client.client_id)!.created_at = old;
+    for (let index = 0; index < 2000; index++) {
+      const id = `wog_client_${String(index).padStart(43, '0')}`;
+      db.state().clients.set(id, { id, name: 'Unused synthetic client', redirect_uris: [redirect], scopes: key.scopes, created_at: old });
+    }
+    const newClient = await registered(db);
+    expect(db.state().clients.size).toBe(2);
+    expect(db.state().clients.has(auth.client.client_id)).toBe(true);
+    expect(db.state().clients.has(newClient.client_id)).toBe(true);
+    expect(db.state().grants.size).toBe(1);
+    expect(db.state().tokens.size).toBe(2);
+    expect(await authenticateMcpRequest(accessRequest(issued.access_token), db.deps)).toMatchObject({ id: key.id });
+    expect(db.deps.audit).toHaveBeenCalledWith(expect.objectContaining({ action: 'register', expiredUnusedRemoved: 2000 }));
+    const cleanup = db.query.mock.calls.find(([sql]) => sql.startsWith('DELETE FROM context_mcp_private.oauth_clients'))!;
+    expect(cleanup[0]).toContain('NOT EXISTS');
+    expect(cleanup[0]).toContain('LIMIT 2000');
+    expect(cleanup[1]).toEqual([1800]);
+  });
+  it('expires never-used client identities and generates new IDs for identical anonymous metadata', async () => {
+    const db = database(); const first = await consent(db); const second = await registered(db);
+    expect(second.client_id).not.toBe(first.client.client_id);
+    db.state().clients.get(first.client.client_id)!.created_at = new Date(Date.now() - 31 * 60_000).toISOString();
+    const response = await handleMcpOAuthRequest(new Request(`${origin}/api/oauth/authorize?${first.params}`), 'authorize', db.deps);
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.code).toBe('invalid_client');
+  });
+  it('bounds fresh pending registrations but does not count used client identities against that cap', async () => {
+    const db = database();
+    for (let index = 0; index < 2000; index++) {
+      const id = `wog_client_${String(index).padStart(43, '0')}`;
+      db.state().clients.set(id, { id, name: 'Pending', redirect_uris: [redirect], scopes: key.scopes, created_at: new Date().toISOString() });
+    }
+    const response = await handleMcpOAuthRequest(jsonRequest('/oauth/register', { redirect_uris: [redirect] }), 'register', db.deps);
+    expect(response.status).toBe(503);
+    // A granted identity is retained indefinitely and frees a pending slot.
+    const first = db.state().clients.keys().next().value!;
+    db.state().grants.set('synthetic-existing-grant', { client_id: first });
+    expect((await registered(db)).client_id).toBeTruthy();
+    expect(db.state().clients.size).toBe(2001);
+  });
+  it('logs committed replay revocation and lifecycle outcomes without credentials, state, IPs, or employee data', async () => {
+    const db = database(); const auth = await authorized(db); const issued = await (await exchange(db, auth)).json();
+    const rotated = await (await refresh(db, auth.client.client_id, issued.refresh_token)).json();
+    expect((await refresh(db, auth.client.client_id, issued.refresh_token)).status).toBe(400);
+    const events = vi.mocked(db.deps.audit).mock.calls.map(([entry]) => entry);
+    expect(events).toContainEqual(expect.objectContaining({ action: 'token', outcome: 'replay_revoked', reason: 'refresh_replay' }));
+    const replayIndex = events.findIndex(entry => entry.outcome === 'replay_revoked');
+    expect(vi.mocked(db.deps.audit).mock.invocationCallOrder[replayIndex]).toBeGreaterThan(db.commits.mock.invocationCallOrder.at(-1)!);
+    const serialized = JSON.stringify(events);
+    for (const secret of [apiKey, auth.code, auth.preview.requestHandle, auth.cookie, verifier, issued.access_token, issued.refresh_token, rotated.refresh_token, key.employeeEmail, key.id, 'client-secret-state']) expect(serialized).not.toContain(secret);
+    expect(events.some(entry => typeof entry.requestId === 'string')).toBe(true);
+  });
+  it('does not roll back token issuance if the audit sink fails', async () => {
+    const db = database(); const auth = await authorized(db);
+    db.deps.audit = () => { throw new Error('Synthetic unavailable logger'); };
+    expect((await exchange(db, auth)).status).toBe(200);
+    expect(db.state().tokens.size).toBe(2);
+  });
+});
 
 describe('MCP OAuth protocol and consent boundaries', () => {
   it('publishes one canonical resource, public DCR, S256 and code/refresh metadata', () => {

@@ -168,7 +168,7 @@ export function validateCrmQuery(query: URLSearchParams, mode: 'search' | 'summa
   const cursor = query.get('cursor');
   const sort = query.get('sort') ?? 'id_asc';
   if (!(CRM_SORTS as readonly string[]).includes(sort)) invalid(`sort must be ${CRM_SORTS.join(', ')}`);
-  if (cursor !== null && (sort === 'id_asc' ? !UUID.test(cursor) : cursor.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(cursor))) invalid('Use nextCursor from the same CRM search and sort.');
+  if (cursor !== null && (cursor.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(cursor))) invalid('Use nextCursor from the same CRM search and sort, or restart without a cursor.');
   const limit = integerParameter(query, 'limit', 25, 10)!;
   const q = textParameter(query, 'q');
   if (q && sanitizeLabel(q, 80) !== q) invalid('q must be a lead or company name, without contacts.');

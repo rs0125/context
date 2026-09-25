@@ -30,6 +30,34 @@ function harness(options: { scopes?: KeyRegistration['scopes']; roster?: unknown
 const request = (path: string, init?: RequestInit) => new Request(`https://context.example.com/api/v1/${path}`, init);
 
 describe('REST access boundary', () => {
+  it.each(['context', 'context.md'])('keeps %s available independently of a failed knowledge source', async route => {
+    const deps = harness();
+    const original = deps.query.getMockImplementation()!;
+    deps.query.mockImplementation(async sql => {
+      if (sql.includes('knowledge_pages')) throw new Error('synthetic knowledge outage');
+      return original(sql);
+    });
+    const result = await handleApiRequest(request(route), [route], deps);
+    expect(result.status).toBe(200);
+    expect(deps.query.mock.calls.every(([sql]) => !sql.includes('knowledge_pages'))).toBe(true);
+    if (route === 'context') {
+      const data = (await result.json()).data;
+      expect(data).not.toHaveProperty('knowledge');
+      expect(data.knowledge_discovery).toMatchObject({ permitted: true, status: 'not_checked' });
+      expect(data.server_clock).toHaveProperty('local_date');
+    }
+  });
+  it('paginates knowledge independently and applies scope before querying pages', async () => {
+    const deps = harness();
+    deps.query.mockImplementation(async sql => sql.includes('VerifiedNumber') ? { rows: [active] } : { rows: [] });
+    const result = await handleApiRequest(request('wiki/pages?limit=2'), ['wiki', 'pages'], deps);
+    expect(result.status).toBe(200);
+    expect((await result.json()).data).toEqual({ items: [], nextCursor: null });
+    const denied = harness({ scopes: ['warehouses:read'] });
+    expect((await handleApiRequest(request('wiki/pages'), ['wiki', 'pages'], denied)).status).toBe(403);
+    expect(denied.query.mock.calls.every(([sql]) => !sql.includes('knowledge_pages'))).toBe(true);
+    expect((await handleApiRequest(request('wiki/pages?cursor=old-id'), ['wiki', 'pages'], harness())).status).toBe(400);
+  });
   it.each(['crm/summary', 'crm/filters'])('applies current identity, view and source freshness to %s', async route => {
     const deps = harness();
     const result = await handleApiRequest(request(`${route}?view=created`), route.split('/'), deps);
@@ -147,6 +175,7 @@ describe('REST access boundary', () => {
     expect(deps.query).toHaveBeenLastCalledWith(expect.stringContaining('ANY('), expect.arrayContaining([id, []]));
     expect(deps.transactionMock).toHaveBeenCalledTimes(2);
     expect(deps.liveCrmAccess).toHaveBeenCalledOnce();
+    expect(deps.liveCrmAccess).toHaveBeenCalledWith(expect.objectContaining({ employeeId: 7 }), 'accessible', id);
   });
   it('refuses CRM reads when live assignment verification fails', async () => {
     const deps = harness();

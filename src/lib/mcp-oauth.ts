@@ -4,26 +4,47 @@ import { authenticateRequestKey, findDatabaseKey, parseKeyRegistry, resolvePrinc
 import { consoleOrigin, requireConsoleOrigin } from './console-auth';
 import { withConsoleWriteTransaction, withReadOnlyTransaction } from './db';
 import { HttpError } from './errors';
-import { rateLimit } from './rate-limit';
+import { anonymousRequestLimit, checkFailedCredential, noteFailedCredential, rateLimit } from './rate-limit';
 import { boundedOAuthBody, consentCookie, createConsent, hashOAuth, MCP_ACCESS_SECONDS, MCP_CODE_SECONDS, MCP_REFRESH_SECONDS, mcpResource,
   OAuthError, oauthErrorResponse, oauthFail, oauthHeaders, oauthResponse, oauthScopes, parameters, parseAuthorization, randomOAuth, readConsent,
-  requireMcpEnabled, validateRedirect, type AuthorizationRequest } from './mcp-oauth-protocol';
+  requireMcpEnabled, validateRedirect, MCP_UNUSED_CLIENT_SECONDS, type AuthorizationRequest } from './mcp-oauth-protocol';
 export { authorizationServerMetadata, protectedResourceMetadata } from './mcp-oauth-protocol';
 
 type Transaction = <T>(work: (client: PoolClient) => Promise<T>) => Promise<T>;
-export type McpOAuthDependencies = { readTransaction: Transaction; writeTransaction: Transaction; limit: (name: string, maximum: number) => void };
+export type McpOAuthDependencies = {
+  readTransaction: Transaction; writeTransaction: Transaction; limit: (name: string, maximum: number) => void;
+  anonymousLimit: typeof anonymousRequestLimit; checkFailed: typeof checkFailedCredential; noteFailed: typeof noteFailedCredential;
+  audit: (entry: Record<string, unknown>) => void;
+};
 type Client = { id: string; name: string; redirect_uris: string[]; scopes: Scope[] };
 type Grant = { id: string; client_id: string; key_id: string; key_hash: string; key_source: 'environment' | 'database'; employee_id: number;
   employee_email: string; scopes: Scope[]; resource: string; expires_at: Date | string; revoked_at: Date | string | null };
 type McpKey = KeyRegistration & { mcpGrantId: string; mcpAccessHash: string };
 const grantColumns = 'g.id, g.client_id, g.key_id, g.key_hash, g.key_source, g.employee_id, g.employee_email, g.scopes, g.resource, g.expires_at, g.revoked_at';
 const defaults: McpOAuthDependencies = { readTransaction: withReadOnlyTransaction, writeTransaction: withConsoleWriteTransaction,
-  limit: (name, maximum) => rateLimit(`mcp-oauth:${name}`, Date.now(), maximum) };
+  limit: (name, maximum) => rateLimit(`mcp-oauth:${name}`, Date.now(), maximum), anonymousLimit: anonymousRequestLimit,
+  checkFailed: checkFailedCredential, noteFailed: noteFailedCredential, audit: entry => console.info(JSON.stringify(entry)) };
 const milliseconds = (date: Date | string) => date instanceof Date ? date.getTime() : Date.parse(date);
+const auditRef = (value: string) => hashOAuth(value).slice(0, 16);
+function audit(deps: McpOAuthDependencies, entry: Record<string, unknown>) {
+  // Observability must never roll back a successful token rotation/revocation.
+  try { deps.audit({ event: 'mcp_oauth', ...entry }); } catch { /* Logging is best effort. */ }
+}
+function credentialFailure(error: unknown) {
+  return error instanceof OAuthError && ['invalid_grant', 'invalid_client'].includes(error.error)
+    || error instanceof HttpError && [401, 403].includes(error.status);
+}
+async function checkedCredential<T>(deps: McpOAuthDependencies, namespace: string, credential: string, work: () => Promise<T>) {
+  deps.checkFailed(namespace, credential);
+  try { return await work(); }
+  catch (error) { if (credentialFailure(error)) deps.noteFailed(namespace, credential); throw error; }
+}
 
 async function registeredClient(client: PoolClient, id: string): Promise<Client> {
   if (!/^wog_client_[A-Za-z0-9_-]{43}$/.test(id)) oauthFail('invalid_client', 'The connector client is not registered.', 401);
-  const result = await client.query<Client>('SELECT id, name, redirect_uris, scopes FROM context_mcp_private.oauth_clients WHERE id = $1', [id]);
+  const result = await client.query<Client>(`SELECT id, name, redirect_uris, scopes FROM context_mcp_private.oauth_clients c
+    WHERE c.id = $1 AND (c.created_at > CURRENT_TIMESTAMP - ($2::integer * interval '1 second')
+      OR EXISTS (SELECT 1 FROM context_mcp_private.oauth_grants g WHERE g.client_id = c.id))`, [id, MCP_UNUSED_CLIENT_SECONDS]);
   if (result.rows.length !== 1) oauthFail('invalid_client', 'The connector client is not registered.', 401);
   return result.rows[0];
 }
@@ -66,13 +87,13 @@ export async function revalidateMcpGrant(client: PoolClient, key: KeyRegistratio
 }
 
 export async function authenticateMcpRequest(request: Request, dependencies: Partial<McpOAuthDependencies> = {}): Promise<KeyRegistration> {
-  requireMcpEnabled();
-  const token = /^Bearer (wog_mcp_at_[A-Za-z0-9_-]{43})$/.exec(request.headers.get('authorization') ?? '')?.[1];
-  if (!token) throw new HttpError(401, 'UNAUTHORIZED', 'Connect with employee authorization.');
   const deps = { ...defaults, ...dependencies };
-  deps.limit('access', 120);
+  const requestId = randomUUID();
   try {
-    return await deps.readTransaction(async client => {
+    requireMcpEnabled();
+    const token = /^Bearer (wog_mcp_at_[A-Za-z0-9_-]{43})$/.exec(request.headers.get('authorization') ?? '')?.[1];
+    if (!token) throw new HttpError(401, 'UNAUTHORIZED', 'Connect with employee authorization.');
+    const key = await checkedCredential(deps, 'access', token, () => deps.readTransaction(async client => {
       const hash = hashOAuth(token);
       const result = await client.query<Grant>(`SELECT ${grantColumns} FROM context_mcp_private.oauth_tokens t
         JOIN context_mcp_private.oauth_grants g ON g.id = t.grant_id
@@ -82,8 +103,15 @@ export async function authenticateMcpRequest(request: Request, dependencies: Par
       const grant = result.rows[0];
       const key = await currentGrantKey(client, grant);
       return { ...key, mcpGrantId: grant.id, mcpAccessHash: hash } as McpKey;
-    });
+    }));
+    // Invalid tokens never consume this authenticated employee's quota, even
+    // when Claude or another client sends many employees through one egress IP.
+    deps.limit(`access:${key.id}`, 120);
+    audit(deps, { action: 'access', outcome: 'allowed', status: 200, requestId, keyRef: auditRef(key.id), grantId: key.mcpGrantId });
+    return key;
   } catch (error) {
+    audit(deps, { action: 'access', outcome: 'denied', status: error instanceof HttpError ? error.status : error instanceof OAuthError ? 401 : 503,
+      reason: error instanceof HttpError ? error.code : error instanceof OAuthError ? error.error : 'source_unavailable', requestId });
     if (error instanceof OAuthError || error instanceof HttpError && [401, 403].includes(error.status)) {
       throw new HttpError(401, 'UNAUTHORIZED', 'Reconnect the connector to authorize this request.');
     }
@@ -92,7 +120,7 @@ export async function authenticateMcpRequest(request: Request, dependencies: Par
 }
 
 async function register(request: Request, deps: McpOAuthDependencies) {
-  deps.limit('register', 10);
+  deps.anonymousLimit(request, 'register', 10);
   const body = await boundedOAuthBody(request, true) as Record<string, unknown>;
   if (!Array.isArray(body.redirect_uris) || body.redirect_uris.length < 1 || body.redirect_uris.length > 5) oauthFail('invalid_client_metadata', 'Register one to five trusted callback URLs.');
   const redirects = body.redirect_uris.map(validateRedirect);
@@ -105,13 +133,23 @@ async function register(request: Request, deps: McpOAuthDependencies) {
   if (body.response_types !== undefined && (!Array.isArray(body.response_types) || body.response_types.length !== 1 || body.response_types[0] !== 'code')) oauthFail('invalid_client_metadata', 'Only code responses are supported.');
   const scopes = oauthScopes(body.scope);
   const id = randomOAuth('wog_client_');
-  await deps.writeTransaction(async client => {
+  const removed = await deps.writeTransaction(async client => {
     const lock = (await client.query('SELECT pg_try_advisory_xact_lock(1784056941, 1802406255) AS locked')).rows[0];
     if (!lock?.locked) oauthFail('temporarily_unavailable', 'Retry connector registration shortly.', 503);
-    const count = (await client.query('SELECT count(*)::integer AS count FROM context_mcp_private.oauth_clients')).rows[0]?.count;
+    // Foreign-key protection also prevents deleting a client if a concurrent
+    // authorization inserts a grant. This never deletes grants or issued tokens.
+    const pruned = await client.query(`DELETE FROM context_mcp_private.oauth_clients c
+      WHERE c.id IN (SELECT stale.id FROM context_mcp_private.oauth_clients stale
+        WHERE stale.created_at <= CURRENT_TIMESTAMP - ($1::integer * interval '1 second')
+          AND NOT EXISTS (SELECT 1 FROM context_mcp_private.oauth_grants g WHERE g.client_id = stale.id)
+        ORDER BY stale.created_at, stale.id LIMIT 2000)`, [MCP_UNUSED_CLIENT_SECONDS]);
+    const count = (await client.query(`SELECT count(*)::integer AS count FROM context_mcp_private.oauth_clients c
+      WHERE NOT EXISTS (SELECT 1 FROM context_mcp_private.oauth_grants g WHERE g.client_id = c.id)`)).rows[0]?.count;
     if (!Number.isInteger(count) || count >= 2000) oauthFail('temporarily_unavailable', 'Connector registration capacity reached.', 503);
     await client.query('INSERT INTO context_mcp_private.oauth_clients (id, name, redirect_uris, scopes) VALUES ($1, $2, $3, $4)', [id, name.trim(), redirects, scopes]);
+    return pruned.rowCount ?? 0;
   });
+  audit(deps, { action: 'register', outcome: 'created', status: 201, clientRef: auditRef(id), expiredUnusedRemoved: removed });
   // RFC7591: ignore unknown client metadata; never fetch metadata/logo/JWKS URLs.
   return oauthResponse({ client_id: id, client_id_issued_at: Math.floor(Date.now() / 1000), client_name: name.trim(), redirect_uris: redirects,
     grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'none', scope: scopes.join(' ') }, 201, request);
@@ -119,7 +157,7 @@ async function register(request: Request, deps: McpOAuthDependencies) {
 
 async function preview(request: Request, deps: McpOAuthDependencies) {
   if (request.url.length > 4096 || request.headers.get('sec-fetch-site') === 'cross-site') oauthFail();
-  deps.limit('preview', 60);
+  deps.anonymousLimit(request, 'preview', 60);
   const authorization = parseAuthorization(new URL(request.url).searchParams);
   const client = await deps.readTransaction(active => registeredClient(active, authorization.clientId));
   requireClientAuthorization(client, authorization);
@@ -138,11 +176,11 @@ function authorizationRedirect(authorization: AuthorizationRequest, parameter: '
 }
 async function approve(request: Request, deps: McpOAuthDependencies) {
   requireConsoleOrigin(request);
-  deps.limit('authorize', 20);
   const body = await boundedOAuthBody(request, true) as Record<string, unknown>;
   if (Object.keys(body).some(name => !['requestHandle', 'apiKey', 'approve'].includes(name)) || typeof body.approve !== 'boolean') oauthFail();
   const authorization = readConsent(request, body.requestHandle);
   if (!body.approve) {
+    audit(deps, { action: 'authorize', outcome: 'declined', status: 200, clientRef: auditRef(authorization.clientId) });
     const response = oauthResponse({ redirectUrl: authorizationRedirect(authorization, 'error', 'access_denied') });
     response.headers.append('Set-Cookie', consentCookie('', 0));
     return response;
@@ -150,12 +188,13 @@ async function approve(request: Request, deps: McpOAuthDependencies) {
   if (typeof body.apiKey !== 'string' || !/^wog_ctx_[A-Za-z0-9_-]{43}$/.test(body.apiKey)) throw new HttpError(401, 'UNAUTHORIZED', 'Use your employee API key to connect.');
   const keyRequest = new Request(`${consoleOrigin()}/mcp`, { headers: { Authorization: `Bearer ${body.apiKey}` } });
   const code = randomOAuth('wog_mcp_code_');
-  await deps.writeTransaction(async client => {
+  const granted = await checkedCredential(deps, 'authorize', body.apiKey, () => deps.writeTransaction(async client => {
     requireClientAuthorization(await registeredClient(client, authorization.clientId), authorization);
     const key = await authenticateRequestKey(keyRequest, hash => findDatabaseKey(client, hash));
     const principal = await resolvePrincipal(client, key);
     const scopes = authorization.scopes.filter(scope => key.scopes.includes(scope) && principal.scopes.includes(scope));
     if (!scopes.length) oauthFail('invalid_scope', 'This employee has none of the requested read permissions.', 403);
+    deps.limit(`authorize:${key.id}`, 20);
     const lock = (await client.query('SELECT pg_try_advisory_xact_lock(1784056941, 1802406256) AS locked')).rows[0];
     if (!lock?.locked) oauthFail('temporarily_unavailable', 'Retry connector authorization shortly.', 503);
     const count = (await client.query('SELECT count(*)::integer AS count FROM context_mcp_private.oauth_grants WHERE expires_at > CURRENT_TIMESTAMP AND revoked_at IS NULL')).rows[0]?.count;
@@ -169,7 +208,9 @@ async function approve(request: Request, deps: McpOAuthDependencies) {
     if (inserted.rows.length !== 1) oauthFail('invalid_request', 'This authorization was already used. Restart the connection.', 409);
     await client.query(`INSERT INTO context_mcp_private.oauth_codes (hash, grant_id, challenge, redirect_uri, expires_at)
       VALUES ($1, $2, $3, $4, $5)`, [hashOAuth(code), id, authorization.challenge, authorization.redirectUri, new Date(Math.min(expires.getTime(), Date.now() + MCP_CODE_SECONDS * 1000))]);
-  });
+    return { id, keyRef: auditRef(key.id) };
+  }));
+  audit(deps, { action: 'authorize', outcome: 'granted', status: 200, grantId: granted.id, keyRef: granted.keyRef, clientRef: auditRef(authorization.clientId) });
   const response = oauthResponse({ redirectUrl: authorizationRedirect(authorization, 'code', code) });
   response.headers.append('Set-Cookie', consentCookie('', 0));
   return response;
@@ -191,13 +232,18 @@ async function issueTokens(client: PoolClient, grant: Grant, key: KeyRegistratio
 }
 
 async function token(request: Request, deps: McpOAuthDependencies) {
-  deps.limit('token', 120);
   if (request.headers.has('authorization')) oauthFail('invalid_client', 'Use a public client with PKCE.', 401);
   const values = parameters(await boundedOAuthBody(request, false) as URLSearchParams,
     ['grant_type', 'client_id', 'code', 'redirect_uri', 'code_verifier', 'refresh_token', 'resource', 'scope']);
   if (values.resource !== mcpResource()) oauthFail('invalid_target', 'Use the configured connector resource.');
   if (!['authorization_code', 'refresh_token'].includes(values.grant_type)) oauthFail('unsupported_grant_type', 'Use authorization-code or refresh-token grants.');
-  const result = await deps.writeTransaction(async client => {
+  let tokenEvent: Record<string, unknown> = {};
+  const credential = values.grant_type === 'authorization_code' ? values.code : values.refresh_token;
+  if (!credential || credential.length > 128) oauthFail('invalid_grant', 'The token credential is invalid.');
+  // A wrong PKCE verifier/client binding must not poison the valid exchange's
+  // failure bucket, even if someone learns its short-lived authorization code.
+  const failureBinding = JSON.stringify([credential, values.client_id, values.code_verifier, values.resource, values.scope]);
+  const result = await checkedCredential(deps, 'token', failureBinding, () => deps.writeTransaction(async client => {
     const registered = await registeredClient(client, values.client_id ?? '');
     if (values.grant_type === 'authorization_code') {
       if (!/^wog_mcp_code_[A-Za-z0-9_-]{43}$/.test(values.code ?? '') || !/^[A-Za-z0-9._~-]{43,128}$/.test(values.code_verifier ?? '')
@@ -212,9 +258,12 @@ async function token(request: Request, deps: McpOAuthDependencies) {
         || !timingSafeEqual(Buffer.from(grant.challenge), Buffer.from(challenge)) || milliseconds(grant.code_expires_at) <= Date.now()) oauthFail('invalid_grant', 'The authorization code is invalid.');
       if (grant.used_at !== null) {
         await client.query('UPDATE context_mcp_private.oauth_grants SET revoked_at = CURRENT_TIMESTAMP WHERE id = $1', [grant.id]);
+        tokenEvent = { outcome: 'replay_revoked', grantId: grant.id, reason: 'authorization_code_replay' };
         return null; // Commit revocation before returning invalid_grant outside this transaction.
       }
       const key = await currentGrantKey(client, grant);
+      deps.limit(`token:${key.id}`, 120);
+      tokenEvent = { outcome: 'issued', grantId: grant.id, keyRef: auditRef(key.id), grantType: 'authorization_code' };
       await client.query('UPDATE context_mcp_private.oauth_codes SET used_at = CURRENT_TIMESTAMP WHERE hash = $1', [hashOAuth(values.code)]);
       return issueTokens(client, grant, key);
     }
@@ -226,47 +275,66 @@ async function token(request: Request, deps: McpOAuthDependencies) {
     if (!grant || grant.resource !== values.resource || milliseconds(grant.token_expires_at) <= Date.now()) oauthFail('invalid_grant', 'The refresh token is invalid.');
     if (grant.used_at !== null) {
       await client.query('UPDATE context_mcp_private.oauth_grants SET revoked_at = CURRENT_TIMESTAMP WHERE id = $1', [grant.id]);
+      tokenEvent = { outcome: 'replay_revoked', grantId: grant.id, reason: 'refresh_replay' };
       return null;
     }
     const key = await currentGrantKey(client, grant);
+    deps.limit(`token:${key.id}`, 120);
     if (values.scope !== undefined) {
       const requested = oauthScopes(values.scope);
       if (requested.some(scope => !key.scopes.includes(scope))) oauthFail('invalid_scope', 'Refresh cannot increase read permissions.');
       key.scopes = requested;
     }
     await client.query('UPDATE context_mcp_private.oauth_tokens SET used_at = CURRENT_TIMESTAMP WHERE hash = $1', [hashOAuth(values.refresh_token)]);
+    tokenEvent = { outcome: 'issued', grantId: grant.id, keyRef: auditRef(key.id), grantType: 'refresh_token' };
     return issueTokens(client, grant, key);
-  });
-  if (!result) oauthFail('invalid_grant', 'This authorization was already used. Reconnect the connector.');
+  }));
+  audit(deps, { action: 'token', ...tokenEvent, status: result ? 200 : 400 });
+  if (!result) {
+    deps.noteFailed('token', failureBinding);
+    oauthFail('invalid_grant', 'This authorization was already used. Reconnect the connector.');
+  }
   return oauthResponse(result, 200, request);
 }
 
 async function revoke(request: Request, deps: McpOAuthDependencies) {
-  deps.limit('revoke', 30);
   if (request.headers.has('authorization')) oauthFail('invalid_client', 'Use the registered public client.', 401);
   const values = parameters(await boundedOAuthBody(request, false) as URLSearchParams, ['token', 'token_type_hint', 'client_id']);
   if (!/^wog_mcp_(?:at|rt)_[A-Za-z0-9_-]{43}$/.test(values.token ?? '')) return oauthResponse({}, 200, request);
-  await deps.writeTransaction(async client => {
+  const revoked = await checkedCredential(deps, 'revoke', values.token, () => deps.writeTransaction(async client => {
     const registered = await registeredClient(client, values.client_id ?? '');
-    await client.query(`UPDATE context_mcp_private.oauth_grants g SET revoked_at = CURRENT_TIMESTAMP
-      FROM context_mcp_private.oauth_tokens t WHERE t.grant_id = g.id AND t.hash = $1 AND g.client_id = $2`, [hashOAuth(values.token), registered.id]);
-  });
+    const result = await client.query<{ id: string; key_id: string }>(`UPDATE context_mcp_private.oauth_grants g SET revoked_at = CURRENT_TIMESTAMP
+      FROM context_mcp_private.oauth_tokens t WHERE t.grant_id = g.id AND t.hash = $1 AND g.client_id = $2 AND g.revoked_at IS NULL
+      RETURNING g.id, g.key_id`, [hashOAuth(values.token), registered.id]);
+    for (const row of result.rows) deps.limit(`revoke:${row.key_id}`, 30);
+    return result.rows;
+  }));
+  audit(deps, { action: 'revoke', outcome: 'completed', status: 200, revokedCount: revoked.length, clientRef: auditRef(values.client_id ?? '') });
   return oauthResponse({}, 200, request);
 }
 
 export async function handleMcpOAuthRequest(request: Request, action: 'authorize' | 'register' | 'token' | 'revoke', dependencies: Partial<McpOAuthDependencies> = {}) {
+  const deps = { ...defaults, ...dependencies };
+  const requestId = randomUUID(), originalAudit = deps.audit;
+  deps.audit = entry => originalAudit({ ...entry, requestId });
+  function finish(response: Response, reason?: string) {
+    response.headers.set('X-Request-ID', requestId);
+    audit(deps, { action, outcome: response.ok ? 'completed' : 'denied', status: response.status, ...(reason ? { reason } : {}) });
+    return response;
+  }
   try {
     requireMcpEnabled();
     if (new URL(request.url).origin !== consoleOrigin()) oauthFail('invalid_request', 'Use the configured connector URL.');
     const headers = oauthHeaders(request);
-    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers });
-    const deps = { ...defaults, ...dependencies };
-    if (action === 'authorize' && request.method === 'GET') return await preview(request, deps);
+    if (request.method === 'OPTIONS') return finish(new Response(null, { status: 204, headers }));
+    if (action === 'authorize' && request.method === 'GET') return finish(await preview(request, deps));
     if (request.method !== 'POST') oauthFail('invalid_request', 'Use HTTP POST.', 405);
     if (new URL(request.url).search) oauthFail();
-    if (action === 'authorize') return await approve(request, deps);
-    if (action === 'register') return await register(request, deps);
-    if (action === 'revoke') return await revoke(request, deps);
-    return await token(request, deps);
-  } catch (error) { return oauthErrorResponse(error, request, action === 'authorize'); }
+    if (action === 'authorize') return finish(await approve(request, deps));
+    if (action === 'register') return finish(await register(request, deps));
+    if (action === 'revoke') return finish(await revoke(request, deps));
+    return finish(await token(request, deps));
+  } catch (error) {
+    return finish(oauthErrorResponse(error, request, action === 'authorize'), error instanceof OAuthError ? error.error : error instanceof HttpError ? error.code : 'source_unavailable');
+  }
 }

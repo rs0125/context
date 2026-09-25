@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
 import { HttpError } from './errors';
-import { rateLimit } from './rate-limit';
+import { checkFailedCredential, noteFailedCredential } from './rate-limit';
 
 export const SCOPES = ['knowledge:read', 'warehouses:read', 'crm:read'] as const;
 export type Scope = typeof SCOPES[number];
@@ -69,13 +69,17 @@ export async function authenticateRequestKey(request: Request, lookup: (hash: st
   catch (error) {
     if (!(error instanceof HttpError) || error.status !== 401 || process.env.CONTEXT_CONSOLE_WRITES_ENABLED !== 'true') throw error;
   }
-  // One fixed bucket bounds unauthenticated database work without allocating a
-  // counter per attacker-controlled token. ':' is forbidden in registered key
-  // IDs, so this bucket cannot collide with a legitimate credential's quota.
-  // Legacy environment keys return above and never consume this lookup budget.
-  rateLimit('auth:database-lookup', Date.now(), 120);
-  const match = await lookup(createHash('sha256').update(token).digest('hex'));
-  if (!match) throw new HttpError(401, 'UNAUTHORIZED', 'A valid employee API key is required.');
+  // Throttle repeated proven failures independently of valid employee keys.
+  // There is no shared/IP pre-auth quota that anonymous traffic can exhaust for
+  // everyone. Rotating random tokens still need bounded DB lookups and edge WAF.
+  checkFailedCredential('rest-key', token);
+  let match: KeyRegistration | null;
+  try { match = await lookup(createHash('sha256').update(token).digest('hex')); }
+  catch (error) {
+    if (error instanceof HttpError && error.status === 401) noteFailedCredential('rest-key', token);
+    throw error;
+  }
+  if (!match) { noteFailedCredential('rest-key', token); throw new HttpError(401, 'UNAUTHORIZED', 'A valid employee API key is required.'); }
   return match;
 }
 

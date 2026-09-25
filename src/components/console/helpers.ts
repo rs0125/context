@@ -76,7 +76,7 @@ export function makeSystemPrompt(apiBaseUrl: string) {
 These instructions require an existing tool that can make authenticated HTTP requests. Pasting this text into an ordinary chat does not connect the API. If no such tool is available, explain that limitation; do not claim to have read live records.
 
 API base: ${base}
-Start with GET ${base}/context for my available capabilities and knowledge index, or GET ${base}/context.md for the Markdown guide.
+Start with GET ${base}/context for my available capabilities, server clock and knowledge discovery links, or GET ${base}/context.md for the Markdown guide.
 API reference: GET ${base}/openapi.json
 
 Use the employee API key from your tool’s secure credential configuration as an Authorization: Bearer header. Never put credentials in a URL, message, document, or answer.

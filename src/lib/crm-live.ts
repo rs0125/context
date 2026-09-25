@@ -11,7 +11,7 @@ type Row = Record<string, unknown>;
 export type CrmView = 'accessible' | 'created' | 'assigned';
 export type CrmAccess = { mode: 'all'; memberId: string }
   | { mode: 'related'; memberId: string; ids: string[] };
-type Options = { view?: CrmView; fetch?: typeof fetch; env?: Partial<NodeJS.ProcessEnv> };
+type Options = { view?: CrmView; opportunityId?: string; fetch?: typeof fetch; env?: Partial<NodeJS.ProcessEnv> };
 type Page = { rows: Row[]; hasNextPage: boolean; endCursor: string | null };
 
 // Verified against Wareongo's live metadata API, 2026-09-25. This is Twenty's
@@ -143,12 +143,17 @@ function isTwentyAdmin(value: unknown, memberId: string): boolean {
 
 /** Live role and creator/assignment checks. No source payload escapes this boundary.
  * Call outside a database transaction; it makes at most seven bounded HTTP reads.
+ * Detail reads verify only the requested ID, with at most three HTTP reads.
  * The metadata POST contains a fixed GraphQL query, never a mutation.
  */
 export async function getLiveCrmAccess(principal: Principal, options: Options = {}): Promise<CrmAccess> {
-  const config = configuration(options.env ?? process.env);
   const view = options.view ?? 'accessible';
   if (!['accessible', 'created', 'assigned'].includes(view)) throw new HttpError(400, 'INVALID_QUERY', 'Unsupported CRM view.');
+  if (options.opportunityId !== undefined && (typeof options.opportunityId !== 'string' || !UUID.test(options.opportunityId))) {
+    throw new HttpError(400, 'INVALID_QUERY', 'A valid CRM opportunity ID is required.');
+  }
+  const targetId = options.opportunityId?.toLowerCase();
+  const config = configuration(options.env ?? process.env);
   const fetcher = options.fetch ?? fetch;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DEADLINE_MS);
@@ -165,9 +170,9 @@ export async function getLiveCrmAccess(principal: Principal, options: Options = 
     if (controller.signal.aborted || Date.now() >= deadline) unavailable();
     return body;
   }
-  async function page(object: 'workspaceMembers' | 'opportunities', filter: string, cursor?: string) {
+  async function page(object: 'workspaceMembers' | 'opportunities', filter: string, cursor?: string, limit = PAGE_SIZE) {
     const url = new URL(`/rest/${object}`, config.origin);
-    url.searchParams.set('limit', String(PAGE_SIZE));
+    url.searchParams.set('limit', String(limit));
     url.searchParams.set('depth', '0');
     url.searchParams.set('order_by', 'id[AscNullsFirst]');
     url.searchParams.set('filter', filter);
@@ -188,15 +193,20 @@ export async function getLiveCrmAccess(principal: Principal, options: Options = 
     const creatorFilter = `createdBy.workspaceMemberId[eq]:${JSON.stringify(memberId)}`;
     const assignedFilter = `assignedTo[containsAny]:${JSON.stringify([token])}`;
     const filter = view === 'created' ? creatorFilter : view === 'assigned' ? assignedFilter : `or(${creatorFilter},${assignedFilter})`;
+    const opportunityFilter = `${targetId ? `id[eq]:${JSON.stringify(targetId)},` : ''}${filter},deletedAt[is]:NULL`;
     const ids = new Set<string>();
     const seenRecordIds = new Set<string>();
     const cursors = new Set<string>();
     let cursor: string | undefined;
     for (let index = 0; index < MAX_PAGES; index++) {
-      const result = await page('opportunities', `${filter},deletedAt[is]:NULL`, cursor);
+      const result = await page('opportunities', opportunityFilter, cursor, targetId ? 1 : PAGE_SIZE);
+      // A unique-ID lookup must be complete in one response. Never fall back to
+      // enumerating all records if the source ignores or misapplies its filter.
+      if (targetId && (result.hasNextPage || result.rows.length > 1)) unavailable();
       for (const opportunity of result.rows) {
         if (typeof opportunity.id !== 'string' || !UUID.test(opportunity.id)) unavailable();
         const id = opportunity.id.toLowerCase();
+        if (targetId && id !== targetId) unavailable();
         if (seenRecordIds.has(id)) unavailable();
         seenRecordIds.add(id);
         const created = record(opportunity.createdBy) && typeof opportunity.createdBy.workspaceMemberId === 'string'
@@ -204,6 +214,7 @@ export async function getLiveCrmAccess(principal: Principal, options: Options = 
         const assigned = token !== null && Array.isArray(opportunity.assignedTo)
           && opportunity.assignedTo.every((value) => typeof value === 'string') && opportunity.assignedTo.includes(token);
         const permitted = view === 'created' ? created : view === 'assigned' ? assigned : created || assigned;
+        if (targetId && (opportunity.deletedAt !== null || !permitted)) unavailable();
         if (opportunity.deletedAt === null && permitted) {
           ids.add(id);
         }

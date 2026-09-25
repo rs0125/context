@@ -41,7 +41,17 @@ async function main() {
   const scopes = context.body.data.scopes;
   const reviewed = documents.filter(page => page.status === 'reviewed' && page.scopes.every(scope => scopes.includes(scope)));
   const hidden = documents.filter(page => !reviewed.includes(page));
-  const listed = context.body.data.knowledge;
+  const listed = [];
+  let cursor;
+  const seenCursors = new Set();
+  do {
+    assert(seenCursors.size < 100, 'INDEX_PAGE_BUDGET');
+    const response = await read('/api/v1/wiki/pages?limit=10' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+    assert.equal(response.status, 200, 'INDEX_UNAVAILABLE');
+    listed.push(...response.body.data.items);
+    cursor = response.body.data.nextCursor;
+    if (cursor) { assert(!seenCursors.has(cursor), 'REPEATED_CURSOR'); seenCursors.add(cursor); }
+  } while (cursor);
   for (const page of reviewed) assert(listed.some(entry => entry.id === page.id), 'REVIEWED_PAGE_MISSING');
   for (const page of hidden) assert(!listed.some(entry => entry.id === page.id), 'HIDDEN_PAGE_LISTED');
   for (const page of documents) {
