@@ -3,6 +3,7 @@ import type { PoolClient } from 'pg';
 import { handleApiRequest, assertFreshCrm } from '../src/lib/api';
 import { authenticateKey, type KeyRegistration } from '../src/lib/auth';
 import { randomUUID } from 'node:crypto';
+import { HttpError } from '../src/lib/errors';
 import type { CrmAccess } from '../src/lib/crm-live';
 
 const active = { id: 7, email: 'alex@example.test', is_active: true, dashboardAccess: true, adminAccess: false, twenty_user_id: '12345678-1111-1111-1111-123456789012' };
@@ -169,6 +170,21 @@ describe('REST access boundary', () => {
     });
     const response = await handleApiRequest(request('crm/opportunities'), ['crm', 'opportunities'], deps);
     expect(response.status).toBe(403);
+    expect(deps.query.mock.calls.every(([query]) => !query.includes('FROM public.opportunities'))).toBe(true);
+  });
+  it('rechecks connector revocation inside the read transaction after live CRM verification', async () => {
+    const deps = harness();
+    let revoked = false;
+    const revalidateKey = vi.fn(async () => {
+      if (revoked) throw new HttpError(401, 'UNAUTHORIZED', 'The connector has been revoked.');
+    });
+    deps.liveCrmAccess.mockImplementationOnce(async () => {
+      revoked = true;
+      return { mode: 'related' as const, memberId: active.twenty_user_id, ids: [] };
+    });
+    const response = await handleApiRequest(request('crm/opportunities'), ['crm', 'opportunities'], { ...deps, revalidateKey });
+    expect(response.status).toBe(401);
+    expect(revalidateKey).toHaveBeenCalledTimes(2);
     expect(deps.query.mock.calls.every(([query]) => !query.includes('FROM public.opportunities'))).toBe(true);
   });
   it('rejects browser origins outside the allowlist without database work', async () => {

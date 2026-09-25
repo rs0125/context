@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ConsoleApiError, consoleRequest, displayDate, errorMessage, makeAgentSetup, makeSystemPrompt } from './helpers';
+import { ConsoleApiError, consoleRequest, displayDate, errorMessage, makeConnectorSetup, makeSystemPrompt, mcpServerUrl } from './helpers';
 import { Icon } from './icons';
 import { ConfirmDialog, Notice, Spinner } from './ui';
 import { SCOPE_OPTIONS, type ConsoleSession, type PersonalKey } from './types';
@@ -20,6 +20,7 @@ export function AgentAccess({ session, onSessionExpired }: { session: ConsoleSes
   const copySequence = useRef(0);
   const writesEnabled = session.capabilities?.writesEnabled === true;
   const prompt = makeSystemPrompt(session.apiBaseUrl);
+  const mcpUrl = mcpServerUrl(session.apiBaseUrl);
 
   const loadKey = useCallback(async (signal?: AbortSignal) => {
     const request = ++keyRequestSequence.current;
@@ -69,14 +70,21 @@ export function AgentAccess({ session, onSessionExpired }: { session: ConsoleSes
   }
 
   return <div className="access-workspace">
-    <div className="page-heading"><div><p className="eyebrow">YOUR WORKSPACE, CONNECTED</p><h1>Give your agent the context.</h1><p>Set up your preferred AI tool with instructions and your personal access key.</p></div><span className="status-pill"><span />Read-only API</span></div>
+    <div className="page-heading"><div><p className="eyebrow">YOUR WORKSPACE, CONNECTED</p><h1>Give your agent the context.</h1><p>Connect your AI tool, then ask questions using the context your key can read.</p></div><span className="status-pill"><span />Read-only access</span></div>
     {!writesEnabled && <Notice tone="info">Your workspace is ready to explore. Personal keys and knowledge editing will be available when an administrator completes setup.</Notice>}
     {copyError && <Notice>{copyError}</Notice>}
+    <section className="panel mcp-connect-panel" aria-labelledby="mcp-heading">
+      <div className="mcp-connect-heading"><span className="mcp-connect-symbol"><Icon name="code" size={23} /></span><div><p className="eyebrow">FOR CLAUDE & MCP CLIENTS</p><h2 id="mcp-heading">Connect Claude to your context.</h2><p>Add this server as a custom connector. A chat message alone cannot connect it.</p></div><span className="small-tag">REMOTE MCP</span></div>
+      <label className="field-label" htmlFor="mcp-url">MCP SERVER URL</label>
+      <div className="mcp-url-row"><input id="mcp-url" readOnly value={mcpUrl} aria-label="MCP server URL" /><button className="button button-primary" onClick={() => void copy(mcpUrl, 'mcp')}><Icon name={copied === 'mcp' ? 'check' : 'copy'} size={16} />{copied === 'mcp' ? 'Copied MCP URL' : 'Copy MCP URL'}</button></div>
+      <ol className="mcp-connect-steps"><li><span>01</span><div><strong>Add a custom connector</strong><p>In Claude, use the server URL above when adding a custom connector.</p></div></li><li><span>02</span><div><strong>Authorize on Wareongo Context</strong><p>Review the app and permissions. Enter your own employee API key on our authorization page and select Connect.</p></div></li><li><span>03</span><div><strong>Use it in your conversation</strong><p>Return to Claude and enable the connector. Your employee permissions still apply to every read.</p></div></li></ol>
+      <div className="mcp-connect-footer"><p><Icon name="shield" size={15} />Keep API keys and the admin password out of chat.</p><button className="text-button" onClick={() => void copy(makeConnectorSetup(session.apiBaseUrl), 'connector')}>{copied === 'connector' ? <Icon name="check" size={14} /> : <Icon name="copy" size={14} />}{copied === 'connector' ? 'Copied connector steps' : 'Copy connector steps'}</button></div>
+    </section>
     <div className="access-grid">
       <section className="panel prompt-panel" aria-labelledby="prompt-heading">
-        <div className="panel-heading"><div className="step-heading"><span className="step-number">01</span><div><h2 id="prompt-heading">Agent instructions</h2><p>A starting point for useful, grounded answers.</p></div></div><span className="small-tag">SYSTEM PROMPT</span></div>
+        <div className="panel-heading"><div className="step-heading"><span className="step-number"><Icon name="code" size={15} /></span><div><h2 id="prompt-heading">REST client instructions</h2><p>For tools already equipped with authenticated HTTP access.</p></div></div><span className="small-tag">ADVANCED</span></div>
         <div className="prompt-text-wrap"><textarea className="prompt-text" aria-label="Agent system instructions" value={prompt} readOnly spellCheck={false} /></div>
-        <div className="panel-footer"><span className="muted">Add this to your tool’s system instructions.</span><button className="button button-primary" onClick={() => void copy(prompt, 'prompt')}><Icon name={copied === 'prompt' ? 'check' : 'copy'} />{copied === 'prompt' ? 'Copied instructions' : 'Copy instructions'}</button></div>
+        <div className="panel-footer"><span className="muted">Instructions alone do not provide an HTTP tool.</span><button className="button button-primary" onClick={() => void copy(prompt, 'prompt')}><Icon name={copied === 'prompt' ? 'check' : 'copy'} />{copied === 'prompt' ? 'Copied instructions' : 'Copy instructions'}</button></div>
       </section>
       <div className="access-side">
         <section className="panel key-panel" aria-labelledby="key-heading">
@@ -88,12 +96,11 @@ export function AgentAccess({ session, onSessionExpired }: { session: ConsoleSes
             <div className="key-meta"><span>Expires {displayDate(key.expiresAt)}</span><button className="text-button" disabled={busy || !writesEnabled} onClick={() => setConfirmRotation(true)}><Icon name="refresh" size={13} />Rotate key</button></div>
             <button className="button button-secondary full-width" onClick={() => void copy(key.token, 'key')}><Icon name={copied === 'key' ? 'check' : 'copy'} />{copied === 'key' ? 'Copied API key' : 'Copy API key'}</button>
           </> : <div className="key-empty"><span className="empty-icon"><Icon name="key" size={25} /></span><h3>Your personal connection</h3><p>Create a key to let your agent read the context available to you.</p><button className="button button-primary full-width" disabled={!writesEnabled || busy || Boolean(error)} onClick={() => void createKey()}>{busy ? <Spinner label="Creating…" /> : <><Icon name="plus" />Create API key</>}</button></div>}
-          <p className="key-hint"><Icon name="shield" size={15} /><span>Keep this key private. Add it to your tool’s credential settings as a Bearer token.</span></p>
+          <p className="key-hint"><Icon name="shield" size={15} /><span>Use your own key on the Wareongo Context authorization page, or in a REST tool’s credential settings. Never paste it into chat.</span></p>
         </section>
         <section className="panel connection-panel" aria-labelledby="connection-heading"><div className="connection-heading"><Icon name="code" /><h2 id="connection-heading">Connection details</h2></div><label className="field-label" htmlFor="api-base">API BASE URL</label><div className="endpoint-field"><input id="api-base" readOnly value={session.apiBaseUrl} aria-label="API base URL" /><button className="icon-button" aria-label="Copy API base URL" onClick={() => void copy(session.apiBaseUrl, 'base')}><Icon name={copied === 'base' ? 'check' : 'copy'} size={16} /></button></div><div className="scope-list" aria-label="Your permissions">{SCOPE_OPTIONS.filter(scope => session.employee.scopes.includes(scope.value)).map(scope => <span className="scope-chip" key={scope.value}><Icon name="check" size={12} />{scope.label}</span>)}</div><a className="text-link" href="/api/v1/openapi.json" target="_blank" rel="noreferrer">View API reference<Icon name="external" size={14} /></a></section>
       </div>
     </div>
-    <section className="setup-strip"><div className="setup-strip-icon"><Icon name="arrow" size={23} /></div><div><h2>Ready to connect?</h2><p>Copy both pieces together, then place each in the right settings for your tool. The tool needs authenticated HTTP access.</p></div><button className="button button-secondary" disabled={!key || loading} onClick={() => key && void copy(makeAgentSetup(prompt, key.token), 'setup')}><Icon name={copied === 'setup' ? 'check' : 'copy'} />{copied === 'setup' ? 'Copied setup' : 'Copy complete setup'}</button></section>
     <div className="access-footnote"><Icon name="shield" size={15} /><p>Agents can read permitted context. They cannot change records or take actions through this API.</p></div>
     <span className="sr-only" role="status" aria-live="polite">{copied ? `${copied === 'base' ? 'API base URL' : copied} copied to clipboard` : ''}</span>
     {confirmRotation && <ConfirmDialog title="Rotate your API key?" confirmLabel="Rotate key" destructive busy={busy} onCancel={() => setConfirmRotation(false)} onConfirm={() => void createKey()}><p>Your current key will stop working. Update every tool that uses it with the new key.</p></ConfirmDialog>}

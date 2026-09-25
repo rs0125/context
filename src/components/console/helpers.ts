@@ -73,6 +73,8 @@ export function makeSystemPrompt(apiBaseUrl: string) {
   const base = apiBaseUrl.replace(/\/+$/, '');
   return `You are helping me work with organisational context through a read-only REST API.
 
+These instructions require an existing tool that can make authenticated HTTP requests. Pasting this text into an ordinary chat does not connect the API. If no such tool is available, explain that limitation; do not claim to have read live records.
+
 API base: ${base}
 Start with GET ${base}/context for my available capabilities and knowledge index, or GET ${base}/context.md for the Markdown guide.
 API reference: GET ${base}/openapi.json
@@ -92,8 +94,13 @@ Respect my identity and the API’s permissions. Do not infer or seek hidden con
 Use this context for research, comparisons, summaries, and drafts. These endpoints cannot update records, send messages, reserve properties, or make commitments. Never claim that such an action has happened.`;
 }
 
-export function makeAgentSetup(prompt: string, token: string) {
-  return `SYSTEM INSTRUCTIONS\n\n${prompt}\n\nCREDENTIAL — STORE IN YOUR TOOL’S CREDENTIAL SETTINGS\n\nAuthorization: Bearer ${token}\n\nKeep the credential separate from conversation messages and generated answers.`;
+export function mcpServerUrl(apiBaseUrl: string) {
+  const base = new URL(apiBaseUrl);
+  return `${base.origin}/mcp`;
+}
+
+export function makeConnectorSetup(apiBaseUrl: string) {
+  return `CONNECT WAREONGO CONTEXT\n\nMCP server URL: ${mcpServerUrl(apiBaseUrl)}\n\n1. Add a custom connector in Claude using the MCP server URL above.\n2. On the Wareongo Context authorization page, review the requesting application and permissions, then enter your own employee API key and select Connect.\n3. Return to Claude and enable the connector for your conversation.\n\nDo not paste your API key or the administrator password into chat. The administrator password is only for the management console. The connector can read only the context allowed by your employee key.\n\nA URL or system prompt pasted into ordinary chat does not install a connector.`;
 }
 
 export const emptyDraft = (): PageDraft => ({ id: '', title: '', summary: '', body: '', status: 'draft', scopes: ['knowledge:read'] });

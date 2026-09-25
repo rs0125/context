@@ -12,6 +12,7 @@ import { getLiveCrmAccess, type CrmAccess, type CrmView } from './crm-live';
 type ApiDependencies = {
   transaction: <T>(work: (client: PoolClient) => Promise<T>) => Promise<T>;
   authenticate: (request: Request) => KeyRegistration | Promise<KeyRegistration>;
+  revalidateKey?: (client: PoolClient, key: KeyRegistration) => Promise<void>;
   liveCrmAccess: (principal: Principal, view: CrmView) => Promise<CrmAccess>;
   audit: (entry: Record<string, unknown>) => void;
 };
@@ -158,6 +159,7 @@ export async function handleApiRequest(request: Request, path: string[], depende
         }
       } else throw new HttpError(404, 'NOT_FOUND', 'Endpoint not found.');
       verifiedPrincipal = await deps.transaction(async client => {
+        await deps.revalidateKey?.(client, key);
         const principal = await resolvePrincipal(client, key);
         employeeId = principal.employeeId;
         requireScope(principal, 'crm:read');
@@ -168,6 +170,7 @@ export async function handleApiRequest(request: Request, path: string[], depende
       crmAccess = await deps.liveCrmAccess(verifiedPrincipal, view);
     }
     const result = await deps.transaction(async client => {
+      await deps.revalidateKey?.(client, key);
       const principal = await resolvePrincipal(client, key);
       employeeId = principal.employeeId;
       if (verifiedPrincipal && (principal.employeeId !== verifiedPrincipal.employeeId

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ConsoleApiError, consoleRequest, emptyDraft, importMarkdown, loginErrorMessage, makeAgentSetup, makeSystemPrompt, validateDraft } from '../src/components/console/helpers';
+import { ConsoleApiError, consoleRequest, emptyDraft, importMarkdown, loginErrorMessage, makeConnectorSetup, makeSystemPrompt, mcpServerUrl, validateDraft } from '../src/components/console/helpers';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -124,15 +124,19 @@ describe('console transport and agent instructions', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps copied credentials separate from the generic prompt', () => {
+  it('copies only connection instructions and keeps secrets out of every setup block', () => {
     const prompt = makeSystemPrompt('https://context.example.test/api/v1/');
     expect(prompt).toContain('GET https://context.example.test/api/v1/context');
     expect(prompt).toContain('verification_required');
     expect(prompt).toContain('source_status');
+    expect(prompt).toContain('Pasting this text into an ordinary chat does not connect the API');
     expect(prompt).not.toContain('test-only-token');
-    const setup = makeAgentSetup(prompt, 'test-only-token');
-    expect(setup).toContain('SYSTEM INSTRUCTIONS');
-    expect(setup).toContain('CREDENTIAL — STORE IN YOUR TOOL’S CREDENTIAL SETTINGS');
-    expect(setup).toContain('Authorization: Bearer test-only-token');
+    const setup = makeConnectorSetup('https://context.example.test/api/v1/');
+    expect(setup).toContain('MCP server URL: https://context.example.test/mcp');
+    expect(setup).toContain('Do not paste your API key');
+    expect(setup).not.toContain('Authorization: Bearer');
+    expect(setup).not.toContain('test-only-token');
+    expect(mcpServerUrl('http://localhost:3100/api/v1')).toBe('http://localhost:3100/mcp');
+    expect(mcpServerUrl('https://context.example.test/api/v1?ignored=true#fragment')).toBe('https://context.example.test/mcp');
   });
 });

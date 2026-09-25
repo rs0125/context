@@ -1,6 +1,6 @@
 # Wareongo Context
 
-A read-only REST and Markdown context service for employee AI tools. It combines reviewed company guides with permitted warehouse facts and CRM opportunities. Employees see leads they created or are assigned to; verified Twenty admins see all mirrored leads. The Next.js console provides one administrator password, agent setup, and a Markdown editor. There is no MCP server.
+A read-only REST, Markdown, and remote MCP context service for employee AI tools. It combines reviewed company guides with permitted warehouse facts and CRM opportunities. Employees see leads they created or are assigned to; verified Twenty admins see all mirrored leads. The same Next.js deployment hosts the `/mcp` endpoint and an administrator console for agent setup and Markdown editing.
 
 The API uses the dashboard and CRM Automations' existing shared Supabase data, with live Twenty CRM reads to verify identity, admin role, creation, and assignment. Organisational Markdown and its metadata live in the private PostgreSQL table `context_engine_private.knowledge_pages`; no company wiki content is bundled with the source or deployment. Employee context keys are separate credentials with narrower permissions. Source-system tokens stay on the server and are never forwarded to agents.
 
@@ -40,17 +40,38 @@ npm run setup:console -- --email employee@wareongo.com --origin http://localhost
 npm run dev -- --port 3100
 ```
 
-The setup script generates a single random administrator password in `CONTEXT_ADMIN_PASSWORD`, stores the owning employee in `CONTEXT_ADMIN_EMAIL`, and creates independent session and key-encryption secrets in ignored `.env.local`. It preserves existing passwords and key-encryption secrets on repeat runs and never prints them. It removes obsolete Google credentials from this application's environment. Use an exact HTTPS `CONTEXT_CONSOLE_ORIGIN` in production. No OAuth registration is needed.
+The setup script generates a single random administrator password in `CONTEXT_ADMIN_PASSWORD`, stores the owning employee in `CONTEXT_ADMIN_EMAIL`, and creates independent session and key-encryption secrets in ignored `.env.local`. It preserves existing passwords and key-encryption secrets on repeat runs and never prints them. It removes obsolete Google credentials from this application's environment. Use an exact HTTPS `CONTEXT_CONSOLE_ORIGIN` in production. This password sign-in is separate from the employee-key OAuth connection used by MCP clients.
 
 The console accepts only the configured administrator password. Its configured employee must have a unique active dashboard roster entry, which is checked again on every request. Password comparison uses fixed-length cryptographic digests; a shared per-process login budget limits guessing before database access. Sessions use signed HttpOnly cookies with an eight-hour expiry, and mutations require the configured origin. Console administration grants knowledge editing; the agent key's warehouse and CRM scopes still follow the owning employee's source access. This version has no employee self-service sign-in.
 
-The administrator can copy the system prompt, the owning employee's API key, or a combined setup block. The AI tool must support authenticated HTTP requests to use the REST API. A prompt alone does not add HTTP tooling to a chat application. Keys are masked by default, expire after 30 days, and can be rotated from the console. They are stored as an authentication hash plus an encrypted copy for retrieval after login. Keep the encryption secret backed up privately; losing or rotating it requires reissuing console keys. No credentials are saved in browser local storage. The console password is not an agent API key.
+The administrator can copy the MCP server URL, credential-free connection steps, REST instructions, and the owning employee's API key separately. The REST instructions work only with clients already equipped to make authenticated HTTP requests. Pasting a prompt, URL, or API key into ordinary chat does not install that capability. Never paste a raw API key or administrator password into chat. Keys are masked by default, expire after 30 days, and can be rotated from the console. They are stored as an authentication hash plus an encrypted copy for retrieval after login. Keep the encryption secret backed up privately; losing or rotating it requires reissuing console keys. No credentials are saved in browser local storage. The console password is not an agent API key.
 
 Admins can create pages, import `.md` text, edit metadata and required scopes, and publish reviewed material. New pages start as drafts; agent reads exclude drafts. Concurrent edits are rejected for review instead of silently overwriting another editor's changes. Publishing knowledge does not require a deployment.
 
 For a new database, run `npm run console:migrate -- --apply`, then set `CONTEXT_CONSOLE_WRITES_ENABLED=true` and restart or redeploy. This creates and verifies the private console credential store; it does not import or overwrite organisational pages. Without `--apply`, the command only prints its plan. Setup scripts never automatically apply migrations, and writes default to disabled for new checkouts. The agent-facing `/api/v1` API remains read-only regardless of this flag.
 
 Console rotation replaces only the current console-issued key. Keys registered separately through `CONTEXT_API_KEYS_JSON` remain valid until explicitly revoked from that registry.
+
+## Connect an MCP client
+
+The remote MCP URL is `https://YOUR_HOST/mcp`, on the same deployment as the REST API and console. It is a protocol adapter over the existing read-only context engine; employee identity, scopes, field allowlists, warehouse uncertainty, and CRM visibility/freshness checks still apply. The browser administrator password does not authenticate an MCP client.
+
+For Claude:
+
+1. Add a custom connector using the public HTTPS MCP URL. A local development URL is not reachable by a hosted client.
+2. When Wareongo Context opens its authorization page, review the requesting application's identity, redirect origin and complete redirect URI, and requested read permissions.
+3. Enter the employee API key for the intended person on that authorization page and select **Connect**. The key belongs in this form, not in the conversation or connector URL.
+4. Return to Claude and enable the connector for the conversation. If custom connectors are unavailable in that account or workspace, the console's REST instructions cannot add them.
+
+The authorization page is independent of admin-console sign-in. It submits the employee key only in a POST body, clears it after each attempt, and does not save it in browser storage. The page shows the actual requesting application; entering a name such as “Claude” is not proof of that application's identity. Confirm the displayed origins before authorizing. Source-system credentials are never supplied to the client.
+
+Before enabling connections in a new database, inspect the OAuth storage plan with `node scripts/migrate-mcp-oauth.mjs`, then apply it deliberately with `node scripts/migrate-mcp-oauth.mjs --apply`. MCP uses the existing console origin, server secrets, and private-storage write flag; no additional mandatory secret is introduced. Set `CONTEXT_MCP_ENABLED=false` to disable MCP and its OAuth flow. Built-in Claude callback rules are configured by the service; `CONTEXT_MCP_ALLOWED_REDIRECT_ORIGINS` optionally adds exact HTTPS origins for other trusted clients. The registered redirect URI must still pass the server's validation. Local callback exceptions apply only to an explicitly configured local HTTP console.
+
+The `/oauth/authorize` browser page obtains a short-lived, browser-bound consent request from `/api/oauth/authorize`. Approval requires an explicit POST with the employee key; denial submits no key. OAuth client registration, code exchange, and revocation are protocol endpoints, not permission to edit warehouse or CRM records. Their state is stored in the private `context_mcp_private` schema. Access tokens last up to 15 minutes; rotating refresh tokens and grants are bounded by 30 days and the underlying employee key’s expiry. Every read rechecks that key and current access. Revoking or rotating the underlying key invalidates its connector grants once the key change is active in the deployment; clients can also revoke a grant through `/oauth/revoke`. Keep tokens out of source control and browser application storage.
+
+REST endpoints remain available to existing authenticated HTTP clients. Use `/api/v1/context` or `/api/v1/context.md` to discover context and `/api/v1/openapi.json` for the REST schema. A client should report missing tooling, denied reads, unavailable sources, and incomplete coverage instead of inventing records.
+
+The nine MCP tools cover context discovery, knowledge search/read, warehouse filters/search/read, and CRM search/read/briefing. CRM currently exposes no creation-date filter or source creation timestamp: `view=created` means created **by** the employee, not created this month. Tool instructions explicitly disclose that limitation.
 
 ## Environment
 
@@ -69,7 +90,9 @@ Console rotation replaces only the current console-issued key. Keys registered s
 | `CONTEXT_CONSOLE_ORIGIN` | Exact console HTTPS origin, or local HTTP origin for development. |
 | `CONTEXT_SESSION_SECRET` | Independent 32-byte base64url secret for signed browser sessions. |
 | `CONTEXT_KEY_ENCRYPTION_SECRET` | Independent 32-byte base64url secret for encrypted API-key retrieval. Preserve across deployments. |
-| `CONTEXT_CONSOLE_WRITES_ENABLED` | Set to `true` only after console storage has been migrated. |
+| `CONTEXT_CONSOLE_WRITES_ENABLED` | Set to `true` only after the required private console/OAuth storage has been migrated. Business-data reads remain read-only. |
+| `CONTEXT_MCP_ENABLED` | Optional MCP/OAuth kill switch. Set `false` to disable; unset is enabled when the required configuration and storage are ready. |
+| `CONTEXT_MCP_ALLOWED_REDIRECT_ORIGINS` | Optional comma-separated additional exact HTTPS callback origins for trusted MCP clients. No wildcard. Built-in Claude rules apply by default. |
 
 A key registration has this shape:
 
@@ -246,9 +269,11 @@ npx playwright install chromium
 npm run test:gui
 ```
 
-These tests start a local server if needed and intercept every console request with synthetic fixtures. They cover password login, prompt/key copying, rotation confirmation, Markdown import, revision conflicts, unsaved changes, and the deferred-storage state. They do not use real credentials or write to Supabase. Browser artifacts stay under ignored `.local/browser-results/`.
+These tests start a local server if needed and intercept every console request with synthetic fixtures. They cover password login, credential-free MCP setup copying, separate key copying, rotation confirmation, Markdown import, revision conflicts, unsaved changes, and the deferred-storage state. OAuth consent checks use synthetic application metadata and keys. They do not use real credentials or write to Supabase. Browser artifacts stay under ignored `.local/browser-results/`.
 
 After private storage is configured, `npm run test:console:live` checks its permissions and exercises admin knowledge creation, publishing, draft visibility, and revision conflicts inside an outer transaction that is always rolled back. It uses one database socket and retains no test pages. This opt-in check requires the configured administrator to have an active roster entry.
+
+`npm run test:mcp:live` explicitly tests the configured local server using the ignored `.local/keys/local-trial.json` employee key. Override with `-- --key-file PATH --origin https://YOUR_HOST` when needed. It registers a test connector, approves a browser-bound PKCE grant, calls read tools through the official MCP client, rotates tokens, checks replay revocation, and revokes its grant on completion. Registration and revoked-grant records remain private in OAuth storage; no source records are edited. Output contains only counts and status codes, never keys or returned business records. A CRM source failure is reported as a source error rather than an empty lead list.
 
 With the local server running, exercise the real API and database path from a second terminal:
 

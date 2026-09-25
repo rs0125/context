@@ -84,18 +84,26 @@ test('password login clears rejected input and opens the admin workspace on succ
   expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
 });
 
-test('employee copies instructions and own key, then confirms rotation', async ({ page }, testInfo) => {
+test('employee copies connector instructions without secrets and copies a key separately', async ({ page }, testInfo) => {
   const mutations = await mockConsole(page);
   await expect(page.getByRole('button', { name: 'Knowledge', exact: true })).toHaveCount(0);
   await expect(page.locator('input#personal-key')).toHaveAttribute('type', 'password');
+  await expect(page.getByLabel('MCP server URL')).toHaveValue('https://context.example.test/mcp');
+  await page.getByRole('button', { name: 'Copy MCP URL', exact: true }).click();
+  expect(await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText)).toBe('https://context.example.test/mcp');
+  await page.getByRole('button', { name: 'Copy connector steps', exact: true }).click();
+  const connectorSteps = await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText);
+  expect(connectorSteps).toContain('custom connector');
+  expect(connectorSteps).toContain('Do not paste your API key');
+  expect(connectorSteps).not.toContain(token);
+  await expect(page.getByRole('button', { name: 'Copy complete setup', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Copy instructions', exact: true }).click();
   const prompt = await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText);
   expect(prompt).toContain('verification');
+  expect(prompt).toContain('Pasting this text into an ordinary chat does not connect the API');
   expect(prompt).not.toContain(token);
   await page.getByRole('button', { name: 'Copy API key', exact: true }).click();
   expect(await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText)).toBe(token);
-  await page.getByRole('button', { name: 'Copy complete setup', exact: true }).click();
-  expect(await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText)).toContain(token);
   expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
   await page.screenshot({ path: testInfo.outputPath('agent-access.png'), fullPage: true });
   await page.getByRole('button', { name: 'Rotate key', exact: true }).click();
