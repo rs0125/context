@@ -1,6 +1,6 @@
 # Wareongo Context
 
-A read-only REST and Markdown context service for employee AI tools. It combines reviewed company guides with permitted warehouse facts and CRM opportunities. Employees see leads they created or are assigned to; verified Twenty admins see all mirrored leads. The Next.js console provides Google sign-in, personal agent setup, and an admin Markdown editor. There is no MCP server.
+A read-only REST and Markdown context service for employee AI tools. It combines reviewed company guides with permitted warehouse facts and CRM opportunities. Employees see leads they created or are assigned to; verified Twenty admins see all mirrored leads. The Next.js console provides one administrator password, agent setup, and a Markdown editor. There is no MCP server.
 
 The API uses the dashboard and CRM Automations' existing shared Supabase data, with live Twenty CRM reads to verify identity, admin role, creation, and assignment. Organisational Markdown and its metadata live in the private PostgreSQL table `context_engine_private.knowledge_pages`; no company wiki content is bundled with the source or deployment. Employee context keys are separate credentials with narrower permissions. Source-system tokens stay on the server and are never forwarded to agents.
 
@@ -36,19 +36,19 @@ Open `http://localhost:3000` for the console and `/api/v1/openapi.json` for the 
 Configure the console without changing the database:
 
 ```sh
-npm run setup:console -- --origin http://localhost:3100
+npm run setup:console -- --email employee@wareongo.com --origin http://localhost:3100
 npm run dev -- --port 3100
 ```
 
-The setup script copies only the dashboard's Google client credentials and admin email override, generates independent console session and key-encryption secrets, and keeps console mutations disabled by default. It never runs a migration. Register `http://localhost:3100/api/auth/google/callback` as an authorised redirect URI in that Google OAuth client. Production needs its own exact HTTPS console origin and matching registered callback. The existing dashboard callback remains separate.
+The setup script generates a single random administrator password in `CONTEXT_ADMIN_PASSWORD`, stores the owning employee in `CONTEXT_ADMIN_EMAIL`, and creates independent session and key-encryption secrets in ignored `.env.local`. It preserves existing passwords and key-encryption secrets on repeat runs and never prints them. It removes obsolete Google credentials from this application's environment. Use an exact HTTPS `CONTEXT_CONSOLE_ORIGIN` in production. No OAuth registration is needed.
 
-Only verified Google accounts in the `wareongo.com` Workspace domain with a unique active dashboard roster entry can sign in. Sessions use HttpOnly cookies, OAuth state, PKCE, and nonce checks. Admin access follows the dashboard's `adminAccess` flag or `ADMIN_EMAILS`, with active roster access rechecked on every request. Being a Twenty admin affects CRM visibility; it does not independently grant knowledge-editing permissions.
+The console accepts only the configured administrator password. Its configured employee must have a unique active dashboard roster entry, which is checked again on every request. Password comparison uses fixed-length cryptographic digests; a shared per-process login budget limits guessing before database access. Sessions use signed HttpOnly cookies with an eight-hour expiry, and mutations require the configured origin. Console administration grants knowledge editing; the agent key's warehouse and CRM scopes still follow the owning employee's source access. This version has no employee self-service sign-in.
 
-Employees can copy the system prompt, their personal key, or a combined setup block. Their AI tool must support authenticated HTTP requests to use the REST API. A prompt alone does not add HTTP tooling to a chat application. Keys are masked by default, expire after 30 days, and can be rotated from the console. They are stored as an authentication hash plus an encrypted copy so their owner can retrieve them after login. Keep the encryption secret backed up privately; losing or rotating it requires reissuing console keys. No credentials are saved in browser local storage.
+The administrator can copy the system prompt, the owning employee's API key, or a combined setup block. The AI tool must support authenticated HTTP requests to use the REST API. A prompt alone does not add HTTP tooling to a chat application. Keys are masked by default, expire after 30 days, and can be rotated from the console. They are stored as an authentication hash plus an encrypted copy for retrieval after login. Keep the encryption secret backed up privately; losing or rotating it requires reissuing console keys. No credentials are saved in browser local storage. The console password is not an agent API key.
 
 Admins can create pages, import `.md` text, edit metadata and required scopes, and publish reviewed material. New pages start as drafts; agent reads exclude drafts. Concurrent edits are rejected for review instead of silently overwriting another editor's changes. Publishing knowledge does not require a deployment.
 
-The separate console migration is **prepared, not automatically applied**. Leave `CONTEXT_CONSOLE_WRITES_ENABLED=false` while reviewing the GUI: personal-key issuance and knowledge writes return a setup message, while existing employee API keys keep working. `npm run console:migrate` prints the pending plan without connecting to the database. To enable the console later, an administrator must deliberately run `npm run console:migrate -- --apply`, then set `CONTEXT_CONSOLE_WRITES_ENABLED=true` and restart or redeploy. This creates the private console credential store; it does not import or overwrite organisational pages. Never enable writes before the migration succeeds. The agent-facing `/api/v1` API remains read-only regardless of this flag.
+For a new database, run `npm run console:migrate -- --apply`, then set `CONTEXT_CONSOLE_WRITES_ENABLED=true` and restart or redeploy. This creates and verifies the private console credential store; it does not import or overwrite organisational pages. Without `--apply`, the command only prints its plan. Setup scripts never automatically apply migrations, and writes default to disabled for new checkouts. The agent-facing `/api/v1` API remains read-only regardless of this flag.
 
 Console rotation replaces only the current console-issued key. Keys registered separately through `CONTEXT_API_KEYS_JSON` remain valid until explicitly revoked from that registry.
 
@@ -64,6 +64,12 @@ Console rotation replaces only the current console-issued key. Keys registered s
 | `CONTEXT_API_KEYS_JSON` | JSON array of employee key registrations. Only hashes belong in this variable. |
 | `CONTEXT_ALLOWED_ORIGINS` | Optional comma-separated exact browser origins allowed to make authenticated requests. Wildcards are not supported. |
 | `CONTEXT_REQUESTS_PER_MINUTE` | Request budget per employee key, per application process. Default `30`; permitted range `1`–`120`. This is not a deployment-wide quota. |
+| `CONTEXT_ADMIN_EMAIL` | Active employee whose identity owns console-issued agent keys. |
+| `CONTEXT_ADMIN_PASSWORD` | Single console administrator password, 24–256 characters. Generate privately with `setup:console`. |
+| `CONTEXT_CONSOLE_ORIGIN` | Exact console HTTPS origin, or local HTTP origin for development. |
+| `CONTEXT_SESSION_SECRET` | Independent 32-byte base64url secret for signed browser sessions. |
+| `CONTEXT_KEY_ENCRYPTION_SECRET` | Independent 32-byte base64url secret for encrypted API-key retrieval. Preserve across deployments. |
+| `CONTEXT_CONSOLE_WRITES_ENABLED` | Set to `true` only after console storage has been migrated. |
 
 A key registration has this shape:
 
@@ -240,7 +246,9 @@ npx playwright install chromium
 npm run test:gui
 ```
 
-These tests start a local server if needed and intercept every console request with synthetic fixtures. They cover sign-in layout, prompt/key copying, rotation confirmation, Markdown import, revision conflicts, unsaved changes, and the deferred-storage state. They do not sign in to Google or write to Supabase. Browser artifacts stay under ignored `.local/browser-results/`. A real Google login and enabled console-storage deployment still need their own acceptance check after the callback and migration are configured.
+These tests start a local server if needed and intercept every console request with synthetic fixtures. They cover password login, prompt/key copying, rotation confirmation, Markdown import, revision conflicts, unsaved changes, and the deferred-storage state. They do not use real credentials or write to Supabase. Browser artifacts stay under ignored `.local/browser-results/`.
+
+After private storage is configured, `npm run test:console:live` checks its permissions and exercises admin knowledge creation, publishing, draft visibility, and revision conflicts inside an outer transaction that is always rolled back. It uses one database socket and retains no test pages. This opt-in check requires the configured administrator to have an active roster entry.
 
 With the local server running, exercise the real API and database path from a second terminal:
 

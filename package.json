@@ -13,6 +13,7 @@
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
     "test:gui": "playwright test",
+    "test:console:live": "CONTEXT_LIVE_CONSOLE_TEST=1 vitest run tests/console-live.test.ts",
     "setup:env": "node scripts/import-local-env.mjs",
     "setup:console": "node scripts/setup-console-env.mjs",
     "console:migrate": "node scripts/migrate-console.mjs",

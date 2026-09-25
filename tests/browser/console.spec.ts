@@ -1,9 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
 
-// Every console request is intercepted: these tests never contact Google or a
+// Every console request is intercepted: these tests never contact a real login or
 // database, and every employee, key, and document below is synthetic.
 const token = `wog_ctx_${'A'.repeat(43)}`;
 const rotatedToken = `wog_ctx_${'B'.repeat(43)}`;
+const adminPassword = 'synthetic-admin-password-for-browser-tests';
 const scopes = ['knowledge:read', 'warehouses:read', 'crm:read'];
 const fixturePage = {
   id: 'sample-guide', title: 'Sample guide', summary: 'Synthetic browser fixture.',
@@ -13,6 +14,7 @@ const fixturePage = {
 
 async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boolean; signedIn?: boolean; conflict?: boolean } = {}) {
   const { admin = false, enabled = true, signedIn = true, conflict = false } = options;
+  let authenticated = signedIn;
   const mutations: { path: string; method: string; body: Record<string, unknown> | null }[] = [];
   let key = { id: 'synthetic-key', token, expiresAt: '2026-10-25T00:00:00.000Z', scopes };
   let currentPage = { ...fixturePage };
@@ -27,7 +29,12 @@ async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boo
     const method = request.method();
     const reply = (json: unknown, status = 200) => route.fulfill({ status, json, headers: { 'Cache-Control': 'no-store' } });
     if (method !== 'GET') mutations.push({ path, method, body: request.postData() ? request.postDataJSON() : null });
-    if (path === '/api/console/me') return signedIn
+    if (path === '/api/auth/login') {
+      if (request.postDataJSON()?.password !== adminPassword) return reply({ error: { code: 'INVALID_PASSWORD', message: 'Invalid administrator password.' } }, 401);
+      authenticated = true;
+      return reply({ ok: true });
+    }
+    if (path === '/api/console/me') return authenticated
       ? reply({ employee: { name: 'Alex Example', email: 'alex@example.test', isAdmin: admin, scopes }, apiBaseUrl: 'https://context.example.test/api/v1', capabilities: { writesEnabled: enabled } })
       : reply({ error: { code: 'CONSOLE_UNAUTHENTICATED', message: 'Sign in.' } }, 401);
     if (path === '/api/console/key') {
@@ -53,15 +60,28 @@ async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boo
   return mutations;
 }
 
-test('work-account sign-in is clear and responsive', async ({ page }, testInfo) => {
+test('admin password sign-in is clear and responsive', async ({ page }, testInfo) => {
   await mockConsole(page, { signedIn: false });
-  await expect(page.getByRole('link', { name: 'Continue with Google' })).toHaveAttribute('href', '/api/auth/google');
-  await expect(page.getByText('@wareongo.com', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Admin password')).toHaveAttribute('type', 'password');
+  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('sign-in-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByRole('link', { name: 'Continue with Google' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('sign-in-mobile.png'), fullPage: true });
+});
+
+test('password login clears rejected input and opens the admin workspace on success', async ({ page }) => {
+  await mockConsole(page, { signedIn: false, admin: true });
+  await page.getByLabel('Admin password').fill('incorrect-synthetic-password');
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page.getByLabel('Admin password')).toHaveValue('');
+  await expect(page.locator('.login-card [role=alert]')).toBeVisible();
+  await page.getByLabel('Admin password').fill(adminPassword);
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Knowledge' })).toBeVisible();
+  expect(new URL(page.url()).search).toBe('');
+  expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
 });
 
 test('employee copies instructions and own key, then confirms rotation', async ({ page }, testInfo) => {

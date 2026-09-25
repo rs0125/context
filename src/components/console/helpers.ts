@@ -8,7 +8,7 @@ export class ConsoleApiError extends Error {
 }
 
 export async function consoleRequest<T>(url: string, options: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
-  if (!url.startsWith('/api/console/') && url !== '/api/auth/logout') {
+  if (!url.startsWith('/api/console/') && url !== '/api/auth/login' && url !== '/api/auth/logout') {
     throw new ConsoleApiError('INVALID_ENDPOINT', 'This workspace request is not supported.', 400);
   }
   let response: Response;

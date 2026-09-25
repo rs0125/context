@@ -1,74 +1,101 @@
-import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { consoleCookie, consoleJson, createConsoleSession, getConsoleIdentity, readConsoleSession, readSignedConsoleValue, requireConsoleOrigin, resolveConsoleEmployee, signedConsoleValue, type ConsoleIdentity } from '../src/lib/console-auth';
-import { beginGoogleSignIn, finishGoogleSignIn, verifyGoogleIdToken } from '../src/lib/console-oauth';
+import { consoleAdminEmail, consoleCookie, consoleJson, createConsoleSession, getConsoleIdentity, PASSWORD_SESSION_SUBJECT, readConsoleSession, requireConsoleOrigin, resolveConsoleEmployee, signedConsoleValue, type ConsoleIdentity } from '../src/lib/console-auth';
+import { handlePasswordLogin, matchesConsolePassword } from '../src/lib/console-password';
 
 const origin = 'https://context.example.test';
 const sessionSecret = Buffer.alloc(32, 1).toString('base64url');
-const identity: ConsoleIdentity = { employeeId: 7, email: 'employee@wareongo.com', name: 'Test Employee', isAdmin: false, scopes: ['knowledge:read'] };
+const password = 'synthetic-test-admin-password-0123456789';
+const identity: ConsoleIdentity = { employeeId: 7, email: 'employee@wareongo.com', name: 'Test Employee', isAdmin: true, scopes: ['knowledge:read'] };
 const roster = { id: 7, email: identity.email, name: identity.name, is_active: true, adminAccess: false, dashboardAccess: true, twenty_user_id: 'linked-crm-id' };
 const now = Date.now();
-const env = { NODE_ENV: 'test' as const, CONTEXT_CONSOLE_ORIGIN: origin, CONTEXT_SESSION_SECRET: sessionSecret, GOOGLE_CLIENT_ID: 'test-client-id', GOOGLE_CLIENT_SECRET: 'test-client-secret' };
-const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
-const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'test-google-key', alg: 'RS256', use: 'sig' };
+const env = { NODE_ENV: 'test' as const, CONTEXT_CONSOLE_ORIGIN: origin, CONTEXT_SESSION_SECRET: sessionSecret, CONTEXT_ADMIN_EMAIL: identity.email, CONTEXT_ADMIN_PASSWORD: password };
 
 beforeEach(() => { for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value); vi.stubEnv('ADMIN_EMAILS', ''); });
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 function cookieRequest(cookie: string, init: RequestInit = {}) {
   return new Request(`${origin}/api/console/me`, { ...init, headers: { cookie, ...init.headers } });
 }
-function sessionCookie(overrides: Partial<ConsoleIdentity> = {}) {
-  return consoleCookie('session', createConsoleSession({ ...identity, ...overrides }, 'google-user-123'), 28800).split(';')[0];
+function sessionCookie(overrides: Partial<ConsoleIdentity> = {}, subject = PASSWORD_SESSION_SUBJECT) {
+  return consoleCookie('session', createConsoleSession({ ...identity, ...overrides }, subject), 28800).split(';')[0];
 }
-function database(rows: unknown[]) { const query = vi.fn().mockResolvedValue({ rows }); return { client: { query } as unknown as PoolClient, query }; }
+function database(rows: unknown[]) {
+  const query = vi.fn().mockResolvedValue({ rows });
+  const client = { query } as unknown as PoolClient;
+  const checkout = vi.fn();
+  const transaction = async <T>(work: (client: PoolClient) => Promise<T>): Promise<T> => { checkout(); return work(client); };
+  return { client, query, checkout, transaction, limit: vi.fn() };
+}
+function login(body: unknown = { password }, headers: Record<string, string> = {}) {
+  return new Request(`${origin}/api/auth/login`, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+}
 
-describe('console session and current employee authorization', () => {
-  it('uses signed HttpOnly host-only cookies with fixed bounded lifetime', () => {
-    const token = createConsoleSession(identity, 'google-user-123', env, now);
+describe('password admin session and current roster authorization', () => {
+  it('uses signed HttpOnly host-only cookies with fixed eight-hour lifetime', () => {
+    const token = createConsoleSession(identity, PASSWORD_SESSION_SUBJECT, env, now);
     const cookie = consoleCookie('session', token, 28800, env);
     expect(cookie).toContain('__Host-context_console_session=');
     expect(cookie).toContain('HttpOnly; SameSite=Lax; Max-Age=28800; Secure');
     expect(cookie).not.toContain('Domain=');
-    expect(readConsoleSession(cookieRequest(cookie.split(';')[0]), env, now)).toMatchObject({ email: identity.email, employeeId: 7 });
+    expect(readConsoleSession(cookieRequest(cookie.split(';')[0]), env, now)).toMatchObject({ email: identity.email, employeeId: 7, sub: PASSWORD_SESSION_SUBJECT });
     expect(consoleJson({ ok: true }).headers.get('cache-control')).toContain('no-store');
   });
 
-  it('rejects tampered, expired, duplicated or wrong-purpose cookies', () => {
-    const token = createConsoleSession(identity, 'google-user-123', env, now);
+  it('rejects tampered, expired, duplicated, incomplete and cross-origin cookies', () => {
+    const token = createConsoleSession(identity, PASSWORD_SESSION_SUBJECT, env, now);
     const name = '__Host-context_console_session';
     expect(() => readConsoleSession(cookieRequest(`${name}=${token.slice(0, -3)}xxx`), env, now)).toThrow();
     expect(() => readConsoleSession(cookieRequest(`${name}=${token}`), env, now + 28800_000)).toThrow();
     expect(() => readConsoleSession(cookieRequest(`${name}=${token}; ${name}=${token}`), env, now)).toThrow();
-    expect(() => readConsoleSession(cookieRequest(`${name}=${signedConsoleValue({ email: identity.email }, 'oauth', env)}`), env, now)).toThrow();
+    expect(() => readConsoleSession(cookieRequest(`${name}=${signedConsoleValue({ email: identity.email }, 'session', env)}`), env, now)).toThrow();
     expect(() => readConsoleSession(cookieRequest(''), env, now)).toThrow();
     expect(() => readConsoleSession(cookieRequest(`${name}=${token}`), { ...env, CONTEXT_CONSOLE_ORIGIN: 'https://preview.example.test' }, now)).toThrow();
   });
 
-  it('rechecks active unique roster identity, scopes and admin permission each request', async () => {
+  it('rejects legacy identity subjects and any employee other than the configured admin before database work', async () => {
+    const { client, query } = database([roster]);
+    for (const cookie of [sessionCookie({}, 'legacy-external-subject'), sessionCookie({ email: 'other@wareongo.com' })]) {
+      await expect(getConsoleIdentity(cookieRequest(cookie), client)).rejects.toMatchObject({ status: 401 });
+    }
+    const cookie = sessionCookie();
+    vi.stubEnv('CONTEXT_ADMIN_EMAIL', 'new-admin@wareongo.com');
+    await expect(getConsoleIdentity(cookieRequest(cookie), client)).rejects.toMatchObject({ status: 401 });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('rechecks active unique roster identity and derives API scopes from source permissions, independently of console admin', async () => {
     const { client, query } = database([roster]);
     const request = cookieRequest(sessionCookie());
-    expect(await getConsoleIdentity(request, client)).toMatchObject({ employeeId: 7, isAdmin: false, scopes: ['knowledge:read', 'warehouses:read', 'crm:read'] });
+    expect(await getConsoleIdentity(request, client)).toMatchObject({ employeeId: 7, isAdmin: true, scopes: ['knowledge:read', 'warehouses:read', 'crm:read'] });
     query.mockResolvedValueOnce({ rows: [{ ...roster, adminAccess: true, dashboardAccess: false, twenty_user_id: null }] });
     expect(await getConsoleIdentity(request, client)).toMatchObject({ isAdmin: true, scopes: ['knowledge:read', 'warehouses:read'] });
+    query.mockResolvedValueOnce({ rows: [{ ...roster, adminAccess: false, dashboardAccess: false, twenty_user_id: null }] });
+    expect(await getConsoleIdentity(request, client)).toMatchObject({ isAdmin: true, scopes: ['knowledge:read'] });
     query.mockResolvedValueOnce({ rows: [{ ...roster, is_active: false }] });
     await expect(getConsoleIdentity(request, client)).rejects.toMatchObject({ status: 403 });
     expect(query.mock.calls[0][0]).not.toMatch(/phone_number|agent_session/);
     expect(query.mock.calls[0][1]).toEqual([identity.email]);
   });
 
-  it.each([[], [roster, { ...roster, id: 8 }], [{ ...roster, id: 8 }]])('refuses missing, duplicate or changed employee IDs', async (...rows) => {
-    const { client } = database(rows);
-    await expect(getConsoleIdentity(cookieRequest(sessionCookie()), client)).rejects.toMatchObject({ status: 403 });
+  it.each([
+    { label: 'missing', rows: [] },
+    { label: 'duplicate', rows: [roster, { ...roster, id: 8 }] },
+    { label: 'changed ID', rows: [{ ...roster, id: 8 }] },
+  ])('refuses a $label roster identity', async ({ rows }) => {
+    await expect(getConsoleIdentity(cookieRequest(sessionCookie()), database(rows).client)).rejects.toMatchObject({ status: 403 });
   });
 
-  it('honors admin email allowlisting only alongside an active roster record', async () => {
+  it('does not use the broader API admin allowlist to select a console user or widen scopes', async () => {
     vi.stubEnv('ADMIN_EMAILS', 'OTHER@wareongo.com, EMPLOYEE@wareongo.com');
-    const { client } = database([{ ...roster, dashboardAccess: false }]);
-    expect(await resolveConsoleEmployee(client, identity.email)).toMatchObject({ isAdmin: true });
+    const { client } = database([{ ...roster, dashboardAccess: false, twenty_user_id: null }]);
+    expect(await resolveConsoleEmployee(client, identity.email)).toMatchObject({ isAdmin: true, scopes: ['knowledge:read'] });
+    await expect(resolveConsoleEmployee(client, 'other@wareongo.com')).rejects.toMatchObject({ status: 403 });
     await expect(resolveConsoleEmployee(database([]).client, identity.email)).rejects.toMatchObject({ status: 403 });
-    await expect(resolveConsoleEmployee(client, 'employee@other.example')).rejects.toMatchObject({ status: 403 });
+  });
+
+  it.each(['', 'employee@example.com', 'employee@wareongo.com.evil.example', 'a b@wareongo.com'])('rejects invalid configured admin identity %s', value => {
+    expect(() => consoleAdminEmail({ ...env, CONTEXT_ADMIN_EMAIL: value })).toThrowError(expect.objectContaining({ status: 503 }));
   });
 
   it.each([undefined, 'null', 'https://evil.example', 'http://context.example.test', 'https://context.example.test.evil.example'])('rejects missing or forged browser Origin %s', originHeader => {
@@ -76,72 +103,93 @@ describe('console session and current employee authorization', () => {
     expect(() => requireConsoleOrigin(request)).toThrowError(expect.objectContaining({ status: 403 }));
   });
 
-  it('allows only configured same-origin mutation requests', () => {
+  it('allows only the configured same-origin mutation request', () => {
     expect(() => requireConsoleOrigin(new Request(`${origin}/api/console/key`, { method: 'POST', headers: { Origin: origin } }))).not.toThrow();
     expect(() => requireConsoleOrigin(new Request('https://evil.example/api/console/key', { method: 'POST', headers: { Origin: origin } }))).toThrow();
+    expect(() => requireConsoleOrigin(new Request(`${origin}/api/console/key`, { method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'cross-site' } }))).toThrow();
   });
 });
 
-function claims(overrides: Record<string, unknown> = {}) {
-  return { iss: 'https://accounts.google.com', aud: env.GOOGLE_CLIENT_ID, sub: 'google-user-123',
-    email: identity.email, email_verified: true, hd: 'wareongo.com', nonce: 'test-nonce',
-    iat: Math.floor(now / 1000), exp: Math.floor(now / 1000) + 3600, ...overrides };
-}
-function token(payload = claims(), header: Record<string, unknown> = { alg: 'RS256', kid: jwk.kid }) {
-  const unsigned = [header, payload].map(value => Buffer.from(JSON.stringify(value)).toString('base64url')).join('.');
-  return `${unsigned}.${sign('RSA-SHA256', Buffer.from(unsigned), privateKey).toString('base64url')}`;
-}
+describe('bounded admin password login', () => {
+  it('compares the exact password and issues a session after a read-only current roster lookup', async () => {
+    const dependencies = database([roster]);
+    const response = await handlePasswordLogin(login(), dependencies);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    const cookie = response.headers.get('set-cookie')!;
+    expect(readConsoleSession(cookieRequest(cookie.split(';')[0]))).toMatchObject({ email: identity.email, employeeId: identity.employeeId, sub: PASSWORD_SESSION_SUBJECT });
+    expect(dependencies.checkout).toHaveBeenCalledOnce();
+    expect(dependencies.limit).toHaveBeenCalledOnce();
+    expect(dependencies.query.mock.calls[0][1]).toEqual([identity.email]);
+    expect(JSON.stringify(dependencies.query.mock.calls)).not.toContain(password);
+    expect(matchesConsolePassword(password, env)).toBe(true);
+    expect(matchesConsolePassword(`${password} `, env)).toBe(false);
+  });
 
-describe('Google identity verification', () => {
-  it('verifies a real RSA signature and the exact work-domain claims', () => {
-    expect(verifyGoogleIdToken(token(), 'test-nonce', env.GOOGLE_CLIENT_ID, [jwk], now)).toEqual({ email: identity.email, sub: 'google-user-123' });
-    expect(verifyGoogleIdToken(token(claims({ aud: ['another-audience', env.GOOGLE_CLIENT_ID], azp: env.GOOGLE_CLIENT_ID })), 'test-nonce', env.GOOGLE_CLIENT_ID, [jwk], now)).toMatchObject({ email: identity.email });
+  it.each(['', 'wrong', 'wrong-password-of-a-different-length'])('returns a generic failure without database allocation for wrong passwords', async wrong => {
+    const dependencies = database([roster]);
+    const response = await handlePasswordLogin(login({ password: wrong }), dependencies);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: { code: 'CONSOLE_INVALID_CREDENTIALS', message: 'Password verification failed.' } });
+    expect(response.headers.has('set-cookie')).toBe(false);
+    expect(dependencies.checkout).not.toHaveBeenCalled();
+  });
+
+  it.each(['', 'short-password', ' '.repeat(24), 'x'.repeat(257)])('fails closed for missing, weak-length or oversized configured passwords', async configured => {
+    vi.stubEnv('CONTEXT_ADMIN_PASSWORD', configured);
+    const dependencies = database([roster]);
+    const response = await handlePasswordLogin(login(), dependencies);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: 'CONSOLE_CONFIGURATION' } });
+    expect(dependencies.checkout).not.toHaveBeenCalled();
+  });
+
+  it.each([null, [], {}, { password: 123 }, { password, email: 'other@wareongo.com' }, { password: 'x'.repeat(257) }])('rejects malformed or additional login fields', async body => {
+    const dependencies = database([roster]);
+    expect((await handlePasswordLogin(login(body), dependencies)).status).toBe(400);
+    expect(dependencies.checkout).not.toHaveBeenCalled();
+  });
+
+  it('rejects declared or streamed oversized bodies, invalid JSON and wrong media type before database work', async () => {
+    const dependencies = database([roster]);
+    expect((await handlePasswordLogin(login({ password }, { 'Content-Length': '4097' }), dependencies)).status).toBe(413);
+    expect((await handlePasswordLogin(login({ password: 'x'.repeat(4097) }), dependencies)).status).toBe(413);
+    expect((await handlePasswordLogin(login({ password }, { 'Content-Type': 'text/plain' }), dependencies)).status).toBe(415);
+    const malformed = new Request(`${origin}/api/auth/login`, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: '{' });
+    expect((await handlePasswordLogin(malformed, dependencies)).status).toBe(400);
+    expect(dependencies.checkout).not.toHaveBeenCalled();
+  });
+
+  it('blocks cross-origin login before consuming the password budget or allocating a database connection', async () => {
+    const dependencies = database([roster]);
+    expect((await handlePasswordLogin(login({ password }, { Origin: 'https://evil.example' }), dependencies)).status).toBe(403);
+    expect(dependencies.limit).not.toHaveBeenCalled();
+    expect(dependencies.checkout).not.toHaveBeenCalled();
   });
 
   it.each([
-    { iss: 'https://accounts.google.com.evil.example' }, { aud: 'other-client' },
-    { aud: [env.GOOGLE_CLIENT_ID, 'other-client'] }, { azp: 'other-client' },
-    { nonce: 'other-nonce' }, { hd: 'gmail.com' }, { hd: undefined },
-    { email: 'employee@wareongo.com.evil.example' }, { email_verified: false }, { email_verified: 'true' },
-    { sub: undefined }, { exp: Math.floor(now / 1000) }, { iat: Math.floor(now / 1000) + 120 },
-    { iat: Math.floor(now / 1000) - 601 }, { exp: Math.floor(now / 1000) + 10000 },
-    { nbf: Math.floor(now / 1000) + 120 },
-  ])('rejects an invalid signed identity assertion %j', overrides => {
-    expect(() => verifyGoogleIdToken(token(claims(overrides)), 'test-nonce', env.GOOGLE_CLIENT_ID, [jwk], now)).toThrowError(expect.objectContaining({ status: 401 }));
+    { label: 'inactive', rows: [{ ...roster, is_active: false }] },
+    { label: 'missing', rows: [] },
+    { label: 'duplicate', rows: [roster, { ...roster, id: 8 }] },
+  ])('does not issue a session for a $label roster identity even with a correct password', async ({ rows }) => {
+    const response = await handlePasswordLogin(login(), database(rows));
+    expect(response.status).toBe(403);
+    expect(response.headers.has('set-cookie')).toBe(false);
   });
 
-  it('rejects algorithm/key substitution and invalid signatures', () => {
-    for (const header of [{ alg: 'none', kid: jwk.kid }, { alg: 'HS256', kid: jwk.kid }, { alg: 'RS256', kid: 'wrong' }, { alg: 'RS256', kid: jwk.kid, jku: 'https://evil.example' }]) {
-      expect(() => verifyGoogleIdToken(token(claims(), header), 'test-nonce', env.GOOGLE_CLIENT_ID, [jwk], now)).toThrow();
+  it('bounds all password attempts with one fixed global bucket before the database, including a valid password after exhaustion', async () => {
+    const dependencies = database([roster]);
+    vi.spyOn(Date, 'now').mockReturnValue(now + 120_000);
+    for (let i = 0; i < 10; i++) {
+      expect((await handlePasswordLogin(login({ password: `wrong-${i}` }), { transaction: dependencies.transaction })).status).toBe(401);
     }
-    const good = token();
-    expect(() => verifyGoogleIdToken(`${good.slice(0, -8)}AAAAAAAA`, 'test-nonce', env.GOOGLE_CLIENT_ID, [jwk], now)).toThrow();
-  });
-
-  it('binds Google authorization to browser state, PKCE and nonce without a database socket', async () => {
-    const start = beginGoogleSignIn(env, now);
-    const authorization = new URL(start.url);
-    const cookie = start.cookie.split(';')[0];
-    const transaction = readSignedConsoleValue(cookie.slice(cookie.indexOf('=') + 1), 'oauth', env);
-    expect(authorization.searchParams.get('code_challenge')).toBe(createHash('sha256').update(String(transaction.verifier)).digest('base64url'));
-    expect(authorization.searchParams.get('hd')).toBe('wareongo.com');
-    expect(start.url).not.toContain(String(transaction.verifier));
-    const fetcher = vi.fn<typeof fetch>(async (url, init) => {
-      if (String(url).includes('/token')) {
-        const body = init?.body as URLSearchParams;
-        expect(body.get('code_verifier')).toBe(transaction.verifier);
-        expect(init?.redirect).toBe('error');
-        return Response.json({ id_token: token(claims({ nonce: transaction.nonce })) });
-      }
-      return Response.json({ keys: [jwk] }, { headers: { 'Cache-Control': 'max-age=300' } });
-    });
-    const callback = new Request(`${origin}/api/auth/google/callback?code=test-code&state=${transaction.state}`, { headers: { Cookie: cookie } });
-    expect(await finishGoogleSignIn(callback, { env, now, fetch: fetcher })).toEqual({ email: identity.email, sub: 'google-user-123' });
-    expect(fetcher).toHaveBeenCalledTimes(2);
-    const wrongState = new Request(`${origin}/api/auth/google/callback?code=test-code&state=wrong`, { headers: { Cookie: cookie } });
-    fetcher.mockClear();
-    await expect(finishGoogleSignIn(wrongState, { env, now, fetch: fetcher })).rejects.toThrow();
-    await expect(finishGoogleSignIn(callback, { env, now: now + 600_000, fetch: fetcher })).rejects.toThrow();
-    expect(fetcher).not.toHaveBeenCalled();
+    const blocked = await handlePasswordLogin(login(), { transaction: dependencies.transaction });
+    expect(blocked.status).toBe(429);
+    expect(blocked.headers.get('retry-after')).toBe('60');
+    expect(dependencies.checkout).not.toHaveBeenCalled();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 181_000);
+    expect((await handlePasswordLogin(login(), { transaction: dependencies.transaction })).status).toBe(200);
+    expect(dependencies.checkout).toHaveBeenCalledOnce();
   });
 });

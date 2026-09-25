@@ -78,6 +78,19 @@ describe('console transport and agent instructions', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('posts the admin password as JSON only to the fixed same-origin login route', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    await consoleRequest('/api/auth/login', { method: 'POST', body: { password: 'test-only-password' } });
+    expect(fetchMock).toHaveBeenCalledWith('/api/auth/login', expect.objectContaining({
+      method: 'POST', credentials: 'same-origin', redirect: 'error', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' }, body: '{"password":"test-only-password"}',
+    }));
+    await expect(consoleRequest('/api/auth/login?password=test-only-password')).rejects.toMatchObject({ code: 'INVALID_ENDPOINT' });
+    await expect(consoleRequest('/api/auth/google')).rejects.toMatchObject({ code: 'INVALID_ENDPOINT' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps copied credentials separate from the generic prompt', () => {
     const prompt = makeSystemPrompt('https://context.example.test/api/v1/');
     expect(prompt).toContain('GET https://context.example.test/api/v1/context');
