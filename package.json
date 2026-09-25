@@ -1,0 +1,45 @@
+{
+  "name": "wareongo-context-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "next typegen && tsc --noEmit",
+    "test": "vitest run",
+    "test:gui": "playwright test",
+    "setup:env": "node scripts/import-local-env.mjs",
+    "setup:console": "node scripts/setup-console-env.mjs",
+    "console:migrate": "node scripts/migrate-console.mjs",
+    "keys:create": "node scripts/create-key.mjs",
+    "keys:revoke": "node scripts/revoke-key.mjs",
+    "knowledge:migrate": "node scripts/migrate-knowledge.mjs",
+    "test:knowledge:live": "node scripts/verify-knowledge.mjs",
+    "test:smoke": "node scripts/smoke.mjs",
+    "test:agent": "node scripts/agent-harness.mjs",
+    "test:warehouse:live": "CONTEXT_LIVE_WAREHOUSE_TEST=1 vitest run tests/warehouse-live.test.ts"
+  },
+  "dependencies": {
+    "@vercel/functions": "3.9.9",
+    "gray-matter": "4.0.3",
+    "next": "16.3.6",
+    "pg": "8.23.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/node": "22.20.4",
+    "@types/pg": "8.23.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "typescript": "7.0.2",
+    "vitest": "5.0.2"
+  }
+}
