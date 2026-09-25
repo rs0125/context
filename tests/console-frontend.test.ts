@@ -1,7 +1,40 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ConsoleApiError, consoleRequest, emptyDraft, importMarkdown, makeAgentSetup, makeSystemPrompt, validateDraft } from '../src/components/console/helpers';
+import { ConsoleApiError, consoleRequest, emptyDraft, importMarkdown, loginErrorMessage, makeAgentSetup, makeSystemPrompt, validateDraft } from '../src/components/console/helpers';
 
 afterEach(() => vi.unstubAllGlobals());
+
+describe('sign-in failure messages', () => {
+  const diagnostic = 'sensitive upstream diagnostic, password=test-only-secret, postgres://private-host';
+
+  it.each([
+    ['CONNECTION_FAILED', 0, 'Cannot reach the console server. Check that it is running and refresh this page.'],
+    ['CONSOLE_ORIGIN_DENIED', 403, 'This address is not allowed for console sign-in. Open the configured console URL.'],
+    ['CONSOLE_CONFIGURATION', 503, 'Admin sign-in is not configured on this server.'],
+    ['CONSOLE_SETUP_REQUIRED', 503, 'Workspace setup is incomplete. Finish console setup before signing in.'],
+    ['DATABASE_CONFIGURATION', 503, 'The console data connection is not configured on this server.'],
+    ['CONSOLE_ACCESS_DENIED', 403, 'The configured admin account is not available in the active employee roster. Check its access before signing in.'],
+    ['CONSOLE_INVALID_CREDENTIALS', 401, 'Sign-in failed. Check the admin password and try again.'],
+    ['RATE_LIMITED', 429, 'Too many sign-in attempts. Wait a moment and try again.'],
+  ])('distinguishes %s without including upstream diagnostics', (code, status, expected) => {
+    const message = loginErrorMessage(new ConsoleApiError(code as string, diagnostic, status as number));
+    expect(message).toBe(expected);
+    expect(message).not.toContain('test-only-secret');
+    expect(message).not.toContain('private-host');
+  });
+
+  it.each(['DATABASE_UNAVAILABLE', 'DATABASE_BUSY', 'CONSOLE_UNAVAILABLE'])('does not label %s as an incorrect password', code => {
+    const message = loginErrorMessage(new ConsoleApiError(code, diagnostic, 503));
+    expect(message).toBe('The console is temporarily unavailable. Wait a moment and try again.');
+    expect(message).not.toMatch(/password/i);
+  });
+
+  it('uses safe fallbacks for unknown gateway errors, denied requests, and unexpected exceptions', () => {
+    expect(loginErrorMessage(new ConsoleApiError('UNKNOWN_UPSTREAM', diagnostic, 502))).toMatch(/temporarily unavailable/);
+    expect(loginErrorMessage(new ConsoleApiError('UNKNOWN_DENIAL', diagnostic, 403))).toMatch(/blocked for this request/);
+    expect(loginErrorMessage(new Error(diagnostic))).toBe('Unable to sign in right now. Please try again.');
+    expect(loginErrorMessage({ code: 'CONSOLE_CONFIGURATION', message: diagnostic })).toBe('Unable to sign in right now. Please try again.');
+  });
+});
 
 describe('Markdown import boundaries', () => {
   it('imports supported metadata without silently publishing a reviewed file', () => {

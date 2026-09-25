@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { AgentAccess } from './agent-access';
 import { KnowledgeWorkspace } from './knowledge-workspace';
-import { ConsoleApiError, consoleRequest, errorMessage } from './helpers';
+import { ConsoleApiError, consoleRequest, errorMessage, loginErrorMessage } from './helpers';
 import { Icon } from './icons';
 import { Brand, ConfirmDialog, Notice, Spinner } from './ui';
 import type { ConsoleSession } from './types';
@@ -14,26 +14,20 @@ function SignIn({ loading, error, message, onRetry, onSignedIn }: {
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [loginError, setLoginError] = useState('');
+  const [passwordRejected, setPasswordRejected] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (submitting || loading || !password) return;
-    setSubmitting(true); setLoginError('');
+    setSubmitting(true); setLoginError(''); setPasswordRejected(false);
     try {
       const result = await consoleRequest<{ ok: boolean }>('/api/auth/login', { method: 'POST', body: { password } });
       setPassword('');
       if (result.ok !== true) throw new Error('Unexpected sign-in response');
       await onSignedIn();
     } catch (cause) {
-      if (cause instanceof ConsoleApiError && cause.status === 401) {
-        setLoginError('Sign-in failed. Check the admin password and try again.');
-      } else if (cause instanceof ConsoleApiError && cause.status === 429) {
-        setLoginError('Too many sign-in attempts. Wait a moment and try again.');
-      } else if (cause instanceof ConsoleApiError && cause.code === 'CONSOLE_SETUP_REQUIRED') {
-        setLoginError('Admin sign-in is not configured yet. Complete workspace setup before trying again.');
-      } else {
-        setLoginError('Unable to sign in right now. Please try again.');
-      }
+      setLoginError(loginErrorMessage(cause));
+      setPasswordRejected(cause instanceof ConsoleApiError && cause.status === 401);
     } finally { setPassword(''); setSubmitting(false); }
   }
 
@@ -61,7 +55,7 @@ function SignIn({ loading, error, message, onRetry, onSignedIn }: {
         {error && <Notice action={<button className="text-button" onClick={onRetry} disabled={submitting}>Try again</button>}>{error}</Notice>}
         {loading ? <div className="login-loading"><Spinner label="Checking your session…" /></div> : <form className="admin-login-form" method="post" action="/api/auth/login" onSubmit={event => void submit(event)}>
           <label htmlFor="admin-password">Admin password</label>
-          <input id="admin-password" name="password" type="password" autoComplete="current-password" required value={password} onChange={event => setPassword(event.target.value)} disabled={submitting} aria-invalid={Boolean(loginError)} aria-describedby={loginError ? 'admin-login-error' : undefined} />
+          <input id="admin-password" name="password" type="password" autoComplete="current-password" required value={password} onChange={event => { setPassword(event.target.value); setPasswordRejected(false); }} disabled={submitting} aria-invalid={passwordRejected} aria-describedby={loginError ? 'admin-login-error' : undefined} />
           {loginError && <div id="admin-login-error"><Notice>{loginError}</Notice></div>}
           <button className="button button-primary full-width" type="submit" disabled={submitting || !password}>{submitting ? <Spinner label="Signing in…" /> : <>Sign in<Icon name="arrow" size={17} /></>}</button>
         </form>}
@@ -93,7 +87,7 @@ export function ConsoleApp() {
       setSession(null);
       if (cause instanceof ConsoleApiError && cause.status === 401) {
         if (expectSession) setError('Your session could not be opened. Allow cookies for this site and try again.');
-      } else setError(errorMessage(cause));
+      } else setError(loginErrorMessage(cause));
     } finally { if (!signal?.aborted) setLoading(false); }
   }, []);
   useEffect(() => {

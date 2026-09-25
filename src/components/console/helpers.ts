@@ -41,6 +41,34 @@ export function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : 'Something went wrong. Please try again.';
 }
 
+/** Sign-in messages are fixed locally; upstream diagnostics never reach the form. */
+export function loginErrorMessage(error: unknown): string {
+  if (!(error instanceof ConsoleApiError)) return 'Unable to sign in right now. Please try again.';
+  switch (error.code) {
+    case 'CONNECTION_FAILED':
+      return 'Cannot reach the console server. Check that it is running and refresh this page.';
+    case 'CONSOLE_ORIGIN_DENIED':
+      return 'This address is not allowed for console sign-in. Open the configured console URL.';
+    case 'CONSOLE_CONFIGURATION':
+      return 'Admin sign-in is not configured on this server.';
+    case 'CONSOLE_SETUP_REQUIRED':
+      return 'Workspace setup is incomplete. Finish console setup before signing in.';
+    case 'DATABASE_CONFIGURATION':
+      return 'The console data connection is not configured on this server.';
+    case 'DATABASE_UNAVAILABLE':
+    case 'DATABASE_BUSY':
+    case 'CONSOLE_UNAVAILABLE':
+      return 'The console is temporarily unavailable. Wait a moment and try again.';
+    case 'CONSOLE_ACCESS_DENIED':
+      return 'The configured admin account is not available in the active employee roster. Check its access before signing in.';
+  }
+  if (error.status === 401) return 'Sign-in failed. Check the admin password and try again.';
+  if (error.status === 429) return 'Too many sign-in attempts. Wait a moment and try again.';
+  if (error.status === 403) return 'Console sign-in is blocked for this request. Check the configured address and administrator access.';
+  if (error.status >= 500) return 'The console is temporarily unavailable. Wait a moment and try again.';
+  return 'Unable to sign in right now. Please try again.';
+}
+
 export function makeSystemPrompt(apiBaseUrl: string) {
   const base = apiBaseUrl.replace(/\/+$/, '');
   return `You are helping me work with organisational context through a read-only REST API.
