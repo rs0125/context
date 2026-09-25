@@ -1,9 +1,12 @@
 import type { PoolClient } from 'pg';
 import { HttpError } from './errors';
 import { sanitizeLabel } from './privacy';
+import { addDateConditions, resolveDateQuery } from './query-time';
+import { buildPagination } from './query-pagination';
 import {
   WAREHOUSE_BOOLEAN_FIELDS, WAREHOUSE_CATEGORY_FIELDS, WAREHOUSE_FILTER_CATALOG,
-  WAREHOUSE_NUMERIC_FIELDS, parseWarehouseMeasurement, warehouseMeasurementSql,
+  WAREHOUSE_NUMERIC_FIELDS, WAREHOUSE_SUMMARY_CATALOG, WAREHOUSE_SUMMARY_GROUPS,
+  parseWarehouseMeasurement, warehouseMeasurementSql,
   type FieldEvidence, type WarehouseFilterDefinition,
 } from './warehouse-fields';
 
@@ -71,6 +74,18 @@ function locationConditions(query: URLSearchParams, bind: Bind) {
 
 const NORMALIZERS = WAREHOUSE_NUMERIC_FIELDS.map(warehouseMeasurementSql);
 const NORMALIZATION_JOINS = NORMALIZERS.map(({ join }) => join).join('\n');
+const CREATED_AT = `(w."createdAt" AT TIME ZONE 'UTC')`;
+const UPDATED_AT = `(w.status_updated_at AT TIME ZONE 'UTC')`;
+const SORT_COLUMNS = {
+  created_desc: `date_trunc('milliseconds', ${CREATED_AT})`,
+  created_asc: `date_trunc('milliseconds', ${CREATED_AT})`,
+  updated_desc: `date_trunc('milliseconds', ${UPDATED_AT})`,
+};
+const DATE_SEMANTICS = {
+  created_at: 'Dashboard warehouse record creation time, not first availability or handover date.',
+  updated_at: 'Dashboard Warehouse-row update timestamp (status_updated_at), not a complete edit history. Changes to related WarehouseData may not advance it.',
+  date_bounds: 'Asia/Kolkata calendar dates, inclusive date_from/date_to; start_at is inclusive and end_before is exclusive.',
+};
 const EVIDENCE_SELECT = `jsonb_build_object(${WAREHOUSE_NUMERIC_FIELDS.map((field, index) =>
   `'${field.field}', jsonb_build_object('kind', n${index}.kind, 'value', n${index}.value, 'lower', n${index}.lower, 'upper', n${index}.upper, 'source', n${index}.source)`
 ).join(', ')}) AS field_evidence`;
@@ -79,7 +94,7 @@ const COLUMNS = `w.id, w.city, w.state, w.zone, w."warehouseType" AS warehouse_t
   w.availability, w.status, w."wogVerified" AS verified, w."flooringType" AS flooring_type,
   w.listing_type, w."waterSupply"::text AS water_supply, w."liftAccess" AS lift_access,
   wd."fireNocAvailable" AS fire_noc_available, wd."landType" AS land_type, wd."pollutionZone" AS pollution_zone,
-  w."handoverDate"::text AS handover_date, w."createdAt" AS created_at, w.status_updated_at AS updated_at,
+  w."handoverDate"::text AS handover_date, ${CREATED_AT} AS created_at, ${UPDATED_AT} AS updated_at,
   ${EVIDENCE_SELECT}`;
 const BASE_FROM = 'FROM public."Warehouse" w LEFT JOIN public."WarehouseData" wd ON wd."warehouseId" = w.id';
 const FROM = `${BASE_FROM} ${NORMALIZATION_JOINS}`;
@@ -140,11 +155,12 @@ function warehouse(row: Row, constrainedFields: readonly string[] = []) {
   };
 }
 
-export async function searchWarehouses(client: PoolClient, query: URLSearchParams) {
-  validateKeys(query, WAREHOUSE_FILTER_CATALOG.map(({ name }) => name));
+function warehouseFilters(query: URLSearchParams, catalog = WAREHOUSE_FILTER_CATALOG) {
+  validateKeys(query, catalog.map(({ name }) => name));
+  const time = resolveDateQuery(query, ['created', 'updated']);
   const mode = enumParameter(query, 'match_mode', ['permissive', 'strict'], 'permissive') as 'permissive' | 'strict';
   const includeUnknown = enumParameter(query, 'include_unknown', ['true', 'false'], 'false') === 'true';
-  const numbers = Object.fromEntries(WAREHOUSE_FILTER_CATALOG.filter(item => item.type !== 'string')
+  const numbers = Object.fromEntries(catalog.filter(item => item.type !== 'string')
     .map(item => [item.name, numericParameter(query, item)]));
   const values: unknown[] = [];
   const bind: Bind = value => { values.push(value); return `$${values.length}`; };
@@ -160,7 +176,6 @@ export async function searchWarehouses(client: PoolClient, query: URLSearchParam
     const value = enumParameter(query, field.name, ['true', 'false', 'unknown']);
     if (value) where.push(`${field.column} IS ${value === 'unknown' ? 'NULL' : value.toUpperCase()}`);
   }
-  if (numbers.cursor !== undefined) where.push(`w.id > ${bind(numbers.cursor)}`);
   const constrainedFields: string[] = [];
   const areaMin = numbers.area_min_sqft;
   const areaMax = numbers.area_max_sqft;
@@ -186,26 +201,131 @@ export async function searchWarehouses(client: PoolClient, query: URLSearchParam
     if (max !== undefined) match.push(`n${index}.lower <= ${bind(max)}`);
     where.push(`(${match.join(' AND ')}${includeUnknown ? ` OR n${index}.kind = 'unknown'` : ''})`);
   });
-  const limit = numbers.limit ?? 10;
-  // Only fields used by numeric predicates need parsing during the inventory
-  // scan. Materialize the bounded page before building all response evidence.
-  // This avoids ten normalizers per candidate and repeated regex evaluation in
-  // a large flattened expression, while preserving identical matching rules.
+  where.push(...addDateConditions(time, time.date_field === 'updated' ? UPDATED_AT : CREATED_AT, bind));
+  // Only active numeric predicates need parsing while scanning the inventory.
+  // Search builds the remaining evidence after selecting its bounded page;
+  // summaries never parse unconstrained specifications or infer numeric sums.
   const candidateNormalizers = NORMALIZERS.filter((_, index) => constrainedFields.includes(WAREHOUSE_NUMERIC_FIELDS[index].field))
     .map(({ join }) => join).join('\n');
-  const result = await client.query<Row>(`WITH candidate_page AS MATERIALIZED (
-    SELECT w.id ${BASE_FROM} ${candidateNormalizers}
-    WHERE ${where.join(' AND ')} ORDER BY w.id ASC LIMIT ${bind(limit + 1)}
-  ) SELECT ${COLUMNS} ${BASE_FROM}
-    INNER JOIN candidate_page ON candidate_page.id = w.id
-    ${NORMALIZATION_JOINS} ORDER BY w.id ASC`, values);
-  const selected = result.rows.slice(0, limit);
-  return {
-    items: selected.map(row => warehouse(row, constrainedFields)),
-    nextCursor: result.rows.length > limit ? String(selected[selected.length - 1].id) : null,
+  return { values, bind, where, constrainedFields, candidateNormalizers, numbers, time,
     matching_policy: {
       mode, include_unknown: includeUnknown, range_matching: 'overlap' as const,
       guidance: 'Approximate values and overlapping ranges are provisional candidates. Tell the user that entries marked verification_required need their specifications verified. Unknown fields do not establish suitability; exact numeric properties are null for non-exact evidence.',
+    },
+  };
+}
+
+export async function searchWarehouses(client: PoolClient, query: URLSearchParams) {
+  const filters = warehouseFilters(query);
+  const { values, bind, where, constrainedFields, candidateNormalizers, time } = filters;
+  const limit = filters.numbers.limit ?? 10;
+  const pagination = buildPagination(query, { idColumn: 'w.id', idType: 'integer', sortColumns: SORT_COLUMNS,
+    filterContext: { start_at: time.start_at, end_before: time.end_before },
+  }, bind);
+  where.push(...pagination.where);
+  const result = await client.query<Row>(`WITH candidate_page AS MATERIALIZED (
+    SELECT w.id ${BASE_FROM} ${candidateNormalizers}
+    WHERE ${where.join(' AND ')} ORDER BY ${pagination.orderBy} LIMIT ${bind(limit + 1)}
+  ) SELECT ${COLUMNS}${pagination.sortColumn ? `, ${pagination.sortColumn} AS sort_value` : ''} ${BASE_FROM}
+    INNER JOIN candidate_page ON candidate_page.id = w.id
+    ${NORMALIZATION_JOINS} ORDER BY ${pagination.orderBy}`, values);
+  const selected = result.rows.slice(0, limit);
+  const hasMore = result.rows.length > limit;
+  return {
+    items: selected.map(row => warehouse(row, constrainedFields)),
+    nextCursor: hasMore ? pagination.cursorFor(selected[selected.length - 1] as { id: number; sort_value?: unknown }) : null,
+    matching_policy: filters.matching_policy,
+    query_context: {
+      ...time, sort: pagination.sort, returned_count: selected.length, has_more: hasMore,
+      semantics: { ...DATE_SEMANTICS, pagination: 'One bounded page, not a total. Follow nextCursor unchanged for more results. Concurrent source edits may change later pages; this is not a frozen snapshot.' },
+    },
+  };
+}
+
+const SUMMARY_COLUMNS: Record<typeof WAREHOUSE_SUMMARY_GROUPS[number], string> = {
+  city: 'w.city', state: 'w.state', zone: 'w.zone', type: 'w."warehouseType"',
+  status: 'w.status', availability: 'w.availability', verified: 'w."wogVerified"',
+};
+
+function sqlString(value: string) { return `'${value.replaceAll("'", "''")}'`; }
+
+/** Group before truncating. Unsupported or unsafe labels join one null bucket,
+ * so redaction cannot silently discard records or reveal source contact text.
+ * This conservative SQL grammar is narrower than sanitizeLabel; the JS mapper
+ * applies that common privacy boundary again before serializing any labels.
+ */
+function summaryLabelSql(groupBy: typeof WAREHOUSE_SUMMARY_GROUPS[number]) {
+  if (groupBy === 'verified') return `CASE WHEN ${SUMMARY_COLUMNS.verified} IS TRUE THEN 'true' WHEN ${SUMMARY_COLUMNS.verified} IS FALSE THEN 'false' ELSE NULL END`;
+  const raw = `btrim(${SUMMARY_COLUMNS[groupBy]})`;
+  const allowed = sqlString("^[A-Za-z0-9 .,'()&/_–—-]{1,100}$");
+  const contacts = sqlString('https?:|www[.]|mailto:|tel:|wa[.]me|whatsapp|contact[[:space:]]*(me|us|number)|call[[:space:]]*(me|us|on)');
+  const phones = sqlString('([0-9][[:space:][:punct:]]*){7,}');
+  const spoken = sqlString('((zero|one|two|three|four|five|six|seven|eight|nine|oh)[[:space:],.-]+){6,}(zero|one|two|three|four|five|six|seven|eight|nine|oh)');
+  const label = groupBy === 'city'
+    ? `CASE WHEN lower(${raw}) IN ('bangalore', 'bengaluru') THEN 'Bengaluru' WHEN lower(${raw}) IN ('gurgaon', 'gurugram') THEN 'Gurugram' ELSE ${raw} END`
+    : raw;
+  return `CASE WHEN ${raw} ~ ${allowed} AND lower(${raw}) !~ ${contacts} AND ${raw} !~ ${phones} AND lower(${raw}) !~ ${spoken} THEN ${label} ELSE NULL END`;
+}
+
+function summaryCount(value: unknown) {
+  const count = typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : NaN;
+  if (!Number.isSafeInteger(count) || count < 0) throw new HttpError(503, 'WAREHOUSE_DATA_UNAVAILABLE', 'Warehouse summary could not be verified.');
+  return count;
+}
+
+export async function summarizeWarehouses(client: PoolClient, query: URLSearchParams) {
+  const filters = warehouseFilters(query, WAREHOUSE_SUMMARY_CATALOG);
+  const groupBy = enumParameter(query, 'group_by', WAREHOUSE_SUMMARY_GROUPS, 'city') as typeof WAREHOUSE_SUMMARY_GROUPS[number];
+  const groupLimit = filters.numbers.group_limit ?? 10;
+  const { values, bind, where, candidateNormalizers, time } = filters;
+  const limitParameter = bind(groupLimit);
+  // All matched rows contribute to total and groups in one statement/snapshot.
+  // Only group_limit groups cross the API boundary; no page is extrapolated.
+  const result = await client.query<Row>(`WITH matched AS MATERIALIZED (
+    SELECT ${summaryLabelSql(groupBy)} AS label ${BASE_FROM} ${candidateNormalizers}
+    WHERE ${where.join(' AND ')}
+  ), grouped AS (
+    SELECT min(label COLLATE "C") AS value, count(*) AS count FROM matched GROUP BY lower(label)
+  ), selected_groups AS (
+    SELECT value, count FROM grouped ORDER BY count DESC, value COLLATE "C" ASC NULLS LAST LIMIT ${limitParameter}
+  ) SELECT (SELECT count(*)::text FROM matched) AS total,
+    COALESCE((SELECT jsonb_agg(jsonb_build_object('value', value, 'count', count) ORDER BY count DESC, value COLLATE "C" ASC NULLS LAST) FROM selected_groups), '[]'::jsonb) AS groups,
+    (SELECT count(*) FROM grouped) > ${limitParameter} AS groups_truncated`, values);
+  const row = result.rows[0];
+  const total = summaryCount(row?.total);
+  if (!Array.isArray(row.groups) || row.groups.length > groupLimit || typeof row.groups_truncated !== 'boolean') {
+    throw new HttpError(503, 'WAREHOUSE_DATA_UNAVAILABLE', 'Warehouse summary could not be verified.');
+  }
+  const combined = new Map<string | null, { value: string | null; count: number }>();
+  for (const raw of row.groups) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new HttpError(503, 'WAREHOUSE_DATA_UNAVAILABLE', 'Warehouse summary could not be verified.');
+    const entry = raw as Row;
+    let value = sanitizeLabel(entry.value);
+    if (groupBy === 'city' && ['bangalore', 'bengaluru'].includes(value?.toLowerCase() ?? '')) value = 'Bengaluru';
+    if (groupBy === 'city' && ['gurgaon', 'gurugram'].includes(value?.toLowerCase() ?? '')) value = 'Gurugram';
+    if (groupBy === 'verified' && !['true', 'false'].includes(value ?? '')) value = null;
+    const count = summaryCount(entry.count);
+    if (count === 0) throw new HttpError(503, 'WAREHOUSE_DATA_UNAVAILABLE', 'Warehouse summary could not be verified.');
+    const key = value?.toLowerCase() ?? null;
+    const existing = combined.get(key);
+    if (existing) existing.count += count;
+    else combined.set(key, { value, count });
+  }
+  const groups = [...combined.values()].sort((left, right) => right.count - left.count
+    || (left.value === null ? 1 : right.value === null ? -1 : left.value.localeCompare(right.value)));
+  const returnedTotal = groups.reduce((sum, group) => sum + group.count, 0);
+  if (!Number.isSafeInteger(returnedTotal) || returnedTotal > total || (!row.groups_truncated && returnedTotal !== total)) {
+    throw new HttpError(503, 'WAREHOUSE_DATA_UNAVAILABLE', 'Warehouse summary could not be verified.');
+  }
+  return {
+    total, group_by: groupBy, groups, groups_truncated: row.groups_truncated,
+    other_count: total - returnedTotal, matching_policy: filters.matching_policy,
+    query_context: {
+      ...time, returned_count: groups.length, has_more: false,
+      semantics: { ...DATE_SEMANTICS,
+        aggregation: 'total counts every matched visible warehouse, including provisional numeric matches allowed by matching_policy. Groups count that full set, not a search page; no area or price sums are inferred.',
+        groups: 'Groups ignore case and surrounding spaces. City aliases are combined. A null value includes missing or safely withheld labels. other_count counts records in groups not returned; raise group_limit up to 25 for more groups.',
+      },
     },
   };
 }

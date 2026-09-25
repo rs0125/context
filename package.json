@@ -25,6 +25,8 @@
     "test:agent": "node scripts/agent-harness.mjs",
     "test:warehouse:live": "CONTEXT_LIVE_WAREHOUSE_TEST=1 vitest run tests/warehouse-live.test.ts",
     "test:mcp:live": "node scripts/verify-mcp.mjs",
+    "test:tooling:agent": "node scripts/tooling-eval.mjs",
+    "test:crm-query:live": "CONTEXT_LIVE_CRM_QUERY_TEST=1 vitest run tests/crm-query-live.test.ts",
     "mcp:migrate": "node scripts/migrate-mcp-oauth.mjs"
   },
   "dependencies": {

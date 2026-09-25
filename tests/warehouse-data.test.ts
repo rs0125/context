@@ -76,7 +76,7 @@ describe('warehouse query boundary', () => {
     expect(where).not.toContain("OR n1.kind = 'unknown'");
     expect(where).toContain('ORDER BY w.id ASC');
     expect(sql).not.toContain("King's Road");
-    expect(values).toEqual(['Bangalore', "King's Road", 12, 4, 6, 11]);
+    expect(values).toEqual(['Bangalore', "King's Road", 4, 6, 12, 11]);
     expect(sql).not.toMatch(/contactPerson|contactNumber|address|googleLocation|uploadedBy|scoutNotes|photos/);
   });
 

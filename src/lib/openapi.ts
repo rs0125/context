@@ -1,4 +1,6 @@
-import { WAREHOUSE_FILTER_CATALOG, WAREHOUSE_NUMERIC_FIELDS } from "./warehouse-fields";
+import { WAREHOUSE_FILTER_CATALOG, WAREHOUSE_NUMERIC_FIELDS, WAREHOUSE_SUMMARY_CATALOG } from "./warehouse-fields";
+import { ALL_STAGES, CRM_DATE_FIELDS, CRM_SORTS, CRM_FOLLOW_UP, CRM_SUMMARY_GROUPS } from "./data";
+import { DATE_PERIODS } from "./query-time";
 
 const errorResponses = Object.fromEntries(Object.entries({
   "400": { description: "Invalid query parameters or record identifier." },
@@ -132,7 +134,51 @@ const warehouseFilterDefinitionSchema = {
     default: { type: ["string", "number", "boolean"] },
   },
 };
-const crmStages = ["NEW_LEAD", "RFQ_RECEIVED", "PROPOSAL_SHARED", "FOLLOW_UP", "SITE_VISIT", "NEGOTIATION", "AGREEMENT_WORK", "MONEY_COLLECTION", "RFQ_NOT_RELEVANT", "DEAL_LOST", "DEAL_CLOSED", "DEAL_ON_HOLD"];
+const crmStages = ALL_STAGES;
+const crmViewParameters = [
+  { name: "view", in: "query", description: "Default permitted scope, or narrow to leads created by/assigned to this employee. Independent of creation date. Cannot combine with assigned_to.", schema: { type: "string", enum: ["accessible", "created", "assigned"], default: "accessible" } },
+  { name: "assigned_to", in: "query", description: "Compatibility alias for view=assigned; cannot combine with view.", schema: { type: "string", enum: ["me"] } },
+];
+const crmFilterParameters = [
+  ...crmViewParameters,
+  textParameter("q", "Literal case-insensitive substring of permitted lead/company labels. Labels containing contacts or unsupported characters are excluded from text matching; no note-text search."),
+  textParameter("city", "Requirement city matches any comma-separated member, ignoring case and spaces; Bangalore/Bengaluru and Gurgaon/Gurugram are aliases. Whole labels withheld by privacy checks are excluded."),
+  { name: "stage", in: "query", description: "One recorded CRM stage.", schema: { type: "string", enum: crmStages } },
+  { name: "active_only", in: "query", description: "true excludes closed, lost, on-hold and irrelevant stages. Combines with other filters using AND.", schema: { type: "string", enum: ["true", "false"], default: "false" } },
+  { name: "priority_min", in: "query", description: "Minimum priority stars; unknown priorities do not match.", schema: { type: "integer", minimum: 1, maximum: 5 } },
+  { name: "follow_up_status", in: "query", description: "India calendar days: overdue is before today, today is today, upcoming is after today, missing means no recorded date. Cannot combine with date_field=follow_up.", schema: { type: "string", enum: CRM_FOLLOW_UP } },
+  { name: "date_field", in: "query", description: "created uses native Twenty creation, updated may include automation, meaningful_update is tracked activity rather than full history. Requires period or explicit date bounds. Missing timestamps do not match.", schema: { type: "string", enum: CRM_DATE_FIELDS, default: "created" } },
+  { name: "period", in: "query", description: "Asia/Kolkata calendar period. Weeks start Monday; rolling day periods include today. Mutually exclusive with date_from/date_to.", schema: { type: "string", enum: DATE_PERIODS } },
+  ...["date_from", "date_to"].map(name => ({ name, in: "query", description: `${name === "date_from" ? "First" : "Last"} included India calendar date, YYYY-MM-DD. Inclusive; may be used alone. Cannot combine with period.`, schema: { type: "string", format: "date" } })),
+];
+const serverClockSchema = {
+  type: "object", required: ["as_of", "timezone", "local_date"],
+  properties: { as_of: { type: "string", format: "date-time" }, timezone: { type: "string", const: "Asia/Kolkata" }, local_date: { type: "string", format: "date" } },
+};
+const queryContextSchema = {
+  ...serverClockSchema,
+  description: "The server-resolved calendar interval and pagination metadata. date_from/date_to are inclusive India dates; start_at/end_before are half-open UTC instants. Missing timestamps are excluded by date filters. Keep filters and sort unchanged when following a cursor.",
+  required: [...serverClockSchema.required, "date_field", "period", "date_from", "date_to", "start_at", "end_before"],
+  properties: {
+    ...serverClockSchema.properties,
+    date_field: { type: "string" }, period: { type: ["string", "null"], enum: [...DATE_PERIODS, null] },
+    date_from: { type: ["string", "null"], format: "date" }, date_to: { type: ["string", "null"], format: "date" },
+    start_at: nullableDate, end_before: nullableDate,
+    follow_up: { type: ["object", "null"], description: "Resolved follow_up_status window; missing has no date bounds. These bounds also bind dated cursors.", properties: { status: { type: "string", enum: CRM_FOLLOW_UP }, start_at: nullableDate, end_before: nullableDate, timezone: { type: "string", const: "Asia/Kolkata" } } },
+    sort: { type: "string" }, returned_count: { type: "integer", minimum: 0 }, has_more: { type: "boolean" },
+    date_semantics: { type: "string" }, semantics: { type: "object", additionalProperties: { type: "string" } }, coverage: { type: "string" },
+  },
+};
+const summarySchema = {
+  type: "object", required: ["total", "group_by", "groups", "groups_truncated", "other_count", "query_context"],
+  properties: {
+    total: { type: "integer", minimum: 0, description: "All currently permitted records matching the filters, independent of group_limit or search pages." },
+    group_by: { type: "string" },
+    groups: { type: "array", maxItems: 25, items: { type: "object", required: ["value", "count"], properties: { value: nullableLabel, count: { type: "integer", minimum: 0 } } } },
+    groups_truncated: { type: "boolean" }, other_count: { type: "integer", minimum: 0, description: "Records belonging to groups not returned. Null group labels include missing or safely withheld values." },
+    query_context: { $ref: "#/components/schemas/QueryContext" },
+  },
+};
 const warehouseSchema = {
   type: "object",
   additionalProperties: false,
@@ -192,6 +238,7 @@ const opportunitySchema = {
     last_meaningful_update_at: nullableDate,
     last_meaningful_update_kind: { type: ["string", "null"], enum: ["opportunity", "note", "task", "attachment", "stage", null] },
     stage_entered_at: nullableDate,
+    source_created_at: { ...nullableDate, description: "Native Twenty lead creation time (twenty_created_at), never mirror insertion time or legacy created_at." },
     source_updated_at: nullableDate,
     last_polled_at: nullableDate,
   },
@@ -224,7 +271,7 @@ export function getOpenApiDocument() {
     openapi: "3.1.0",
     info: {
       title: "Wareongo Context API",
-      version: "0.1.0",
+      version: "0.2.0",
       description: "Read-only company knowledge, warehouse specifications, and permitted CRM opportunities. Employees see created or assigned leads; verified Twenty admins see all mirrored leads. Send an employee API key in the Authorization header. The service enforces employee permissions and field allowlists before returning data. Authenticated responses must not be cached. Free-text notes, contact details, and raw media are not exposed. Start with GET /context or GET /context.md.",
     },
     servers: [{ url: "/api/v1" }],
@@ -245,12 +292,14 @@ export function getOpenApiDocument() {
           description: "Returns allowed capabilities, the permitted knowledge index, and API entry points for this authenticated employee.",
           responses: jsonResponses("Context index for the authenticated employee.", false, {
             type: "object",
-            required: ["employee_id", "scopes", "knowledge", "read_only", "api_specification", "context_markdown", "constraints"],
+            required: ["employee_id", "scopes", "knowledge", "read_only", "server_clock", "query_guidance", "api_specification", "context_markdown", "constraints"],
             properties: {
               employee_id: { type: "integer", description: "Internal employee identifier; no email or contact information is returned." },
               scopes: { type: "array", items: { type: "string", enum: ["knowledge:read", "warehouses:read", "crm:read"] } },
               knowledge: { type: "array", items: { $ref: "#/components/schemas/KnowledgeSummary" } },
               read_only: { type: "boolean", const: true },
+              server_clock: { $ref: "#/components/schemas/ServerClock" },
+              query_guidance: { type: "string", description: "Examples and interpretation guidance for the current query tools." },
               api_specification: { type: "string", const: "/api/v1/openapi.json" },
               context_markdown: { type: "string", const: "/api/v1/context.md" },
               constraints: {
@@ -329,13 +378,22 @@ export function getOpenApiDocument() {
           operationId: "searchWarehouses",
           tags: ["Warehouses"],
           summary: "Search warehouses using permitted filters",
-          description: "Returns visible warehouse candidates satisfying all supplied filters. Category values match exactly after trimming/case folding; Bangalore/Bengaluru and Gurgaon/Gurugram are city aliases. Area bounds must match one total_space_sqft entry, not the sum. Default match_mode=permissive admits plausible approximate values and recorded ranges overlapping numeric constraints. Always state when verification_required is true and preserve field_evidence; a match is not a confirmed specification. match_mode=strict excludes approximate/range constrained measurements. include_unknown=true independently admits missing/uninterpretable constrained numeric fields and flags them, even with strict mode; it does not bypass other filters. Discover supported parameters and current category values via /warehouses/filters. Contact lookup, arbitrary text/SQL, addresses, notes, and media are unavailable.",
+          description: "Returns visible warehouse candidates satisfying all supplied filters. Example: city=Bengaluru&docks_min=4&clear_height_min_ft=25. For records added this month use date_field=created&period=this_month. Calendar boundaries use Asia/Kolkata and inclusive date_from/date_to; inspect query_context. Date sorts use unchanged opaque nextCursor with identical filters; id_asc retains the legacy ID cursor. Results are not ranked by cheapest rate or suitability. Category values match exactly after trimming/case folding; Bangalore/Bengaluru and Gurgaon/Gurugram are city aliases. Area bounds match one total_space_sqft entry, not the sum. Default match_mode=permissive admits approximate values and overlapping ranges; explain verification_required and preserve field_evidence. strict excludes approximate/range constrained measurements; include_unknown=true independently admits missing numeric values and requires disclosure. Discover stored categories via /warehouses/filters and use /warehouses/summary for counts. Contacts, arbitrary text/SQL, addresses, notes and media are unavailable.",
           parameters: WAREHOUSE_FILTER_CATALOG.map(({ name, description, ...schema }) => ({
             name, in: "query", description, schema,
           })),
           responses: jsonResponses("Visible warehouse candidates with measurement evidence and the applied matching policy.", true, { $ref: "#/components/schemas/Warehouse" }, {
             matching_policy: { $ref: "#/components/schemas/WarehouseMatchingPolicy" },
+            query_context: { $ref: "#/components/schemas/QueryContext" },
           }),
+        },
+      },
+      "/warehouses/summary": {
+        get: {
+          operationId: "summarizeWarehouses", tags: ["Warehouses"], summary: "Count all matching visible warehouses with bounded groups",
+          description: "Applies the same specification/date filters and uncertainty matching policy as warehouse search. total covers every matching visible record; group_limit bounds groups, not counted records. Example: period=this_month&date_field=created&group_by=city. Null groups include missing or withheld labels; other_count accounts for omitted groups. Candidate counts do not confirm physical specifications or availability. No arbitrary dimensions, SQL, rent sums or area sums are accepted.",
+          parameters: WAREHOUSE_SUMMARY_CATALOG.map(({ name, description, ...schema }) => ({ name, in: "query", description, schema })),
+          responses: jsonResponses("Complete matching count with bounded groups and the applied matching policy.", false, { ...summarySchema, required: [...summarySchema.required, "matching_policy"], properties: { ...summarySchema.properties, matching_policy: { $ref: "#/components/schemas/WarehouseMatchingPolicy" } } }),
         },
       },
       "/warehouses/filters": {
@@ -372,16 +430,40 @@ export function getOpenApiDocument() {
           operationId: "searchOpportunities",
           tags: ["CRM"],
           summary: "Search available CRM opportunities",
-          description: "Defaults to leads created by OR assigned to the employee, or all mirrored leads for verified Twenty admins. view=created or view=assigned narrows either role to that employee's own records. Creation is checked using createdBy.workspaceMemberId, independently of assignment. ownerId alone does not grant access. New records may be absent until mirrored.",
+          description: "Defaults to leads created by OR assigned to the employee, or all mirrored leads for verified Twenty admins. view=created or view=assigned narrows either role to that employee's own records. Find a business using q=Acme. For leads created by you this month use view=created&date_field=created&period=this_month; creator relationship is independent of native Twenty creation time. For follow-ups tomorrow use date_field=follow_up&period=tomorrow. All filters combine with AND. Calendar dates are inclusive in Asia/Kolkata; inspect query_context for exact bounds. Preserve access_scope/source_status. Follow nextCursor unchanged with identical filters and sort; use /crm/summary for totals. New records may be absent until mirrored.",
           parameters: [
-            textParameter("city", "Filter by requirement city."),
-            { name: "stage", in: "query", description: "Filter by recorded CRM stage.", schema: { type: "string", enum: crmStages } },
-            { name: "view", in: "query", description: "Choose the default permitted scope or narrow to your created/assigned leads. Cannot combine with assigned_to.", schema: { type: "string", enum: ["accessible", "created", "assigned"], default: "accessible" } },
-            { name: "assigned_to", in: "query", description: "Compatibility alias for view=assigned. Only me is accepted; cannot combine with view.", schema: { type: "string", enum: ["me"] } },
+            ...crmFilterParameters,
+            { name: "sort", in: "query", description: "Stable ordering; date sorts use the ID as a tie-breaker and place missing dates last.", schema: { type: "string", enum: CRM_SORTS, default: "id_asc" } },
             limitParameter,
-            { name: "cursor", in: "query", description: "Opportunity cursor from the previous response's nextCursor.", schema: { type: "string", format: "uuid" } },
+            { name: "cursor", in: "query", description: "Unchanged nextCursor from the same filters and sort. id_asc accepts the legacy UUID cursor; other sorts use opaque cursors.", schema: { type: "string", minLength: 1, maxLength: 1024 } },
           ],
-          responses: jsonResponses("Permitted opportunities with the applied access scope and mirror freshness information.", true, { $ref: "#/components/schemas/Opportunity" }, { access_scope: accessScopeSchema, source_status: sourceStatusReference }),
+          responses: jsonResponses("Permitted opportunities with resolved dates, pagination, access scope and mirror freshness.", true, { $ref: "#/components/schemas/Opportunity" }, { access_scope: accessScopeSchema, source_status: sourceStatusReference, query_context: { $ref: "#/components/schemas/QueryContext" } }),
+        },
+      },
+      "/crm/filters": {
+        get: {
+          operationId: "getCrmFilters", tags: ["CRM"], summary: "Discover permitted CRM cities and query definitions",
+          description: "Returns at most 100 city labels within the requested live employee view, with supported stages, date fields, periods, sorts, summary dimensions and follow-up semantics. A truncated vocabulary is incomplete; absence of a city does not prove that no record exists. Contacts and note text are excluded.",
+          parameters: crmViewParameters,
+          responses: jsonResponses("Scoped CRM options and interpretation guidance.", false, {
+            type: "object", required: ["cities", "cities_truncated", "stages", "views", "date_fields", "periods", "sorts", "follow_up_statuses", "summary_groups", "date_semantics", "search_guidance", "access_scope", "source_status"],
+            properties: {
+              cities: { type: "array", maxItems: 100, items: { type: "string" } }, cities_truncated: { type: "boolean" },
+              ...Object.fromEntries(Object.entries({ stages: crmStages, views: ["accessible", "created", "assigned"], date_fields: CRM_DATE_FIELDS, periods: DATE_PERIODS, sorts: CRM_SORTS, follow_up_statuses: CRM_FOLLOW_UP, summary_groups: CRM_SUMMARY_GROUPS }).map(([field, values]) => [field, { type: "array", items: { type: "string", enum: values } }])),
+              date_semantics: { type: "string" }, search_guidance: { type: "string" }, access_scope: accessScopeSchema, source_status: sourceStatusReference,
+            },
+          }),
+        },
+      },
+      "/crm/summary": {
+        get: {
+          operationId: "summarizeOpportunities", tags: ["CRM"], summary: "Count all matching permitted CRM leads with bounded groups",
+          description: "Uses the same filters and current authorization as CRM search. Example: view=created&date_field=created&period=this_month&group_by=stage. total covers every matching permitted mirrored record, not a search page. group_limit only caps groups; other_count accounts for omitted groups. Current stage distributions are not historical conversion rates or revenue. Missing/withheld labels share a null group. Failed authorization or stale sources return an error, never partial or zero counts.",
+          parameters: [...crmFilterParameters,
+            { name: "group_by", in: "query", description: "One allowlisted grouping dimension.", schema: { type: "string", enum: CRM_SUMMARY_GROUPS, default: "stage" } },
+            { name: "group_limit", in: "query", description: "Maximum groups to return, ordered by count descending.", schema: { type: "integer", minimum: 1, maximum: 25, default: 10 } },
+          ],
+          responses: jsonResponses("Complete matching count with bounded groups, authorization and freshness.", false, { ...summarySchema, required: [...summarySchema.required, "access_scope", "source_status"], properties: { ...summarySchema.properties, access_scope: accessScopeSchema, source_status: sourceStatusReference } }),
         },
       },
       "/crm/opportunities/{id}": {
@@ -399,7 +481,7 @@ export function getOpenApiDocument() {
           operationId: "getMyBriefing",
           tags: ["CRM"],
           summary: "Get a briefing within the employee's permitted CRM scope",
-          description: "Priorities and counts apply the same live-created-or-assigned scope as record reads; verified Twenty admins receive an organization-wide mirrored briefing. Inspect access_scope before describing coverage. Missing or unsynchronised facts remain unknown.",
+          description: "Priorities and counts apply the same live-created-or-assigned scope as record reads; verified Twenty admins receive an organization-wide mirrored briefing. Counts cover every active permitted lead; priorities return at most 20 ordered by SLA urgency then follow-up date. There are no date filters on this route: use /crm/summary for dated counts or /crm/opportunities for a dated list. Inspect access_scope before describing coverage. Missing or unsynchronised facts remain unknown.",
           responses: jsonResponses("Permitted CRM briefing with access scope and mirror freshness information.", false, {
             type: "object",
             properties: {
@@ -453,6 +535,9 @@ export function getOpenApiDocument() {
         WarehouseFieldEvidence: warehouseFieldEvidenceSchema,
         WarehouseMatchingPolicy: warehouseMatchingPolicySchema,
         WarehouseFilterDefinition: warehouseFilterDefinitionSchema,
+        ServerClock: serverClockSchema,
+        QueryContext: queryContextSchema,
+        Summary: summarySchema,
         Opportunity: opportunitySchema,
         OpportunityDetail: {
           ...opportunitySchema,

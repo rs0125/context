@@ -4,6 +4,7 @@ import { parseEnv } from 'node:util';
 import pg, { type PoolClient } from 'pg';
 import { parseWarehouseMeasurement, warehouseMeasurementSql, WAREHOUSE_NUMERIC_FIELDS } from '../src/lib/warehouse-fields';
 import { getWarehouseFilterOptions, searchWarehouses } from '../src/lib/data';
+import { summarizeWarehouses } from '../src/lib/warehouse-data';
 
 // Explicit opt-in only. One transaction-pool socket; SELECTs and synthetic
 // expressions only. No fixture tables or production writes are needed.
@@ -105,5 +106,41 @@ describe.skipIf(process.env.CONTEXT_LIVE_WAREHOUSE_TEST !== '1')('read-only ware
     const options = await getWarehouseFilterOptions(client, new URLSearchParams('city=Bengaluru'));
     expect(options.catalog.some(field => field.name === 'docks_min')).toBe(true);
     expect(options.options.type.length).toBeGreaterThan(0);
+  }, 20000);
+
+  it('counts the complete visible set with safe grouping, independently of search-page size', async () => {
+    const direct = await client.query('SELECT count(*)::integer AS total FROM public."Warehouse" WHERE visibility IS TRUE');
+    const result = await summarizeWarehouses(client, new URLSearchParams('group_by=city&group_limit=1'));
+    expect(result.total).toBe(direct.rows[0].total);
+    expect(result.groups.length).toBeLessThanOrEqual(1);
+    expect(result.groups.reduce((sum, group) => sum + group.count, 0) + result.other_count).toBe(result.total);
+    expect(result.query_context.returned_count).toBe(result.groups.length);
+    const verified = await summarizeWarehouses(client, new URLSearchParams('group_by=verified&group_limit=25'));
+    expect(verified.total).toBe(result.total);
+    expect(verified.other_count).toBe(0);
+    expect(verified.groups_truncated).toBe(false);
+    expect(verified.groups.length).toBeLessThanOrEqual(3);
+    expect(verified.groups.every(group => [null, 'true', 'false'].includes(group.value))).toBe(true);
+  }, 20000);
+
+  it('matches India date bounds against raw UTC source timestamps and pages date order without duplicates', async () => {
+    const query = new URLSearchParams('date_from=2026-01-01&date_to=2026-12-31&sort=created_desc&limit=2');
+    const first = await searchWarehouses(client, query);
+    const direct = await client.query(`SELECT count(*)::integer AS total FROM public."Warehouse"
+      WHERE visibility IS TRUE AND "createdAt" >= timestamp '2025-12-31 18:30:00'
+        AND "createdAt" < timestamp '2026-12-31 18:30:00'`);
+    const summary = await summarizeWarehouses(client, new URLSearchParams('date_from=2026-01-01&date_to=2026-12-31'));
+    expect(summary.total).toBe(direct.rows[0].total);
+    for (const item of first.items) {
+      expect(item.created_at).not.toBeNull();
+      expect(item.created_at! >= '2025-12-31T18:30:00.000Z').toBe(true);
+      expect(item.created_at! < '2026-12-31T18:30:00.000Z').toBe(true);
+    }
+    if (first.nextCursor) {
+      query.set('cursor', first.nextCursor);
+      const second = await searchWarehouses(client, query);
+      expect(second.items.some(item => first.items.some(previous => previous.id === item.id))).toBe(false);
+      if (second.items.length && first.items.length) expect(second.items[0].created_at! <= first.items.at(-1)!.created_at!).toBe(true);
+    }
   }, 20000);
 });

@@ -71,7 +71,7 @@ The `/oauth/authorize` browser page obtains a short-lived, browser-bound consent
 
 REST endpoints remain available to existing authenticated HTTP clients. Use `/api/v1/context` or `/api/v1/context.md` to discover context and `/api/v1/openapi.json` for the REST schema. A client should report missing tooling, denied reads, unavailable sources, and incomplete coverage instead of inventing records.
 
-The nine MCP tools cover context discovery, knowledge search/read, warehouse filters/search/read, and CRM search/read/briefing. CRM currently exposes no creation-date filter or source creation timestamp: `view=created` means created **by** the employee, not created this month. Tool instructions explicitly disclose that limitation.
+The twelve MCP tools cover context discovery, knowledge search/read, warehouse filters/search/read/summary, and CRM filters/search/read/summary/briefing. Searches support India-calendar periods and explicit date bounds. CRM `view=created` means created **by** the employee; `period=this_month` filters native source creation time. Combine both when needed. See [tool design and task coverage](docs/tooling-audit.md) for examples, source semantics, research and limits.
 
 ## Environment
 
@@ -157,14 +157,21 @@ Authorization: Bearer YOUR_EMPLOYEE_CONTEXT_KEY
 | `GET /api/v1/wiki/pages/{id}` | Read a page; add `?format=markdown` for Markdown text | `knowledge:read` |
 | `GET /api/v1/warehouses` | Filter warehouse specifications | `warehouses:read` |
 | `GET /api/v1/warehouses/filters` | Discover filter definitions and current category options; optionally narrow by city/state | `warehouses:read` |
+| `GET /api/v1/warehouses/summary` | Count all matching visible warehouses and return bounded groups | `warehouses:read` |
 | `GET /api/v1/warehouses/{id}` | Read one warehouse's permitted fields | `warehouses:read` |
 | `GET /api/v1/crm/opportunities` | Search created/assigned leads, or all leads for Twenty admins | `crm:read` |
+| `GET /api/v1/crm/filters` | Discover permitted cities, stages, temporal filters and sorts | `crm:read` |
+| `GET /api/v1/crm/summary` | Count the full permitted matching pipeline by stage, city or priority | `crm:read` |
 | `GET /api/v1/crm/opportunities/{id}` | Read an authorized opportunity | `crm:read` |
 | `GET /api/v1/crm/my-briefing` | Get permitted facts for the employee's briefing | `crm:read` |
 | `GET /api/v1/openapi.json` | OpenAPI 3.1 description | Public |
 | `GET /api/health` | Process liveness; does not query source data | Public |
 
-CRM search accepts `city`, `stage`, `view`, `assigned_to=me`, `limit`, and `cursor`. The default `view=accessible` returns created-or-assigned leads for employees and all mirrored leads for verified Twenty admins. `view=created` and `view=assigned` narrow both roles to their own records. `assigned_to=me` aliases `view=assigned`; combining `view` with `assigned_to` is rejected. Record collections default to 10 results with a maximum of 25. Pass the returned `nextCursor` to request another page. Wiki search requires a query of at most 120 characters and permits at most 10 results.
+CRM search accepts `q` (permitted lead/company labels), `city`, `stage`, `view`, `assigned_to=me`, `active_only`, `priority_min`, `follow_up_status`, date filters, `sort`, `limit`, and `cursor`. Discover supported values at `/api/v1/crm/filters`. The default `view=accessible` returns created-or-assigned leads for employees and all mirrored leads for verified Twenty admins. `view=created` and `view=assigned` narrow both roles to their own records. `assigned_to=me` aliases `view=assigned`; combining `view` with `assigned_to` is rejected.
+
+Warehouse and CRM searches accept `period` (including `today`, `this_month`, `tomorrow`) or inclusive India-calendar `date_from`/`date_to`. `date_field` defaults to `created`; CRM also supports follow-up and activity clocks. Responses echo resolved UTC bounds and server time. Source creation dates are warehouse `created_at` and CRM `source_created_at`; mirror poll/insertion dates never substitute for them. Date sorting uses opaque cursors; ID sorting retains existing ID cursors. Keep filters and sort unchanged between pages. Collections default to 10 records, maximum 25; their size is not a total. Wiki search requires a query of at most 120 characters and permits at most 10 results.
+
+`/api/v1/warehouses/summary` and `/api/v1/crm/summary` apply the same search predicates and permissions, returning full `total`, bounded `groups`, `groups_truncated` and `other_count`. They accept `group_by`/`group_limit`, without pagination or sorting. Dates and warehouse uncertainty still apply to these counts. No endpoint exposes raw SQL, arbitrary field selection or writes.
 
 ### Warehouse discovery and matching
 
@@ -180,7 +187,8 @@ Start with `GET /api/v1/warehouses/filters?city=Bengaluru` when you need availab
 | Docks and washrooms | `docks_min`, `docks_max`, `washrooms_min`, `washrooms_max` |
 | Dimensions | `clear_height_min_ft`, `clear_height_max_ft`, `gate_width_min_ft`, `gate_width_max_ft`, `plinth_height_min_ft`, `plinth_height_max_ft`, `dock_apron_min_ft`, `dock_apron_max_ft`, `approach_road_min_ft`, `approach_road_max_ft` |
 | Power | `power_min_kva`, `power_max_kva` |
-| Matching and pagination | `match_mode`, `include_unknown`, `limit`, `cursor` |
+| Dates | `date_field`, `period`, `date_from`, `date_to` |
+| Matching and pagination | `match_mode`, `include_unknown`, `sort`, `limit`, `cursor` |
 
 All supplied filters are combined with AND. Category matching trims whitespace and ignores case; it is not a substring or semantic search. `Bangalore`/`Bengaluru` and `Gurgaon`/`Gurugram` are recognised city aliases. Area bounds must match a single entry among the first 100 entries in `total_space_sqft`, matching the response cap; entries are never added together. Offered area remains a separate field. Use the catalog for supported bounds and units; do not invent a missing category value or interpret `unknown` as `false`.
 
@@ -274,6 +282,10 @@ These tests start a local server if needed and intercept every console request w
 After private storage is configured, `npm run test:console:live` checks its permissions and exercises admin knowledge creation, publishing, draft visibility, and revision conflicts inside an outer transaction that is always rolled back. It uses one database socket and retains no test pages. This opt-in check requires the configured administrator to have an active roster entry.
 
 `npm run test:mcp:live` explicitly tests the configured local server using the ignored `.local/keys/local-trial.json` employee key. Override with `-- --key-file PATH --origin https://YOUR_HOST` when needed. It registers a test connector, approves a browser-bound PKCE grant, calls read tools through the official MCP client, rotates tokens, checks replay revocation, and revokes its grant on completion. Registration and revoked-grant records remain private in OAuth storage; no source records are edited. Output contains only counts and status codes, never keys or returned business records. A CRM source failure is reported as a source error rather than an empty lead list.
+
+The live MCP check also exercises warehouse additions today, matching totals, CRM leads created this month, scoped filter discovery and tomorrow's follow-ups. `npm run test:warehouse:live` verifies actual warehouse SQL and timestamp semantics with one read-only pooled socket. `npm run test:crm-query:live` runs real PostgreSQL query builders against synthetic VALUES fixtures only; it checks permissions, date boundaries, stable pagination, counts and private-label search exclusion without reading CRM rows.
+
+`npm run test:tooling:agent` discovers the live MCP schemas through a temporary OAuth test grant, revokes that grant, then uses the dashboard's configured OpenAI key to evaluate eight ordinary employee questions against synthetic data. Credentials and business records are never supplied to the model. The run is bounded to 24 model calls and six tool calls per case. Reports stay under ignored `.local/tooling-eval/`; they contain synthetic evidence and grades, without raw model reasoning or credential values. Use `-- --origin http://localhost:3100` to target the canonical local server.
 
 With the local server running, exercise the real API and database path from a second terminal:
 

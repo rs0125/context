@@ -54,7 +54,7 @@ describe('warehouse reads', () => {
     expect(sql).toContain('ORDER BY w.id ASC');
     expect(sql).not.toContain('Bengaluru');
     expect(sql).not.toMatch(/contactNumber|alt_phone_number|photos|negotiated_rent|scoutNotes/);
-    expect(values).toEqual(['Bengaluru', 'Karnataka', 'Industrial', 8, 30000, 50000, 25, 26]);
+    expect(values).toEqual(['Bengaluru', 'Karnataka', 'Industrial', 30000, 50000, 25, 8, 26]);
     expect(output.items[0]).toMatchObject({ id: 1, total_space_sqft: [40000], asking_rate_per_sqft: 25 });
     expect(output.nextCursor).toBeNull();
   });

@@ -96,12 +96,38 @@ async function main() {
         check(typeof item.verification_required === 'boolean', 'WAREHOUSE_EVIDENCE_MISSING');
       }
       result.warehouse = 'read';
+      if (tools.tools.some(tool => tool.name === 'warehouse_summary')) {
+        const args = { city: 'Bangalore', period: 'today', sort: 'created_desc', limit: 2 };
+        const dailyResult = await client.callTool({ name: 'search_warehouses', arguments: args });
+        const daily = data(dailyResult).data;
+        check(!dailyResult.isError && daily.query_context.timezone === 'Asia/Kolkata' && daily.query_context.date_field === 'created', 'WAREHOUSE_DAILY_QUERY_FAILED');
+        for (const item of daily.items) check(['bangalore', 'bengaluru'].includes(item.city?.toLowerCase()) && item.created_at >= daily.query_context.start_at && item.created_at < daily.query_context.end_before, 'WAREHOUSE_DAILY_BOUNDARY_FAILED');
+        const summaryResult = await client.callTool({ name: 'warehouse_summary', arguments: { city: 'Bengaluru', period: 'today', group_by: 'city' } });
+        const summary = data(summaryResult).data;
+        check(!summaryResult.isError && summary.total >= daily.items.length && summary.total === summary.groups.reduce((sum, group) => sum + group.count, 0) + summary.other_count, 'WAREHOUSE_DAILY_SUMMARY_FAILED');
+        result.warehouse_added_today = { returned: daily.items.length, total: summary.total, date: daily.query_context.date_from, timezone: daily.query_context.timezone };
+      }
     }
     if (tools.tools.some(tool => tool.name === 'search_crm_leads')) {
       const crm = await client.callTool({ name: 'search_crm_leads', arguments: { limit: 1 } });
       const value = data(crm);
       check(crm.isError ? typeof value.error?.code === 'string' : Boolean(value.data.access_scope && value.data.source_status), 'CRM_RESULT_INVALID');
       result.crm = crm.isError ? value.error.code : 'read';
+      if (!crm.isError && tools.tools.some(tool => tool.name === 'crm_summary')) {
+        const monthlyResult = await client.callTool({ name: 'search_crm_leads', arguments: { view: 'created', period: 'this_month', sort: 'created_desc', limit: 2 } });
+        const monthly = data(monthlyResult).data;
+        check(!monthlyResult.isError && monthly.access_scope === 'created' && monthly.query_context.date_field === 'created', 'CRM_MONTH_QUERY_FAILED');
+        for (const item of monthly.items) check(item.source_created_at >= monthly.query_context.start_at && item.source_created_at < monthly.query_context.end_before, 'CRM_MONTH_BOUNDARY_FAILED');
+        const summaryResult = await client.callTool({ name: 'crm_summary', arguments: { view: 'created', period: 'this_month', group_by: 'stage' } });
+        const summary = data(summaryResult).data;
+        check(!summaryResult.isError && summary.access_scope === 'created' && summary.total >= monthly.items.length && summary.total === summary.groups.reduce((sum, group) => sum + group.count, 0) + summary.other_count, 'CRM_MONTH_SUMMARY_FAILED');
+        const filters = await client.callTool({ name: 'crm_filters', arguments: { view: 'assigned' } });
+        check(!filters.isError && data(filters).data.date_fields.includes('created') && data(filters).data.access_scope === 'assigned', 'CRM_FILTER_DISCOVERY_FAILED');
+        const followUp = await client.callTool({ name: 'search_crm_leads', arguments: { date_field: 'follow_up', period: 'tomorrow', sort: 'follow_up_asc', limit: 2 } });
+        check(!followUp.isError && data(followUp).data.query_context.date_field === 'follow_up', 'CRM_FOLLOW_UP_QUERY_FAILED');
+        result.crm_created_this_month = { returned: monthly.items.length, total: summary.total, access_scope: summary.access_scope };
+        result.crm_follow_up = 'read';
+      }
     }
     return result;
   });

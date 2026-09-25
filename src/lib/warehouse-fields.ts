@@ -1,4 +1,5 @@
 import { sanitizeLabel } from './privacy';
+import { DATE_PERIODS } from './query-time';
 
 export type FieldEvidence = {
   kind: 'exact' | 'approximate' | 'range' | 'unknown';
@@ -53,6 +54,9 @@ export type WarehouseFilterDefinition = {
   enum?: readonly string[]; minimum?: number; exclusiveMinimum?: number; maximum?: number; default?: number | string;
 };
 
+export const WAREHOUSE_SORTS = ['id_asc', 'created_desc', 'created_asc', 'updated_desc'] as const;
+export const WAREHOUSE_SUMMARY_GROUPS = ['city', 'state', 'zone', 'type', 'status', 'availability', 'verified'] as const;
+
 export const WAREHOUSE_FILTER_CATALOG: readonly WarehouseFilterDefinition[] = [
   ...WAREHOUSE_CATEGORY_FIELDS.map(({ name, description }) => ({ name, type: 'string' as const, description })),
   ...WAREHOUSE_BOOLEAN_FIELDS.map(({ name }) => ({ name, type: 'string' as const, enum: ['true', 'false', 'unknown'], description: `${name}: true, false, or missing (unknown); false never includes missing values.` })),
@@ -64,8 +68,19 @@ export const WAREHOUSE_FILTER_CATALOG: readonly WarehouseFilterDefinition[] = [
   }))),
   { name: 'match_mode', type: 'string', enum: ['permissive', 'strict'], default: 'permissive', description: 'Permissive accepts scalar estimates and overlapping ranges as candidates requiring verification. Strict excludes approximate values and ranges; include_unknown=true can independently admit missing or uninterpretable constrained values.' },
   { name: 'include_unknown', type: 'string', enum: ['true', 'false'], default: 'false', description: 'Include missing or uninterpretable values for constrained numeric fields; these matches require verification.' },
+  { name: 'date_field', type: 'string', enum: ['created', 'updated'], default: 'created', description: 'Date field for period/date bounds. created is warehouse record creation; updated is the Dashboard Warehouse-row timestamp status_updated_at, not complete edit history. Related WarehouseData changes may not advance it. Requires period, date_from or date_to.' },
+  { name: 'period', type: 'string', enum: DATE_PERIODS, description: 'Calendar period in Asia/Kolkata. Weeks start Monday; rolling day periods include today. Cannot combine with explicit date bounds.' },
+  { name: 'date_from', type: 'string', description: 'Inclusive India calendar date YYYY-MM-DD. Combine with date_to or use alone; cannot combine with period.' },
+  { name: 'date_to', type: 'string', description: 'Inclusive India calendar date YYYY-MM-DD. The query includes that complete day; cannot combine with period.' },
+  { name: 'sort', type: 'string', enum: WAREHOUSE_SORTS, default: 'id_asc', description: 'Stable sort with warehouse ID as a tie-breaker and missing dates last. updated_desc uses the Dashboard Warehouse-row timestamp status_updated_at; related WarehouseData edits may not advance it, so this is not complete edit history. Follow nextCursor unchanged.' },
   { name: 'limit', type: 'integer', minimum: 1, maximum: 25, default: 10, description: 'Maximum records per page.' },
-  { name: 'cursor', type: 'integer', minimum: 1, maximum: 2147483647, description: 'Exclusive warehouse ID cursor, from nextCursor.' },
+  { name: 'cursor', type: 'string', description: 'Use nextCursor unchanged. id_asc preserves the legacy positive integer ID cursor; date sorts use an opaque cursor bound to the same filters and sort.' },
+];
+
+export const WAREHOUSE_SUMMARY_CATALOG: readonly WarehouseFilterDefinition[] = [
+  ...WAREHOUSE_FILTER_CATALOG.filter(({ name }) => !['limit', 'cursor', 'sort'].includes(name)),
+  { name: 'group_by', type: 'string', enum: WAREHOUSE_SUMMARY_GROUPS, default: 'city', description: 'Count all matched warehouses by this allowlisted field. City aliases are combined; null groups include missing or safely withheld labels.' },
+  { name: 'group_limit', type: 'integer', minimum: 1, maximum: 25, default: 10, description: 'Maximum groups returned, ordered by count descending. total counts the complete match set; other_count accounts for groups not returned.' },
 ];
 
 // A shared grammar drives JavaScript evidence and PostgreSQL matching. Only

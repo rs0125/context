@@ -6,9 +6,19 @@ import { handleMcpRequest } from '../src/lib/mcp';
 import { handleApiRequest } from '../src/lib/api';
 import type { PoolClient } from 'pg';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { clockContext, resolveDateQuery } from '../src/lib/query-time';
+import { WAREHOUSE_FILTER_CATALOG } from '../src/lib/warehouse-fields';
+import { getOpenApiDocument } from '../src/lib/openapi';
 
 const origin = 'https://context.example.test';
 const employee = { id: 7, email: 'employee@example.test', is_active: true, dashboardAccess: true, adminAccess: false, twenty_user_id: null };
+const now = new Date('2026-09-25T00:00:00Z');
+const meta = { requestId: 'synthetic-mcp-test', generatedAt: now.toISOString() };
+const contextData = { employee_id: 7, read_only: true, scopes: ['knowledge:read'], knowledge: [], server_clock: clockContext(now) };
+const queryContext = { ...resolveDateQuery(new URLSearchParams(), ['created'], now), sort: 'id_asc', returned_count: 1, has_more: true };
+const matchingPolicy = { mode: 'permissive', include_unknown: false, range_matching: 'overlap', guidance: 'Verify uncertain candidates.' };
+const sourceStream = { source_watermark_at: now.toISOString(), last_run_at: now.toISOString(), status: 'ok' };
+const crmAccess = { access_scope: 'created_or_assigned', source_status: { opportunities: sourceStream, notes: sourceStream, tasks: sourceStream } };
 function key(scopes: KeyRegistration['scopes'] = ['knowledge:read', 'warehouses:read', 'crm:read']): KeyRegistration {
   return { id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: employee.email, scopes, expiresAt: '2099-01-01T00:00:00Z' };
 }
@@ -29,7 +39,7 @@ afterEach(() => vi.unstubAllEnvs());
 describe('MCP read-only protocol', () => {
   it.each(['legacy', 'auto'] as const)('works through a real MCP SDK client with %s negotiation', async mode => {
     const registration = key(['knowledge:read']);
-    const read = vi.fn(async () => Response.json({ data: { employee_id: 7, read_only: true }, meta: { generatedAt: '2026-09-25T00:00:00Z' } }));
+    const read = vi.fn(async () => Response.json({ data: contextData, meta }));
     const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
       fetch: async (url, init) => handleMcpRequest(new Request(url, init), { authenticate: async () => registration, read }),
     });
@@ -75,23 +85,36 @@ describe('MCP read-only protocol', () => {
     expect((await handleMcpRequest(rpc('tools/list', {}, { headers: { 'MCP-Protocol-Version': '1999-01-01' } }), deps)).status).toBe(400);
     expect(deps.read).not.toHaveBeenCalled();
   });
-  it('lists all nine read tools and broad warehouse filters', async () => {
+  it('lists all twelve read tools with warehouse catalogs and business output contracts', async () => {
     const response = await handleMcpRequest(rpc('tools/list'), { authenticate: async () => key() });
     const { result } = await wire(response);
-    expect(result.tools).toHaveLength(9);
-    for (const tool of result.tools) expect(tool.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
+    expect(result.tools).toHaveLength(12);
+    for (const tool of result.tools) {
+      expect(tool.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
+      expect(tool.outputSchema.required).toEqual(expect.arrayContaining(['source_path', 'status', 'data', 'meta']));
+    }
     const warehouse = result.tools.find((tool: { name: string }) => tool.name === 'search_warehouses');
     expect(warehouse.inputSchema.additionalProperties).toBe(false);
     expect(warehouse.inputSchema.properties).toHaveProperty('docks_min');
     expect(warehouse.inputSchema.properties).toHaveProperty('power_min_kva');
-    expect(Object.keys(warehouse.inputSchema.properties)).toHaveLength(42);
+    expect(Object.keys(warehouse.inputSchema.properties).sort()).toEqual(WAREHOUSE_FILTER_CATALOG.map(field => field.name).sort());
+    expect(warehouse.inputSchema.properties.cursor.maxLength).toBe(1024);
+    expect(warehouse.outputSchema.properties.data.required).toEqual(expect.arrayContaining(['items', 'nextCursor', 'query_context', 'matching_policy']));
+    const crm = result.tools.find((tool: { name: string }) => tool.name === 'search_crm_leads');
+    expect(crm.inputSchema.properties.date_field.enum).toContain('created');
+    expect(crm.inputSchema.properties.period.enum).toContain('this_month');
+    expect(crm.inputSchema.properties).toHaveProperty('q');
+    expect(crm.description).toContain('view=created, date_field=created, period=this_month');
+    const summary = result.tools.find((tool: { name: string }) => tool.name === 'crm_summary');
+    expect(summary.inputSchema.properties).not.toHaveProperty('cursor');
+    expect(summary.outputSchema.properties.data.required).toEqual(expect.arrayContaining(['total', 'groups', 'groups_truncated', 'other_count', 'query_context', 'access_scope', 'source_status']));
   });
   it('limits tool discovery to granted scopes, rejects unknown tools and does not expose writes', async () => {
     const read = vi.fn();
     const deps = { authenticate: async () => key(['knowledge:read']), read };
     const { result } = await wire(await handleMcpRequest(rpc('tools/list'), deps));
     expect(result.tools.map((tool: { name: string }) => tool.name)).toEqual(['get_context', 'search_knowledge', 'read_knowledge']);
-    for (const name of ['search_crm_leads', 'update_warehouse', 'fetch', 'execute_sql']) {
+    for (const name of ['search_crm_leads', 'crm_summary', 'crm_filters', 'warehouse_summary', 'update_warehouse', 'fetch', 'execute_sql']) {
       const body = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: {} }), deps));
       expect(body.error ?? body.result?.isError).toBeTruthy();
     }
@@ -105,10 +128,10 @@ describe('MCP read-only protocol', () => {
       expect(path).toEqual(['warehouses']);
       expect(await dependencies!.authenticate!(request)).toEqual(registration);
       expect(new URL(request.url).searchParams.get('docks_min')).toBe('5');
-      return Response.json({ data: { items: [{ id: 11, verification_required: true, field_evidence: { dock_count: { kind: 'range', lower: 4, upper: 8 } } }], nextCursor: 11 }, meta: { generatedAt: '2026-09-25T00:00:00Z' } });
+      return Response.json({ data: { items: [{ id: 11, verification_required: true, field_evidence: { dock_count: { kind: 'range', lower: 4, upper: 8 } } }], nextCursor: '11', matching_policy: matchingPolicy, query_context: queryContext }, meta });
     });
     const body = await wire(await handleMcpRequest(rpc('tools/call', { name: 'search_warehouses', arguments: { city: 'Bengaluru', docks_min: 5, limit: 2 } }), { authenticate: async () => registration, read }));
-    expect(body.result.structuredContent).toMatchObject({ source_path: '/api/v1/warehouses?city=Bengaluru&docks_min=5&limit=2', meta: { generatedAt: '2026-09-25T00:00:00Z' } });
+    expect(body.result.structuredContent).toMatchObject({ source_path: '/api/v1/warehouses?city=Bengaluru&docks_min=5&limit=2', meta });
     expect(JSON.parse(body.result.content[0].text).data.items[0].verification_required).toBe(true);
     expect(read).toHaveBeenCalledOnce();
   });
@@ -117,6 +140,71 @@ describe('MCP read-only protocol', () => {
     const body = await wire(await handleMcpRequest(rpc('tools/call', { name: 'search_warehouses', arguments: args }), { authenticate: async () => key(), read }));
     expect(body.error ?? body.result?.isError).toBeTruthy();
     expect(read).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['crm_summary', { limit: 1 }], ['warehouse_summary', { cursor: '17' }],
+    ['crm_filters', { employee_id: 42 }], ['search_crm_leads', { priority_min: 6 }],
+    ['search_crm_leads', { period: 'whenever' }], ['search_crm_leads', { date_from: '09/01/2026' }],
+    ['search_crm_leads', { cursor: 'a'.repeat(1025) }], ['search_warehouses', { cursor: 'a'.repeat(1025) }],
+  ])('rejects unsupported summary, identity or temporal inputs for %s', async (name, args) => {
+    const read = vi.fn();
+    const body = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: args }), { authenticate: async () => key(), read }));
+    expect(body.error ?? body.result?.isError).toBeTruthy();
+    expect(read).not.toHaveBeenCalled();
+  });
+  it('keeps creator scope independent of the requested creation period', async () => {
+    const registration = key(['crm:read']);
+    const read = vi.fn(async (request: Request, path: string[], deps: Parameters<typeof handleApiRequest>[2]) => {
+      expect(path).toEqual(['crm', 'opportunities']);
+      expect(await deps!.authenticate!(request)).toEqual(registration);
+      expect(Object.fromEntries(new URL(request.url).searchParams)).toMatchObject({ view: 'created', date_field: 'created', period: 'this_month', q: 'Sample Logistics', sort: 'created_desc' });
+      return Response.json({ data: { items: [], nextCursor: null, query_context: { ...resolveDateQuery(new URLSearchParams('date_field=created&period=this_month'), ['created'], now), sort: 'created_desc', returned_count: 0, has_more: false }, ...crmAccess }, meta });
+    });
+    const body = await wire(await handleMcpRequest(rpc('tools/call', { name: 'search_crm_leads', arguments: { view: 'created', date_field: 'created', period: 'this_month', q: 'Sample Logistics', sort: 'created_desc' } }), { authenticate: async () => registration, read }));
+    expect(body.result.isError).not.toBe(true);
+    expect(body.result.structuredContent.data.query_context).toMatchObject({ date_from: '2026-09-01', date_to: '2026-09-30', timezone: 'Asia/Kolkata' });
+    expect(read).toHaveBeenCalledOnce();
+  });
+  it.each(['warehouse_summary', 'crm_summary'])('preserves complete totals and truncated groups for %s', async name => {
+    const data = { total: 37, group_by: 'city', groups: [{ value: 'Sample City', count: 30 }], groups_truncated: true, other_count: 7, query_context: queryContext,
+      ...(name === 'crm_summary' ? crmAccess : { matching_policy: matchingPolicy }) };
+    const read = vi.fn(async (request: Request, path: string[]) => {
+      expect(path).toEqual(name === 'crm_summary' ? ['crm', 'summary'] : ['warehouses', 'summary']);
+      expect(new URL(request.url).searchParams.get('group_limit')).toBe('1');
+      return Response.json({ data, meta });
+    });
+    const body = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: { group_by: 'city', group_limit: 1, period: 'this_month' } }), { authenticate: async () => key(), read }));
+    expect(body.result.isError).not.toBe(true);
+    expect(body.result.structuredContent.data).toMatchObject({ total: 37, groups_truncated: true, other_count: 7 });
+  });
+  it('routes scoped CRM discovery and preserves a truncated vocabulary', async () => {
+    const read = vi.fn(async (request: Request, path: string[]) => {
+      expect(path).toEqual(['crm', 'filters']);
+      expect(new URL(request.url).searchParams.get('view')).toBe('assigned');
+      return Response.json({ data: { cities: ['Sample City'], cities_truncated: true, stages: ['NEW_LEAD'], date_fields: ['created'], periods: ['this_month'], sorts: ['id_asc'], ...crmAccess }, meta });
+    });
+    const body = await wire(await handleMcpRequest(rpc('tools/call', { name: 'crm_filters', arguments: { view: 'assigned' } }), { authenticate: async () => key(), read }));
+    expect(body.result.isError).not.toBe(true);
+    expect(body.result.structuredContent.data.cities_truncated).toBe(true);
+  });
+  it('returns a tool error when a successful read violates the declared aggregate contract', async () => {
+    const read = vi.fn(async () => Response.json({ data: { total: '37', groups: [] }, meta }));
+    const body = await wire(await handleMcpRequest(rpc('tools/call', { name: 'crm_summary', arguments: {} }), { authenticate: async () => key(), read }));
+    expect(body.result?.isError ?? body.error).toBeTruthy();
+  });
+  it('documents matching temporal and summary contracts in the REST specification', () => {
+    const document = getOpenApiDocument();
+    const crm = document.paths['/crm/opportunities'].get.parameters;
+    expect(crm.map(parameter => parameter.name)).toEqual(expect.arrayContaining(['q', 'date_field', 'period', 'date_from', 'date_to', 'sort', 'follow_up_status']));
+    expect(document.components.schemas.Opportunity.properties).toHaveProperty('source_created_at');
+    for (const route of ['/warehouses/summary', '/crm/summary'] as const) {
+      const params = document.paths[route].get.parameters.map(parameter => parameter.name);
+      expect(params).toContain('group_limit');
+      expect(params).not.toContain('limit');
+      expect(params).not.toContain('cursor');
+      expect(params).not.toContain('sort');
+    }
+    expect(document.paths['/crm/filters'].get.parameters.map(parameter => parameter.name)).toEqual(['view', 'assigned_to']);
   });
   it('preserves sanitization through the actual API boundary', async () => {
     const query = vi.fn(async (sql: string) => ({ rows: sql.includes('VerifiedNumber') ? [employee] : sql.includes('"Warehouse"') ? [{ id: 12, city: 'Bengaluru', contactNumber: '9876543210', media: { secret: 'private' }, total_space_sqft: [40000] }] : [] }));
@@ -138,7 +226,7 @@ describe('MCP read-only protocol', () => {
     const read: typeof handleApiRequest = async (request, _path, deps) => {
       const identity = await deps!.authenticate!(request);
       await new Promise(resolve => setTimeout(resolve, identity.id === a.id ? 10 : 1));
-      return Response.json({ data: { marker: identity.id } });
+      return Response.json({ data: { ...contextData, marker: identity.id }, meta });
     };
     const values = await Promise.all([a, b].map(async registration => wire(await handleMcpRequest(rpc('tools/call', { name: 'get_context', arguments: {} }), { authenticate: async () => registration, read }))));
     expect(values.map(v => v.result.structuredContent.data.marker)).toEqual([a.id, b.id]);

@@ -17,6 +17,8 @@ function harness(options: { scopes?: KeyRegistration['scopes']; roster?: unknown
       id: 'test-guide', title: 'Synthetic guide', summary: 'Synthetic test summary', updatedAt: '2026-09-25',
       status: 'reviewed', scopes: ['knowledge:read'], body_length: 42,
     }] }] };
+    if (/AS total\b/.test(text) && text.includes('public.opportunities')) return { rows: [{ total: 0, groups: [] }] };
+    if (/AS total\b/.test(text) && text.includes('"Warehouse"')) return { rows: [{ total: 0, groups: [], groups_truncated: false }] };
     if (text.includes('"Warehouse"')) return { rows: [{ id: 12, city: 'Bengaluru', total_space_sqft: [40000], contactNumber: '9876543210', alt_phone_number: '9999999999', media: { secret: 'private' }, negotiated_rent: '18' }] };
     return { rows: [] };
   });
@@ -28,6 +30,29 @@ function harness(options: { scopes?: KeyRegistration['scopes']; roster?: unknown
 const request = (path: string, init?: RequestInit) => new Request(`https://context.example.com/api/v1/${path}`, init);
 
 describe('REST access boundary', () => {
+  it.each(['crm/summary', 'crm/filters'])('applies current identity, view and source freshness to %s', async route => {
+    const deps = harness();
+    const result = await handleApiRequest(request(`${route}?view=created`), route.split('/'), deps);
+    expect(result.status).toBe(200);
+    expect(deps.liveCrmAccess).toHaveBeenCalledWith(expect.objectContaining({ employeeId: 7 }), 'created');
+    expect((await result.json()).data).toMatchObject({ access_scope: 'created', source_status: { opportunities: { status: 'ok' } } });
+    const stale = harness({ stale: true });
+    expect((await handleApiRequest(request(route), route.split('/'), stale)).status).toBe(503);
+    expect(stale.liveCrmAccess).not.toHaveBeenCalled();
+    const denied = harness({ scopes: ['knowledge:read'] });
+    expect((await handleApiRequest(request(route), route.split('/'), denied)).status).toBe(403);
+    expect(denied.liveCrmAccess).not.toHaveBeenCalled();
+    const failed = harness(); failed.liveCrmAccess.mockRejectedValueOnce(new Error('unavailable'));
+    expect((await handleApiRequest(request(route), route.split('/'), failed)).status).toBe(503);
+    expect(failed.query.mock.calls.every(([sql]) => !sql.includes('FROM public.opportunities'))).toBe(true);
+  });
+  it('routes warehouse summaries before ID lookup and protects them with warehouse scope', async () => {
+    const result = await handleApiRequest(request('warehouses/summary?period=today'), ['warehouses', 'summary'], harness());
+    expect(result.status).toBe(200);
+    expect((await result.json()).data).toMatchObject({ total: 0, query_context: { period: 'today', timezone: 'Asia/Kolkata' } });
+    const denied = await handleApiRequest(request('warehouses/summary'), ['warehouses', 'summary'], harness({ scopes: ['crm:read'] }));
+    expect(denied.status).toBe(403);
+  });
   it('rejects missing keys without connecting to the database', async () => {
     const deps = harness();
     const response = await handleApiRequest(request('warehouses'), ['warehouses'], { ...deps, authenticate: req => authenticateKey(req, []) });
