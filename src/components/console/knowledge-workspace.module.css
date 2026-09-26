@@ -1,0 +1,700 @@
+.workspace {
+  width: 100%;
+  min-width: 0;
+  color: var(--text, #fff);
+}
+
+.workspace :global(.page-heading) {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.workspace :global(.page-heading h1) {
+  margin: 8px 0 12px;
+  font-size: 32px;
+  font-weight: 510;
+  letter-spacing: -.022em;
+  line-height: 1.2;
+}
+
+.workspace :global(.page-heading > div > p:last-child) {
+  max-width: 540px;
+  color: var(--muted, #8a8f98);
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+.workspace :global(.heading-actions) {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.workspace :global(.heading-actions > .button) {
+  font-size: 14px;
+}
+
+.workspace :global(.knowledge-grid) {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+
+.workspace :global(.knowledge-library),
+.workspace :global(.editor-panel) {
+  min-width: 0;
+  overflow: hidden;
+  background: var(--surface, #0f1011);
+  border: 1px solid var(--line, #23252a);
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+.workspace :global(.library-heading) {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 16px 12px;
+}
+
+.workspace :global(.library-heading h2) {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 590;
+}
+
+.workspace :global(.library-heading h2 > span) {
+  padding: 2px 6px;
+  border: 1px solid var(--line, #23252a);
+  border-radius: 4px;
+  color: var(--muted, #8a8f98);
+  font-size: 12px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace :global(.search-field) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 16px 16px;
+  padding: 0 12px;
+  border: 1px solid var(--control-border, #62666d);
+  border-radius: 6px;
+  color: var(--muted, #8a8f98);
+  background: var(--canvas, #08090a);
+}
+
+.workspace :global(.search-field:focus-within),
+.workspace :global(.slug-field:focus-within) {
+  outline: 2px solid var(--text, #fff);
+  outline-offset: 3px;
+}
+
+.workspace :global(.search-field > input) {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  border: 0;
+  outline: none;
+  padding: 8px 0;
+  background: transparent;
+  color: var(--text, #fff);
+  font: inherit;
+  font-size: 14px;
+}
+
+.workspace :global(.search-field input::placeholder) {
+  color: var(--muted, #8a8f98);
+  opacity: 1;
+}
+
+.workspace :global(.page-list) {
+  max-height: 680px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.workspace :global(.page-list-item) {
+  display: block;
+  width: 100%;
+  padding: 16px;
+  border: 0;
+  border-top: 1px solid var(--line, #23252a);
+  border-left: 3px solid transparent;
+  border-radius: 0;
+  color: var(--text, #fff);
+  background: var(--surface, #0f1011);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.workspace :global(.page-list-item.selected) {
+  border-left-color: var(--text-secondary, #d0d6e0);
+  background: var(--surface-raised, #161718);
+}
+
+.workspace :global(.page-list-item:hover:not(:disabled)) {
+  background: var(--surface-raised, #161718);
+}
+
+.workspace :global(.page-list-item:focus-visible) {
+  outline: 2px solid var(--text, #fff);
+  outline-offset: -4px;
+}
+
+.workspace :global(.page-item-top) {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.workspace :global(.page-list-item > strong) {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 590;
+  line-height: 1.5;
+}
+
+.workspace :global(.publication-badge) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--line, #23252a);
+  border-radius: 4px;
+  background: var(--surface-raised, #161718);
+  color: var(--text-secondary, #d0d6e0);
+  font-size: 12px;
+  line-height: 1.3;
+  font-weight: 400;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.workspace :global(.publication-draft) {
+  border-style: dashed;
+  color: var(--muted, #8a8f98);
+}
+
+.workspace :global(.page-item-summary) {
+  display: -webkit-box;
+  margin: 4px 0 8px;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: var(--muted, #8a8f98);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.workspace :global(.page-item-date) {
+  color: var(--muted, #8a8f98);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.workspace :global(.library-footnote) {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 16px;
+  border-top: 1px solid var(--line, #23252a);
+  background: var(--surface, #0f1011);
+  color: var(--muted, #8a8f98);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.workspace :global(.library-footnote > svg) {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.workspace :global(.library-state) {
+  padding: 32px 16px;
+  color: var(--muted, #8a8f98);
+  font-size: 14px;
+}
+
+.workspace :global(.empty-library) {
+  display: flex;
+  min-height: 320px;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+}
+
+.workspace :global(.empty-library h3) {
+  margin: 16px 0 8px;
+  color: var(--text, #fff);
+  font-size: 15px;
+  font-weight: 590;
+}
+
+.workspace :global(.empty-library p) {
+  max-width: 220px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.workspace :global(.editor-empty) {
+  display: flex;
+  min-height: 480px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 32px;
+  text-align: center;
+}
+
+.workspace :global(.editor-empty-icon) {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  margin-bottom: 8px;
+  border: 1px solid var(--line, #23252a);
+  border-radius: 12px;
+  background: var(--surface-raised, #161718);
+  color: var(--muted, #8a8f98);
+}
+
+.workspace :global(.editor-empty h2) {
+  margin: 16px 0;
+  font-size: 20px;
+  font-weight: 510;
+  letter-spacing: -.012em;
+  line-height: 1.3;
+}
+
+.workspace :global(.editor-empty > p:not(.eyebrow)) {
+  max-width: 350px;
+  margin: 0 0 24px;
+  color: var(--muted, #8a8f98);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.workspace :global(.editor-empty > .notice) {
+  margin-top: 24px;
+}
+
+.workspace :global(.editor-loading) {
+  display: grid;
+  place-items: center;
+  min-height: 480px;
+  color: var(--muted, #8a8f98);
+}
+
+.workspace :global(.editor-toolbar) {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--line, #23252a);
+  background: var(--surface, #0f1011);
+}
+
+.workspace :global(.editor-toolbar > div) {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.workspace :global(.editor-toolbar > .button) {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.workspace :global(.editor-save-status) {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted, #8a8f98);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.workspace :global(.unsaved-dot) {
+  width: 6px;
+  height: 6px;
+  background: var(--text, #fff);
+  flex-shrink: 0;
+  border-radius: 50%;
+}
+
+.workspace :global(.editor-content) {
+  padding: 20px;
+}
+
+.workspace :global(.editor-fields) {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.workspace :global(.field) {
+  margin: 0 0 24px;
+}
+
+.workspace :global(.field > label),
+.workspace :global(.scope-picker > legend) {
+  display: block;
+  padding: 0;
+  margin-bottom: 8px;
+  color: var(--text, #fff);
+  font-size: 14px;
+  font-weight: 510;
+  line-height: 1.5;
+}
+
+.workspace :global(.field > label > span) {
+  margin-left: 8px;
+  color: var(--muted, #8a8f98);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.workspace :global(.field input),
+.workspace :global(.field textarea),
+.workspace :global(.field select) {
+  display: block;
+  min-width: 0;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--control-border, #62666d);
+  border-radius: 6px;
+  background: var(--canvas, #08090a);
+  color: var(--text-secondary, #d0d6e0);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.workspace :global(.field textarea) {
+  resize: vertical;
+}
+
+.workspace :global(.field input::placeholder),
+.workspace :global(.field textarea::placeholder) {
+  color: var(--muted, #8a8f98);
+  opacity: 1;
+}
+
+.workspace :global(.field .title-input) {
+  font-size: 24px;
+  font-weight: 510;
+  line-height: 1.4;
+  letter-spacing: -.012em;
+}
+
+.workspace :global(.field input:disabled) {
+  color: var(--muted, #8a8f98);
+  background: var(--surface-raised, #161718);
+  cursor: not-allowed;
+}
+
+.workspace :global(.slug-field) {
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--control-border, #62666d);
+  border-radius: 6px;
+  background: var(--canvas, #08090a);
+}
+
+.workspace :global(.slug-field.is-disabled) {
+  border-color: var(--line, #23252a);
+}
+
+.workspace :global(.slug-field > span) {
+  padding-left: 12px;
+  white-space: nowrap;
+  color: var(--muted, #8a8f98);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.workspace :global(.slug-field > input) {
+  padding-left: 0;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.workspace :global(.markdown-label) {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.workspace :global(.markdown-label label) {
+  font-size: 14px;
+  font-weight: 510;
+}
+
+.workspace :global(.markdown-label > span) {
+  color: var(--muted, #8a8f98);
+  font-size: 12px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace :global(.markdown-label > .over-limit) {
+  color: var(--text, #fff);
+  font-weight: 590;
+  text-decoration: underline wavy;
+}
+
+.workspace :global(.field > .markdown-editor) {
+  min-height: 320px;
+  padding: 20px;
+  border-radius: 6px 6px 0 0;
+  background: var(--canvas, #08090a);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 14px;
+  line-height: 1.8;
+  tab-size: 2;
+}
+
+.workspace :global(.markdown-footer) {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding: 12px;
+  border: 1px solid var(--line, #23252a);
+  border-top: 0;
+  border-radius: 0 0 6px 6px;
+  color: var(--muted, #8a8f98);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.workspace :global(.publication-settings) {
+  padding-top: 24px;
+  border-top: 1px solid var(--line, #23252a);
+}
+
+.workspace :global(.publication-heading) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.workspace :global(.publication-heading h2) {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 590;
+}
+
+.workspace :global(.metadata-grid) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.workspace :global(.metadata-grid > .field) {
+  margin: 0;
+}
+
+.workspace :global(.field-hint) {
+  margin: 8px 0 0;
+  color: var(--muted, #8a8f98);
+  font-size: 12px;
+  line-height: 1.6;
+  font-weight: 400;
+}
+
+.workspace :global(.scope-picker) {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.workspace :global(.scope-picker > label) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  color: var(--text, #fff);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.workspace :global(.scope-picker input) {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--text, #fff);
+}
+
+.workspace :global(.scope-picker label > small) {
+  margin-left: auto;
+  color: var(--muted, #8a8f98);
+  font-size: 12px;
+}
+
+.workspace :global(.publication-reminder) {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line, #23252a);
+  border-radius: 6px;
+  background: var(--surface-raised, #161718);
+  color: var(--muted, #8a8f98);
+}
+
+.workspace :global(.publication-reminder > svg) {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+
+.workspace :global(.publication-reminder p) {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+@media (max-width: 1050px) {
+  .workspace :global(.knowledge-grid) {
+    grid-template-columns: 248px minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .workspace :global(.metadata-grid) {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace :global(.page-heading) {
+    align-items: flex-start;
+  }
+
+  .workspace :global(.heading-actions) {
+    margin-top: 32px;
+  }
+
+  .workspace :global(.editor-toolbar) {
+    padding: 16px;
+  }
+}
+
+@media (max-width: 760px) {
+  .workspace :global(.page-heading) {
+    display: block;
+  }
+
+  .workspace :global(.page-heading h1) {
+    font-size: 28px;
+  }
+
+  .workspace :global(.heading-actions) {
+    margin-top: 20px;
+    flex-wrap: wrap;
+  }
+
+  .workspace :global(.knowledge-grid) {
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+
+  .workspace :global(.page-list) {
+    max-height: 280px;
+  }
+
+  .workspace :global(.page-list-item) {
+    padding: 16px;
+  }
+
+  .workspace :global(.page-item-top) {
+    margin-bottom: 8px;
+  }
+
+  .workspace :global(.page-item-summary) {
+    -webkit-line-clamp: 1;
+  }
+
+  .workspace :global(.empty-library) {
+    min-height: 200px;
+  }
+
+  .workspace :global(.editor-empty) {
+    min-height: 480px;
+    padding: 32px 24px;
+  }
+
+  .workspace :global(.editor-content) {
+    padding: 24px 16px;
+  }
+
+  .workspace :global(.editor-toolbar) {
+    align-items: center;
+    gap: 12px;
+  }
+
+  .workspace :global(.field > label > span) {
+    display: block;
+    margin: 4px 0 0;
+  }
+
+  .workspace :global(.field > .markdown-editor) {
+    padding: 16px;
+  }
+
+  .workspace :global(.field input),
+  .workspace :global(.field textarea),
+  .workspace :global(.field select),
+  .workspace :global(.search-field > input) {
+    font-size: 16px;
+  }
+
+  .workspace :global(.field .title-input) {
+    font-size: 22px;
+  }
+}
+
+@media (max-width: 480px) {
+  .workspace :global(.editor-toolbar) {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .workspace :global(.editor-toolbar > div) {
+    justify-content: space-between;
+  }
+
+  .workspace :global(.editor-toolbar > .button) {
+    width: 100%;
+  }
+
+  .workspace :global(.editor-toolbar > div) {
+    overflow-wrap: anywhere;
+  }
+}

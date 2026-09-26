@@ -25,6 +25,7 @@ test.beforeEach(async ({ page }) => {
 test.afterEach(async ({ page }) => { expect(browserErrors.get(page)).toEqual([]); });
 
 async function screenshot(page: Page, filename: string) {
+  await page.evaluate(() => document.fonts.ready);
   await page.evaluate(() => { if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); window.scrollTo(0, 0); });
   await page.mouse.move(0, 0);
   await page.screenshot({ path: `previews/${filename}`, fullPage: true,
@@ -32,12 +33,16 @@ async function screenshot(page: Page, filename: string) {
 }
 
 type ConsoleControl = { signedIn: boolean; admin: boolean; email?: string; scopes?: string[] };
-async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boolean; signedIn?: boolean; conflict?: boolean; employeeScopes?: string[]; keyScopes?: string[]; entryPath?: string; control?: ConsoleControl; shared?: boolean; expiresAt?: string } = {}) {
+async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boolean; signedIn?: boolean; conflict?: boolean; employeeScopes?: string[]; keyScopes?: string[]; entryPath?: string; control?: ConsoleControl; shared?: boolean; expiresAt?: string; additionalPages?: number } = {}) {
   const { admin = false, enabled = true, signedIn = true, conflict = false, employeeScopes = scopes, keyScopes = employeeScopes, entryPath = '/' } = options;
   let authenticated = signedIn;
   const mutations: { path: string; method: string; body: Record<string, unknown> | null }[] = [];
   let key = { id: 'synthetic-key', token, expiresAt: options.expiresAt ?? '2026-10-25T00:00:00.000Z', scopes: keyScopes };
   let currentPage = { ...fixturePage };
+  const additionalPages = Array.from({ length: options.additionalPages ?? 0 }, (_, index) => ({ ...fixturePage,
+    id: `reference-${index + 1}`, title: `Reference guide ${index + 1} — ${'Long synthetic document title '.repeat(3)}`,
+    summary: 'Synthetic information for checking a growing document library.',
+  }));
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
       writeText: async (text: string) => { (window as unknown as { copiedText: string }).copiedText = text; },
@@ -71,7 +76,7 @@ async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boo
     }
     if (path.startsWith('/api/console/knowledge') && !(options.control?.admin ?? admin)) return reply({ error: { code: 'ADMIN_REQUIRED', message: 'Administrator access is required to edit knowledge.' } }, 403);
     if (path === '/api/console/knowledge') {
-      if (method === 'GET') return reply({ pages: [currentPage] });
+      if (method === 'GET') return reply({ pages: [currentPage, ...additionalPages] });
       const body = request.postDataJSON();
       currentPage = { ...body, updatedAt: '2026-09-25', revision: '125' };
       return reply({ page: currentPage }, 201);
@@ -96,11 +101,13 @@ test('Google sign-in is clear and responsive', async ({ page }) => {
   await expect(page.locator('.login-card')).toContainText('@wareongo.com');
   await expect(page.locator('input[type=password]')).toHaveCount(0);
   await expect(page.getByText('Admin sign in', { exact: true })).toHaveCount(0);
-  await screenshot(page, 'google-sign-in-desktop.png');
+  await screenshot(page, 'linear-sign-in-desktop.png');
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole('link', { name: 'Continue with Google' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await screenshot(page, 'google-sign-in-mobile.png');
+  await screenshot(page, 'linear-sign-in-mobile.png');
+  await page.setViewportSize({ width: 390, height: 667 });
+  await expect(page.getByRole('link', { name: 'Continue with Google' })).toBeInViewport({ ratio: 1 });
 });
 
 test('Google starts with GET and returns the employee to their own workspace', async ({ page }) => {
@@ -148,10 +155,10 @@ test('employee follows the three-step setup and copies URL and key separately', 
   await page.getByRole('button', { name: 'Copy key', exact: true }).click();
   expect(await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText)).toBe(token);
   expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
-  await screenshot(page, 'google-employee-access.png');
+  await screenshot(page, 'linear-employee-access.png');
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await screenshot(page, 'google-employee-access-mobile.png');
+  await screenshot(page, 'linear-employee-access-mobile.png');
   await page.getByText('Other AI tools & API details', { exact: true }).click();
   await page.getByRole('button', { name: 'Copy instructions', exact: true }).click();
   const prompt = await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText);
@@ -174,12 +181,14 @@ test('admin knowledge access does not widen the employee key read scopes', async
   await expect(page.getByRole('list', { name: 'Your read access' })).toHaveText('Company knowledge');
   await expect(page.getByText('CRM records follow your permissions in Twenty.')).toHaveCount(0);
   await expect(page.getByRole('status').filter({ hasText: 'but this key does not' })).toBeVisible();
-  await screenshot(page, 'google-admin-access.png');
+  await screenshot(page, 'linear-admin-access.png');
 });
 
 test('admin edits with revisions and protects unsaved work', async ({ page }) => {
   const mutations = await mockConsole(page, { admin: true });
   await page.getByRole('button', { name: 'Knowledge' }).click();
+  await expect(page.getByRole('button', { name: /Sample guide/ })).toBeVisible();
+  await screenshot(page, 'linear-knowledge-library.png');
   await page.getByRole('button', { name: /Sample guide/ }).click();
   await expect(page.getByLabel('Page ID')).toBeDisabled();
   await page.getByLabel('Markdown content').fill('# Sample guide\n\nEdited synthetic information.');
@@ -190,7 +199,66 @@ test('admin edits with revisions and protects unsaved work', async ({ page }) =>
   await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Save changes', exact: true })).toBeDisabled();
   expect(mutations[0]).toMatchObject({ method: 'PUT', body: { revision: '123', id: 'sample-guide', status: 'reviewed' } });
-  await screenshot(page, 'google-knowledge-editor.png');
+  await screenshot(page, 'linear-knowledge-editor.png');
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await screenshot(page, 'linear-knowledge-editor-mobile.png');
+});
+
+test('narrow knowledge editor keeps publication controls within the writing surface', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  await mockConsole(page, { admin: true });
+  await page.getByRole('button', { name: 'Knowledge', exact: true }).click();
+  await page.getByRole('button', { name: 'New page', exact: true }).click();
+  await page.getByLabel('Page title').fill('A synthetic guide');
+  await page.getByLabel('Publication status').selectOption('reviewed');
+  const publish = page.getByRole('button', { name: 'Save & publish', exact: true });
+  await expect(publish).toBeVisible();
+  const panel = await page.getByRole('region', { name: 'Page editor' }).boundingBox();
+  const button = await publish.boundingBox();
+  expect(panel).not.toBeNull(); expect(button).not.toBeNull();
+  expect(button!.x).toBeGreaterThanOrEqual(panel!.x);
+  expect(button!.x + button!.width).toBeLessThanOrEqual(panel!.x + panel!.width);
+  expect(await publish.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test('a growing knowledge library stays searchable across mobile, tablet and wide screens', async ({ page }) => {
+  await mockConsole(page, { admin: true, additionalPages: 80 });
+  await page.getByRole('button', { name: 'Knowledge', exact: true }).click();
+  const library = page.getByRole('complementary', { name: 'Knowledge pages' });
+  await expect(library.locator('.page-list-item')).toHaveCount(81);
+  await expect(library.getByLabel('81 of 81 pages')).toBeVisible();
+  await page.getByLabel('Search knowledge pages').fill('Reference guide 80');
+  await expect(library.locator('.page-list-item')).toHaveCount(1);
+  await expect(library.getByLabel('1 of 81 pages')).toBeVisible();
+  for (const width of [320, 390, 768, 1440, 1920]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect(library.getByRole('button', { name: /Reference guide 80/ })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
+  await page.getByLabel('Search knowledge pages').fill('No such synthetic guide');
+  await expect(page.getByRole('heading', { name: 'No matching pages' })).toBeVisible();
+  await page.getByLabel('Search knowledge pages').fill('');
+  await expect(library.locator('.page-list-item')).toHaveCount(81);
+});
+
+test('keyboard access reaches the connection controls and confirmation returns focus', async ({ page }) => {
+  await mockConsole(page);
+  await expect(page.getByLabel('Employee API key')).toBeVisible();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('link', { name: 'Skip to main content' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await page.getByText('Key settings', { exact: true }).focus();
+  await page.keyboard.press('Enter');
+  const replace = page.getByRole('button', { name: 'Replace key', exact: true });
+  await replace.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await expect(page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(replace).toBeFocused();
 });
 
 test('Markdown import stays draft until explicitly published', async ({ page }) => {
@@ -229,7 +297,7 @@ test('deferred storage disables writes without preventing GUI review on mobile',
   await expect(page.getByRole('button', { name: 'Save draft', exact: true })).toBeDisabled();
   expect(mutations).toHaveLength(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await screenshot(page, 'google-knowledge-mobile-setup.png');
+  await screenshot(page, 'linear-knowledge-mobile-setup.png');
 });
 
 test('another tab logout clears the previously loaded employee key', async ({ page, context }) => {

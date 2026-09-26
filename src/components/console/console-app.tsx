@@ -12,21 +12,29 @@ function SignIn({ loading, error, message, onRetry }: {
   loading: boolean; error: string; message: string; onRetry: () => void;
 }) {
   return <div className="login-shell">
-    <header className="login-header"><Brand /></header>
+    <header className="login-header"><Brand /><span className="header-classification">For the Wareongo team</span></header>
     <main className="login-main" id="main-content">
       <section className="login-story">
-        <h1>Connect Claude to Wareongo</h1>
-        <p className="login-description">Let Claude answer questions using company guides, warehouse listings and CRM records. Access is read-only: Claude cannot change your data.</p>
+        <p className="eyebrow">Your AI workspace</p>
+        <h1>Your company,<br /><span>in context.</span></h1>
+        <p className="login-description">Connect Claude or another compatible AI tool to the company knowledge, warehouse details and CRM records available to you.</p>
+        <dl className="login-sources" aria-label="Context sources">
+          <div><dt><Icon name="book" size={17} />Company guides</dt><dd>Reviewed knowledge</dd></div>
+          <div><dt><Icon name="file" size={17} />Warehouse listings</dt><dd>Property details</dd></div>
+          <div><dt><Icon name="shield" size={17} />CRM records</dt><dd>Your permitted leads</dd></div>
+        </dl>
       </section>
       <section className="login-card" aria-labelledby="login-heading">
+        <p className="eyebrow">Employee access</p>
         <h2 id="login-heading">Sign in with your work account</h2>
-        <p>Use your <strong>@wareongo.com</strong> Google account to get your own connection key.</p>
+        <p>Use your <strong>@wareongo.com</strong> Google account. Then follow three steps to connect your AI tool.</p>
         {message && <Notice tone="info">{message}</Notice>}
         {error && <Notice action={<button className="text-button" onClick={onRetry}>Try again</button>}>{error}</Notice>}
         {loading ? <div className="login-loading"><Spinner label="Checking your session…" /></div> : <a className="button button-primary full-width google-sign-in" href="/api/auth/login">Continue with Google<Icon name="arrow" size={17} /></a>}
+        <div className="login-note"><Icon name="shield" size={18} /><p>Your connection follows your employee permissions. Your AI can read context, but cannot change records.</p></div>
       </section>
     </main>
-    <footer className="login-footer"><span>Wareongo Context</span></footer>
+    <footer className="login-footer"><span>Wareongo Context</span><span>Read-only context for AI tools</span></footer>
   </div>;
 }
 
@@ -132,17 +140,17 @@ export function ConsoleApp() {
   if (!session) return <SignIn loading={loading} error={error || callbackError} message={message} onRetry={() => { setCallbackError(''); void loadSession(); }} />;
   const initials = (session.employee.name || session.employee.email).split(/[\s@.]+/).filter(Boolean).slice(0, 2).map(value => value[0]).join('').toUpperCase();
   return <div className="workspace-shell">
-    <aside className="workspace-sidebar">
-      <div className="sidebar-top"><Brand /><nav className="workspace-nav" aria-label="Workspace">
-        <button disabled={editorBusy} className={tab === 'access' ? 'active' : ''} aria-current={tab === 'access' ? 'page' : undefined} onClick={() => { if (tab !== 'access') guard(() => setTab('access')); }}><Icon name="key" />Connect Claude<Icon name="chevron" size={14} /></button>
+    <header className="workspace-header"><div className="workspace-header-inner">
+      <Brand /><nav className="workspace-nav" aria-label="Workspace">
+        <button disabled={editorBusy} className={tab === 'access' ? 'active' : ''} aria-current={tab === 'access' ? 'page' : undefined} onClick={() => { if (tab !== 'access') guard(() => setTab('access')); }}><Icon name="key" size={16} />Connect Claude</button>
         {session.employee.isAdmin && <button disabled={editorBusy} className={tab === 'knowledge' ? 'active' : ''} aria-current={tab === 'knowledge' ? 'page' : undefined} onClick={() => { if (tab !== 'knowledge') guard(() => setTab('knowledge')); }}><Icon name="book" />Knowledge</button>}
-      </nav></div>
-      <div className="sidebar-bottom"><div className="sidebar-account"><span className="avatar">{initials}</span><div><strong>{session.employee.name || 'Team member'}</strong><span>{session.employee.email}</span></div><button className="icon-button" aria-label="Sign out" title="Sign out" disabled={logoutBusy || editorBusy} onClick={() => guard(() => void logout())}><Icon name="logout" size={17} /></button></div></div>
-    </aside>
+      </nav>
+      <div className="workspace-account"><span className="avatar" aria-hidden="true">{initials}</span><div><strong>{session.employee.name || 'Team member'}</strong><span>{session.employee.email}</span></div><button className="icon-button" aria-label="Sign out" title="Sign out" disabled={logoutBusy || editorBusy} onClick={() => guard(() => void logout())}><Icon name="logout" size={17} /></button></div>
+    </div></header>
     <div className="workspace-main">
-      <header className="workspace-topbar"><div className="breadcrumb"><strong>{tab === 'access' ? 'Connect Claude' : 'Knowledge'}</strong></div>{session.employee.isAdmin && <span className="admin-badge">Administrator</span>}</header>
+      <div className="workspace-topbar"><p className="eyebrow">Workspace <span aria-hidden="true">/</span> {tab === 'access' ? 'Connections' : 'Knowledge'}</p>{session.employee.isAdmin && <span className="admin-badge">Administrator</span>}</div>
       <main className="workspace-content" id="main-content">{error && <Notice>{error}</Notice>}{tab === 'access' ? <AgentAccess key={`${consoleSessionKey(session)}:${keyRevision}`} session={session} onSessionExpired={sessionExpired} onKeyChanged={keyChanged} /> : <KnowledgeWorkspace key={consoleSessionKey(session)} writesEnabled={session.capabilities?.writesEnabled === true} onSessionExpired={sessionExpired} onDirtyChange={setDirty} onBusyChange={setEditorBusy} />}</main>
-      <footer className="workspace-footer"><span>Wareongo Context</span></footer>
+      <footer className="workspace-footer"><span>Wareongo Context</span><span><Icon name="shield" size={14} />Read-only access for AI tools</span></footer>
     </div>
     {pendingAction && <ConfirmDialog title="Leave without saving?" confirmLabel="Discard changes" destructive onCancel={() => setPendingAction(null)} onConfirm={() => { const action = pendingAction; setPendingAction(null); action(); }}><p>Your page has unsaved changes. Save them first if you want to keep them.</p></ConfirmDialog>}
   </div>;

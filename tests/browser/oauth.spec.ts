@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { mkdir } from 'node:fs/promises';
 
 const apiKey = `wog_ctx_${'C'.repeat(43)}`;
 const redirectUri = 'https://client.example.test/connector/callback';
@@ -25,7 +26,7 @@ async function mockAuthorization(page: Page, options: { rejectKey?: boolean; uns
   return { posts, requests };
 }
 
-test('consent shows the application, complete redirect, and read permissions before any grant', async ({ page }, testInfo) => {
+test('consent shows the application, complete redirect, and read permissions before any grant', async ({ page }) => {
   const { posts } = await mockAuthorization(page);
   await expect(page.getByRole('heading', { name: 'Synthetic AI client wants to read Wareongo context' })).toBeVisible();
   await expect(page.getByText(redirectUri, { exact: true })).not.toBeVisible();
@@ -36,12 +37,40 @@ test('consent shows the application, complete redirect, and read permissions bef
   await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeDisabled();
   await expect(page.getByLabel('Admin password')).toHaveCount(0);
   expect(posts).toHaveLength(0);
-  await page.screenshot({ path: testInfo.outputPath('oauth-consent-desktop.png'), fullPage: true });
+  await mkdir('previews', { recursive: true });
+  await page.evaluate(() => document.fonts.ready);
+  await page.screenshot({ path: 'previews/linear-consent-desktop.png', fullPage: true, style: 'nextjs-portal { display: none !important; }' });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({ path: testInfo.outputPath('oauth-consent-mobile.png'), fullPage: true });
+  await page.screenshot({ path: 'previews/linear-consent-mobile.png', fullPage: true, style: 'nextjs-portal { display: none !important; }' });
   await page.getByText('Connection details', { exact: true }).click();
   await expect(page.getByText(redirectUri, { exact: true })).toBeVisible();
+});
+
+for (const approve of [true, false]) test(`narrow consent keeps ${approve ? 'connecting' : 'cancelling'} controls readable`, async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  await mockAuthorization(page);
+  let release: () => void = () => {};
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/api/oauth/authorize', async route => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    await pending;
+    return route.fulfill({ json: { redirectUrl: `${redirectUri}?error=access_denied&state=synthetic-state` } });
+  });
+  try {
+    await page.getByLabel('Employee API key').fill(apiKey);
+    await page.getByRole('button', { name: approve ? 'Connect' : 'Cancel', exact: true }).click();
+    const action = page.getByRole('button', { name: approve ? 'Connecting…' : 'Cancelling…', exact: true });
+    await expect(action).toBeDisabled();
+    const card = await page.locator('.consent-card').boundingBox();
+    const button = await action.boundingBox();
+    expect(card).not.toBeNull(); expect(button).not.toBeNull();
+    expect(button!.x).toBeGreaterThanOrEqual(card!.x);
+    expect(button!.x + button!.width).toBeLessThanOrEqual(card!.x + card!.width);
+    expect(await action.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  } finally { release(); }
+  await expect(page).toHaveURL(`${redirectUri}?error=access_denied&state=synthetic-state`);
 });
 
 test('connect submits the employee key only in the approval body and follows the validated callback', async ({ page }) => {

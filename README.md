@@ -52,6 +52,8 @@ The REST instructions work only with clients already equipped to make authentica
 
 Admins can create pages, import `.md` text, edit metadata and required scopes, and publish reviewed material. New pages start as drafts; agent reads exclude drafts. Concurrent edits are rejected for review instead of silently overwriting another editor's changes. Publishing knowledge does not require a deployment.
 
+The console follows the supplied [Linear style reference](docs/linear-style-reference.md): dark surfaces, fine borders, compact Inter type, and a single lime primary action per view. Sign-in, employee setup, the knowledge editor, and connector consent share this system. Inter is self-hosted under the [SIL Open Font License](src/app/fonts/OFL.txt); technical values use the system monospace family. Rendering requires no external font requests. Responsive layouts, keyboard focus, loading states, and long document titles are checked with synthetic browser fixtures. Desktop/mobile screenshots stay in the ignored `previews/` directory; open `previews/index.html` for the local gallery when available.
+
 For a new database, run `npm run console:migrate -- --apply`, then set `CONTEXT_CONSOLE_WRITES_ENABLED=true` and restart or redeploy. This creates and verifies the private console credential store; it does not import or overwrite organisational pages. Without `--apply`, the command only prints its plan. Setup scripts never automatically apply migrations, and writes default to disabled for new checkouts. The agent-facing `/api/v1` API remains read-only regardless of this flag.
 
 Console rotation replaces only the current console-issued key. Keys registered separately through `CONTEXT_API_KEYS_JSON` remain valid until explicitly revoked from that registry.
