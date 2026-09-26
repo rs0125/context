@@ -6,9 +6,11 @@ import { HttpError } from './errors';
 import { rateLimit } from './rate-limit';
 import { listKnowledge, readKnowledge, searchKnowledge } from './knowledge';
 import { getOpenApiDocument } from './openapi';
-import { getFreshness, getMyBriefing, getOpportunity, getWarehouse, getWarehouseFilterOptions, searchOpportunities, searchWarehouses, validateCrmQuery, summarizeWarehouses, summarizeOpportunities, getCrmFilterOptions } from './data';
+import { getFreshness, getMyBriefing, getOpportunity, getCrmStageHistory, getWarehouse, getWarehouseFilterOptions, searchOpportunities, searchWarehouses, validateCrmQuery, summarizeWarehouses, summarizeOpportunities, getCrmFilterOptions } from './data';
 import { getLiveCrmAccess, type CrmAccess, type CrmView } from './crm-live';
 import { clockContext } from './query-time';
+import { getRelatedCrmContext } from './crm-related';
+import { parseCrmContextQuery } from './crm-context-query';
 
 const QUERY_GUIDANCE = `Dates use Asia/Kolkata and the server clock. For warehouses added today in Bangalore use warehouses?city=Bangalore&period=today&sort=created_desc. For leads created this month use crm/opportunities?period=this_month; add view=created only for leads created BY you. Native Twenty creation time is source_created_at; it is not the mirror insertion time. Use date_field=follow_up&period=tomorrow for tomorrow's follow-ups. A date range uses inclusive YYYY-MM-DD date_from/date_to, or period, not both. Inspect query_context for resolved start_at/end_before and has_more; only summaries give full counts. Use warehouses/summary and crm/summary with the same filters for totals and grouped counts. Use crm/filters for stages, dates, sorting and permitted cities. Missing dates do not match date filters. Unknown is not zero. Updated timestamps do not establish an edit history, newly available inventory, or historical conversion rates. Keep filters and sort unchanged when passing nextCursor; searches are not frozen snapshots across concurrent source edits.`;
 
@@ -17,12 +19,14 @@ type ApiDependencies = {
   authenticate: (request: Request) => KeyRegistration | Promise<KeyRegistration>;
   revalidateKey?: (client: PoolClient, key: KeyRegistration) => Promise<void>;
   liveCrmAccess: (principal: Principal, view: CrmView, opportunityId?: string) => Promise<CrmAccess>;
+  relatedCrmContext: typeof getRelatedCrmContext;
   audit: (entry: Record<string, unknown>) => void;
 };
 const defaults: ApiDependencies = {
   transaction: withReadOnlyTransaction,
   authenticate: request => authenticateRequestKey(request, hash => withReadOnlyTransaction(client => findDatabaseKey(client, hash))),
   liveCrmAccess: (principal, view, opportunityId) => getLiveCrmAccess(principal, { view, opportunityId }),
+  relatedCrmContext: getRelatedCrmContext,
   audit: entry => console.info(JSON.stringify(entry)),
 };
 
@@ -44,7 +48,7 @@ function allowedOrigin(request: Request) {
 
 /** Refuse facts from an unhealthy mirror. Assignment authorization also requires
  * a live check: successful sync checkpoints can hide per-record sync failures. */
-export function assertFreshCrm(freshness: Awaited<ReturnType<typeof getFreshness>>, now = Date.now()) {
+export function assertFreshCrm(freshness: Pick<Awaited<ReturnType<typeof getFreshness>>, 'source_status'>, now = Date.now()) {
   const source = freshness.source_status.opportunities;
   const age = source?.last_run_at ? now - Date.parse(source.last_run_at) : Infinity;
   if (source?.status !== 'ok' || !Number.isFinite(age) || age < -60_000 || age > 30 * 60_000) {
@@ -52,7 +56,7 @@ export function assertFreshCrm(freshness: Awaited<ReturnType<typeof getFreshness
   }
 }
 
-async function dispatch(client: PoolClient, principal: Principal, path: string[], query: URLSearchParams, crmAccess?: CrmAccess) {
+async function dispatch(client: PoolClient, principal: Principal, path: string[], query: URLSearchParams, crmAccess?: CrmAccess, relatedContext?: Awaited<ReturnType<typeof getRelatedCrmContext>>) {
   const route = path.join('/');
   if (route === 'context' || route === 'context.md' || route === '') {
     strictQuery(query, []);
@@ -70,7 +74,7 @@ async function dispatch(client: PoolClient, principal: Principal, path: string[]
       read_only: true, api_specification: '/api/v1/openapi.json', context_markdown: '/api/v1/context.md',
       warehouse_filters: '/api/v1/warehouses/filters',
       warehouse_guidance: 'Warehouse results are candidates. Read field_evidence and verification_required; explicitly say which entries need verification. Approximate values and ranges are not confirmed specifications. Do not silently relax a requested filter.',
-      constraints: { contacts: 'excluded', notes_and_media: 'excluded', crm_scope: 'created or assigned; verified Twenty admins see all', max_page_size: 25 } } };
+      constraints: { contacts: 'masked_or_excluded', narrative_context: 'redacted_lead_context', media: 'excluded', crm_scope: 'created or assigned; verified Twenty admins see all', max_page_size: 25 } } };
   }
   if (route === 'wiki/search' || route === 'wiki/pages') {
     requireScope(principal, 'knowledge:read');
@@ -114,9 +118,11 @@ async function dispatch(client: PoolClient, principal: Principal, path: string[]
     return { value };
   }
   if (path[0] === 'crm' && (route === 'crm/opportunities' || route === 'crm/my-briefing' || route === 'crm/summary' || route === 'crm/filters'
-      || (path.length === 3 && path[1] === 'opportunities'))) {
+      || (path.length === 3 && path[1] === 'opportunities') || (path.length === 4 && path[1] === 'opportunities' && path[3] === 'context'))) {
     requireScope(principal, 'crm:read');
     if (!crmAccess) throw new HttpError(503, 'CRM_VERIFICATION_UNAVAILABLE', 'Current CRM access could not be verified.');
+    // This checkpoint read and every lead projection below share the final
+    // transaction snapshot, after live access verification has completed.
     const freshness = await getFreshness(client);
     assertFreshCrm(freshness);
     const mode = route === 'crm/summary' ? 'summary' : route === 'crm/filters' ? 'filters' : 'search';
@@ -125,6 +131,21 @@ async function dispatch(client: PoolClient, principal: Principal, path: string[]
     if (route === 'crm/opportunities') return { value: { ...await searchOpportunities(client, principal, query, crmAccess), access_scope, ...freshness } };
     if (route === 'crm/summary') return { value: { ...await summarizeOpportunities(client, principal, query, crmAccess), access_scope, ...freshness } };
     if (route === 'crm/filters') return { value: { ...await getCrmFilterOptions(client, principal, query, crmAccess), access_scope, ...freshness } };
+    if (path.length === 4) {
+      const options = parseCrmContextQuery(query);
+      const lead = await getOpportunity(client, principal, path[2], crmAccess);
+      if (!lead) throw new HttpError(404, 'NOT_FOUND', 'Opportunity not found.');
+      const context = options.section === 'stage_history'
+        ? { ...await getCrmStageHistory(client, principal, path[2], crmAccess, options.limit, options.cursor),
+          source_fetched_at: freshness.read_consistency.transaction_started_at, source_opportunity_updated_at: lead.source_updated_at }
+        : relatedContext;
+      if (!context || context.section !== options.section) throw new HttpError(503, 'CRM_CONTEXT_UNAVAILABLE', 'The requested CRM context could not be verified.');
+      return { value: { ...context, access_scope, ...freshness,
+        read_consistency: { ...freshness.read_consistency, related_sources_atomic: false },
+        mirror_source_updated_at: lead.source_updated_at,
+        lead_version_matches_mirror: context.source_opportunity_updated_at && lead.source_updated_at
+          ? context.source_opportunity_updated_at === lead.source_updated_at : null } };
+    }
     strictQuery(query, []);
     if (route === 'crm/my-briefing') return { value: { ...await getMyBriefing(client, principal, crmAccess), access_scope, ...freshness } };
     const value = await getOpportunity(client, principal, path[2], crmAccess);
@@ -166,13 +187,15 @@ export async function handleApiRequest(request: Request, path: string[], depende
     rateLimit(key.id);
     let crmAccess: CrmAccess | undefined;
     let verifiedPrincipal: Principal | undefined;
+    let relatedContext: Awaited<ReturnType<typeof getRelatedCrmContext>> | undefined;
     if (path[0] === 'crm') {
       const route = path.join('/');
       let view: CrmView = 'accessible';
       if (['crm/opportunities', 'crm/summary', 'crm/filters'].includes(route)) view = validateCrmQuery(new URL(request.url).searchParams, route === 'crm/summary' ? 'summary' : route === 'crm/filters' ? 'filters' : 'search').view;
-      else if (route === 'crm/my-briefing' || (path.length === 3 && path[1] === 'opportunities')) {
-        strictQuery(new URL(request.url).searchParams, []);
-        if (path.length === 3 && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(path[2])) {
+      else if (route === 'crm/my-briefing' || (path.length === 3 && path[1] === 'opportunities') || (path.length === 4 && path[1] === 'opportunities' && path[3] === 'context')) {
+        if (path.length === 4) parseCrmContextQuery(new URL(request.url).searchParams);
+        else strictQuery(new URL(request.url).searchParams, []);
+        if (path.length >= 3 && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(path[2])) {
           throw new HttpError(400, 'INVALID_QUERY', 'Opportunity id must be a UUID.');
         }
       } else throw new HttpError(404, 'NOT_FOUND', 'Endpoint not found.');
@@ -185,9 +208,18 @@ export async function handleApiRequest(request: Request, path: string[], depende
         return principal;
       });
       // Release the pooled socket before making upstream HTTPS reads.
-      crmAccess = path.length === 3 && path[1] === 'opportunities'
+      crmAccess = path.length >= 3 && path[1] === 'opportunities'
         ? await deps.liveCrmAccess(verifiedPrincipal, view, path[2])
         : await deps.liveCrmAccess(verifiedPrincipal, view);
+      if (path.length === 4) {
+        const options = parseCrmContextQuery(new URL(request.url).searchParams);
+        if (options.section !== 'stage_history') {
+          relatedContext = await deps.relatedCrmContext(verifiedPrincipal, path[2], { ...options, section: options.section, access: crmAccess });
+          // The extra source read can outlast an assignment change. Verify the
+          // target again before the final roster/key/snapshot transaction.
+          crmAccess = await deps.liveCrmAccess(verifiedPrincipal, view, path[2]);
+        }
+      }
     }
     const result = await deps.transaction(async client => {
       await deps.revalidateKey?.(client, key);
@@ -197,7 +229,7 @@ export async function handleApiRequest(request: Request, path: string[], depende
         || principal.email !== verifiedPrincipal.email || principal.twentyUserId !== verifiedPrincipal.twentyUserId)) {
         throw new HttpError(403, 'EMPLOYEE_CHANGED', 'Employee access changed; retry the request.');
       }
-      return dispatch(client, principal, path, new URL(request.url).searchParams, crmAccess);
+      return dispatch(client, principal, path, new URL(request.url).searchParams, crmAccess, relatedContext);
     });
     if (request.method === 'HEAD') return new Response(null, { headers });
     if (result.markdown !== undefined) {
@@ -219,7 +251,8 @@ export async function handleApiRequest(request: Request, path: string[], depende
       'warehouses/summary', 'crm/opportunities', 'crm/summary', 'crm/filters', 'crm/my-briefing', 'openapi.json'].includes(route)
       ? route : path.length === 2 && path[0] === 'warehouses' ? 'warehouses/read'
         : path.length === 3 && path[0] === 'wiki' && path[1] === 'pages' ? 'wiki/read'
-          : path.length === 3 && path[0] === 'crm' && path[1] === 'opportunities' ? 'crm/read' : 'unknown';
+          : path.length === 4 && path[0] === 'crm' && path[1] === 'opportunities' && path[3] === 'context' ? 'crm/context'
+            : path.length === 3 && path[0] === 'crm' && path[1] === 'opportunities' ? 'crm/read' : 'unknown';
     deps.audit({ event: 'context_read', requestId, operation, keyId, employeeId, status, ...(errorCode ? { error_code: errorCode } : {}), durationMs: Date.now() - started });
   }
 }

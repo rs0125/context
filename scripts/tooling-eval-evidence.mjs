@@ -8,6 +8,7 @@ export const measurementSchema = {
 };
 
 export function measurementClaims(record) {
+  if (!Number.isInteger(record.id)) return [];
   return Object.entries(record.field_evidence ?? {}).map(([field, evidence]) => ({ field, kind: evidence.kind,
     value: evidence.value ?? null, lower: evidence.lower ?? null, upper: evidence.upper ?? null }));
 }
@@ -136,9 +137,12 @@ export function checkAnswerEvidence(answer, successful, observed = successful) {
   if (answer.groups.some(group => !groups.some(source => group.value === source.value && group.count === source.count))) failures.push('UNGROUNDED_GROUP');
   for (const item of answer.items) {
     const candidates = records.filter(record => String(record.id) === item.id);
-    const warehouse = candidates.find(record => record.field_evidence);
+    const warehouse = candidates.find(record => Number.isInteger(record.id) && record.field_evidence);
     if (!warehouse) {
-      if (item.measurements.length || item.verification_required !== null) failures.push('UNSUPPORTED_MEASUREMENT_CLAIM');
+      if (item.measurements.length) failures.push('UNSUPPORTED_MEASUREMENT_CLAIM');
+      const recordedFlag = candidates.find(record => typeof record.verification_required === 'boolean')?.verification_required ?? null;
+      if (item.verification_required !== recordedFlag) failures.push('VERIFICATION_FLAG_MISMATCH');
+      if (recordedFlag && !verificationCaveat.test(item.summary)) failures.push('MISSING_VERIFICATION_CAVEAT');
     } else {
       const expected = measurementClaims(warehouse), found = item.measurements;
       const match = found.length === expected.length && new Set(found.map(claim => claim.field)).size === found.length

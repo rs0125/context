@@ -131,6 +131,89 @@ describe('warehouse reads', () => {
 });
 
 describe('employee-scoped CRM reads', () => {
+  it('returns core and business fields from one scoped row read in list, detail and briefing', async () => {
+    const row = { ...opportunityRow(), lead_source: 'WEBSITE_SEO', lease_duration: 'SHORT_TERM',
+      industry_verticals: ['FMCG'], occupancy_timelines: ['WITHIN_30_DAYS'], preferred_languages: ['ENGLISH'], repeat_client: ['OPTION1'],
+      budget: 'INR 20-25 per sqft per month', amount_micros: '123456789', amount_currency: 'INR', recorded_follow_up_count: '0',
+      twenty_updated_at: '2026-09-26T12:00:00Z', last_note_at: '2026-09-26T11:00:00Z', last_task_at: null,
+      data: { description: 'Private raw content', pocPhoneNumber: '9876543210' }, last_note_text: 'private@example.test' };
+    const list = database([row]); const detail = database([row]);
+    const briefing = database([{ priorities: [row] }]);
+    const listed = (await searchOpportunities(list.client, principal, new URLSearchParams(), related())).items[0];
+    const read = await getOpportunity(detail.client, principal, ID_1, related());
+    const priority = (await getMyBriefing(briefing.client, principal, related())).priorities[0];
+    expect(read).toMatchObject(listed);
+    expect(listed).not.toHaveProperty('description');
+    expect(read?.description.state).toBe('missing');
+    expect(priority).toMatchObject(listed);
+    expect(listed).toMatchObject({ lead_source: 'WEBSITE_SEO', lease_duration: 'SHORT_TERM', industry_verticals: ['FMCG'],
+      repeat_client: true, recorded_follow_up_count: 0, source_updated_at: '2026-09-26T12:00:00.000Z', last_note_at: '2026-09-26T11:00:00.000Z',
+      last_task_at: null, budget: { kind: 'range', min: 20, max: 25, currency: 'INR', period: 'month', area_basis: 'sqft', verification_required: true },
+      recorded_value: { amount_micros: '123456789', amount: '123.456789', currency_code: 'INR', verification_required: true } });
+    for (const db of [list, detail, briefing]) {
+      expect(db.query).toHaveBeenCalledTimes(1);
+      expect(db.query.mock.calls[0][0]).not.toMatch(/JOIN|last_note_text|pocPhone|SELECT\s+o\.data\s*[,\s]/);
+    }
+    expect(JSON.stringify(listed)).not.toMatch(/Private raw|9876543210|private@example/);
+  });
+
+  it('returns masked detail narratives and recorded ownership without disclosing raw contacts', async () => {
+    const db = database([{ ...opportunityRow(), description: 'Needs 40,000-60,000 sqft. Call +91 98765 43210 or owner@example.test.',
+      loss_reason: 'Rate too high; buyer ९८७६५४३२१०', assigned_to: ['ALEX'], supply_owners: ['Sam +91 9876543210'],
+      owner_workspace_member_id: principal.twentyUserId, creator_id: principal.twentyUserId, creator_name: 'Alex', creator_source: 'MANUAL',
+      close_date: '2026-10-01T00:00:00Z' }]);
+    const result = await getOpportunity(db.client, principal, ID_1, related());
+    expect(result).toMatchObject({ description: { state: 'redacted', redacted: true }, loss_reason: { state: 'redacted' },
+      close_date: '2026-10-01T00:00:00.000Z', ownership: { assigned_to: { values: ['ALEX'] }, supply_owners: { state: 'redacted' }, created_by: { name: { text: 'Alex' } } } });
+    expect(result?.description.text).toContain('40,000-60,000 sqft');
+    expect(JSON.stringify(result)).not.toMatch(/98765|९८७६५|owner@example/);
+  });
+
+  it('distinguishes missing, malformed and redacted source values and flags uncertain fields', async () => {
+    const db = database([{ ...opportunityRow(), close_date: 'sometime next month', city: 'Bengaluru +91 9876543210',
+      requirement_sqft: '40-60k sqft', budget: 'Market rate', lead_source: 'PARTNER_EVENT', micro_market: null }]);
+    const result = await getOpportunity(db.client, principal, ID_1, related());
+    expect(result).toMatchObject({ requirement_sqft: null, city: null, close_date: null, verification_required: true,
+      field_evidence: { close_date: { state: 'unsupported', source: { text: 'sometime next month' } },
+        city: { state: 'unsupported', source: { redacted: true } }, micro_market: { state: 'missing', source: null },
+        lead_source: { state: 'unsupported', source: { text: 'PARTNER_EVENT' } },
+        requirement_sqft: { state: 'parsed', kind: 'range', min: 40000, max: 60000 }, budget: { state: 'unsupported', source: { text: 'Market rate' } } } });
+    expect(JSON.stringify(result)).not.toContain('9876543210');
+  });
+
+  it('does not reuse stale business metadata when a subsequent lead read observes a change', async () => {
+    const db = database();
+    db.query.mockResolvedValueOnce({ rows: [{ ...opportunityRow(), lease_duration: 'LONG_TERM', twenty_updated_at: '2026-09-26T10:00:00Z' }] })
+      .mockResolvedValueOnce({ rows: [{ ...opportunityRow(), lease_duration: 'SHORT_TERM', twenty_updated_at: '2026-09-26T11:00:00Z' }] });
+    expect((await getOpportunity(db.client, principal, ID_1, related()))).toMatchObject({ lease_duration: 'LONG_TERM', source_updated_at: '2026-09-26T10:00:00.000Z' });
+    expect((await getOpportunity(db.client, principal, ID_1, related()))).toMatchObject({ lease_duration: 'SHORT_TERM', source_updated_at: '2026-09-26T11:00:00.000Z' });
+    expect(db.query).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports independently stale activity even when opportunity sync is healthy', async () => {
+    const started = '2026-09-26T12:00:00Z';
+    const db = database([
+      { object: 'opportunities', last_run_status: 'ok', last_run_at: started, transaction_started_at: started },
+      { object: 'notes', last_run_status: 'ok', last_run_at: '2026-09-26T11:29:59Z', transaction_started_at: started },
+      { object: 'tasks', last_run_status: 'error', last_run_at: started, transaction_started_at: started },
+    ]);
+    const result = await getFreshness(db.client);
+    expect(result.read_consistency).toEqual({ database_snapshot: 'repeatable_read', transaction_started_at: '2026-09-26T12:00:00.000Z',
+      lead_fields: 'same_row', cross_request_snapshot: false });
+    expect(result.activity_status).toEqual({ status: 'degraded', unavailable_streams: ['notes', 'tasks'] });
+    expect(result.source_status.opportunities.status).toBe('ok');
+    expect(result.source_status.notes.status).toBe('ok');
+  });
+
+  it('uses successful poll times, not old changed-record watermarks, for activity freshness', async () => {
+    const db = database(['opportunities', 'notes', 'tasks'].map(object => ({ object, last_run_status: 'ok',
+      last_run_at: '2026-09-26T12:00:00Z', last_updated_at: '2026-06-01T00:00:00Z', transaction_started_at: '2026-09-26T12:00:01Z' })));
+    const result = await getFreshness(db.client);
+    expect(result.activity_status).toEqual({ status: 'current', unavailable_streams: [] });
+    expect(result.source_status.notes.source_watermark_at).toBe('2026-06-01T00:00:00.000Z');
+    expect(result.field_semantics).toContain('independent');
+  });
+
   it('uses the live created-or-assigned union before filters and pagination without stale assignment restrictions', async () => {
     const { client, query } = database([opportunityRow(ID_1), opportunityRow(ID_2)]);
     const parameters = new URLSearchParams({ city: 'Bengaluru', stage: 'RFQ_RECEIVED', view: 'accessible', limit: '1' });

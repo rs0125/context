@@ -2,7 +2,7 @@ import { handleApiRequest } from '@/lib/api';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const maxDuration = 15;
+export const maxDuration = 45;
 
 type Context = { params: Promise<{ path?: string[] }> };
 async function handler(request: Request, context: Context) {

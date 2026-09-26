@@ -3,7 +3,7 @@
   "framework": "nextjs",
   "regions": ["bom1"],
   "functions": {
-    "src/app/api/v1/[[...path]]/route.ts": { "maxDuration": 15 },
-    "src/app/mcp/route.ts": { "maxDuration": 30 }
+    "src/app/api/v1/[[...path]]/route.ts": { "maxDuration": 45 },
+    "src/app/mcp/route.ts": { "maxDuration": 45 }
   }
 }

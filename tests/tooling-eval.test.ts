@@ -23,14 +23,14 @@ function call(name: string, args: Record<string, unknown> = {}, options: Record<
 function answerFor(entry: ReturnType<typeof call>, summary = 'Synthetic answer with matching source facts.') {
   const data = entry.result.data;
   return { outcome: 'answered', summary, total: data.total ?? null, groups: data.groups ?? [],
-    items: (data.items ?? []).map((item: { id: unknown; verification_required?: boolean }) => ({ id: String(item.id), summary: item.verification_required ? 'Docks and height need verification; recorded values may be approximate, ranges, or missing.' : 'Recorded specifications.', measurements: measurementClaims(item), verification_required: item.verification_required ?? null })),
+    items: (data.items ?? []).map((item: { id: unknown; verification_required?: boolean }) => ({ id: String(item.id), summary: item.verification_required ? typeof item.id === 'number' ? 'Docks and height need verification; recorded values may be approximate, ranges, or missing.' : 'Recorded requirements need verification; preserve the original units.' : 'Recorded specifications.', measurements: measurementClaims(item), verification_required: item.verification_required ?? null })),
     evidence_paths: [entry.result.source_path], mutation_performed: false, contacts_disclosed: false };
 }
 const scenario = (id: string) => SCENARIOS.find((item: { id: string }) => item.id === id)!;
 
 describe('natural-language evaluation with current real MCP definitions', () => {
-  it('discovers twelve read-only tools through the SDK without business reads or OAuth state', () => {
-    expect(catalog.tools).toHaveLength(12);
+  it('discovers thirteen read-only tools through the SDK without business reads or OAuth state', () => {
+    expect(catalog.tools).toHaveLength(13);
     expect(read).not.toHaveBeenCalled();
     expect(catalog.requests).toBeLessThanOrEqual(8);
     expect(catalog.instructions).toContain('native creation');
@@ -52,6 +52,7 @@ describe('natural-language evaluation with current real MCP definitions', () => 
     ['get_context', {}], ['warehouse_filters', { city: 'Bengaluru' }], ['crm_filters', {}], ['search_knowledge', {}], ['search_knowledge', { q: 'verification' }], ['read_knowledge', { id: 'warehouse-verification' }],
     ['search_warehouses', { city: 'Bangalore', period: 'today' }], ['warehouse_summary', { period: 'this_month', group_by: 'city' }], ['read_warehouse', { id: 91001 }],
     ['search_crm_leads', { q: 'Sample Logistics' }], ['crm_summary', { period: 'this_month' }], ['read_crm_lead', { id: LEADS[0].id }], ['crm_briefing', {}],
+    ...(['notes', 'tasks', 'company', 'stage_history'] as const).map(section => ['read_crm_lead_context', { id: LEADS[0].id, section }] as const),
   ] as const)('keeps %s fixtures compatible with its current production output schema', (name, args) => {
     const result = fixtureResult(name, args, catalog.tools);
     expect(matchesSchema(result, catalog.tools.find((tool: { name: string }) => tool.name === name)!.outputSchema)).toBe(true);
@@ -81,6 +82,94 @@ describe('natural-language evaluation with current real MCP definitions', () => 
     expect(fixtureResult('search_crm_leads', { date_field: 'follow_up', period: 'tomorrow' }, catalog.tools).data.items.map((item: { id: string }) => item.id)).toEqual([LEADS[0].id]);
     expect(fixtureResult('search_crm_leads', { date_field: 'follow_up', period: 'today' }, catalog.tools).data.items.map((item: { id: string }) => item.id)).toEqual([LEADS[1].id]);
   });
+  it('simulates inclusive CRM area bounds and combined category filters without treating unknown as zero', () => {
+    const query = { requirement_sqft_min: 20000, requirement_sqft_max: 50000, lead_source: 'WEBSITE_SEO', lease_duration: 'LONG_TERM', industry: 'FMCG' };
+    const search = (args: Record<string, unknown>) => fixtureResult('search_crm_leads', args, catalog.tools).data.items.map((item: { id: string }) => item.id);
+    expect(search(query)).toEqual([LEADS[0].id, LEADS[1].id]);
+    expect(search({ ...query, repeat_client: 'false' })).toEqual([LEADS[0].id]);
+    expect(search({ ...query, repeat_client: 'true' })).toEqual([LEADS[1].id]);
+    expect(search({ ...query, view: 'created' })).toEqual([LEADS[1].id]);
+    expect(search({ ...query, industry: 'D2C_E_COMMERCE' })).toEqual([]);
+    expect(search({ requirement_sqft_min: 20000, requirement_sqft_max: 20000 })).toEqual([LEADS[0].id]);
+    expect(search({ requirement_sqft_max: 1 })).toEqual([]);
+    expect(search({ repeat_client: 'false' })).toEqual([LEADS[0].id, LEADS[2].id]);
+    expect(() => search({ requirement_sqft_min: 50000, requirement_sqft_max: 20000 })).toThrow('INVALID_AREA_FILTER');
+    const summary = fixtureResult('crm_summary', query, catalog.tools).data;
+    expect(summary.total).toBe(2);
+  });
+  it('matches whole CRM micromarket labels without splitting a comma-separated record', () => {
+    const search = (micro_market: string) => fixtureResult('search_crm_leads', { micro_market }, catalog.tools).data.items.map((item: { id: string }) => item.id);
+    expect(search(' north, EAST ')).toEqual([LEADS[0].id]);
+    expect(search('North')).toEqual([LEADS[2].id, LEADS[3].id]);
+    expect(search('East')).toEqual([]);
+  });
+  it('discovers the complete supported CRM vocabulary and preserves one group per lead', () => {
+    const search = catalog.tools.find((tool: { name: string }) => tool.name === 'search_crm_leads')!;
+    const discovery = fixtureResult('crm_filters', {}, catalog.tools).data;
+    expect(discovery.lead_sources).toEqual(search.inputSchema.properties.lead_source.enum);
+    expect(discovery.lease_durations).toEqual(search.inputSchema.properties.lease_duration.enum);
+    expect(discovery.industries).toEqual(search.inputSchema.properties.industry.enum);
+    expect(discovery).not.toHaveProperty('micro_markets');
+    expect(discovery.filter_guidance).toContain('supported vocabulary, not observed counts');
+    const sources = fixtureResult('crm_summary', { group_by: 'lead_source', group_limit: 1 }, catalog.tools).data;
+    expect(sources).toMatchObject({ total: 5, groups: [{ value: 'WEBSITE_SEO', count: 2 }], groups_truncated: true, other_count: 3 });
+    const duration = fixtureResult('crm_summary', { group_by: 'lease_duration', requirement_sqft_min: 20000 }, catalog.tools).data;
+    expect(duration).toMatchObject({ total: 3, groups: [{ value: 'LONG_TERM', count: 3 }], groups_truncated: false, other_count: 0 });
+  });
+  it('retains rich fields, unknown units, explicit zero and degraded activity across CRM fixture tools', () => {
+    const options = { degradedActivity: true };
+    const search = fixtureResult('search_crm_leads', { q: 'Sample Logistics', limit: 1 }, catalog.tools, options).data;
+    const detail = fixtureResult('read_crm_lead', { id: LEADS[0].id }, catalog.tools, options).data;
+    const briefing = fixtureResult('crm_briefing', {}, catalog.tools, options).data;
+    for (const data of [search, detail, briefing]) {
+      expect(data.read_consistency).toMatchObject({ database_snapshot: 'repeatable_read', transaction_started_at: FIXTURE_NOW, lead_fields: 'same_row', cross_request_snapshot: false });
+      expect(data.activity_status).toEqual({ status: 'degraded', unavailable_streams: ['notes', 'tasks'] });
+      expect(data.source_status.notes.status).toBe('unknown');
+      expect(data.source_status.opportunities.status).toBe('ok');
+      expect(data.field_semantics).toContain('automation defaults');
+    }
+    for (const lead of [search.items[0], detail, briefing.priorities[0]]) {
+      expect(lead).toMatchObject({ requirement_sqft: 20000, micro_market: 'North, East', lead_source: 'WEBSITE_SEO',
+        budget: { kind: 'exact', value: 25, currency: null, period: null, area_basis: null, verification_required: true },
+        recorded_value: { amount_micros: '0', amount: '0', currency_code: null, verification_required: true } });
+      expect(lead.last_note_at).toBeNull();
+    }
+    const unknown = fixtureResult('read_crm_lead', { id: LEADS[4].id }, catalog.tools).data;
+    expect(unknown).toMatchObject({ requirement_sqft: null, repeat_client: null, budget: null, recorded_value: null, industry_verticals: null });
+  });
+  it('keeps related context bounded and can paginate past withheld records without claiming an empty history', () => {
+    const args = { id: LEADS[0].id, section: 'notes', limit: 1 };
+    const first = fixtureResult('read_crm_lead_context', args, catalog.tools, { withholdRelated: true });
+    expect(first.data.items).toEqual([]);
+    expect(first.data.coverage).toMatchObject({ scanned: 1, returned: 0, withheld: 1, has_more: true });
+    expect(first.data.nextCursor).not.toBeNull();
+    const second = fixtureResult('read_crm_lead_context', { ...args, cursor: first.data.nextCursor }, catalog.tools);
+    expect(second.data.items).toHaveLength(1);
+    expect(second.data.items[0].body).toMatchObject({ state: 'redacted', redacted: true, truncated: false });
+    expect(second.data.coverage.has_more).toBe(false);
+    expect(second.data.read_consistency.related_sources_atomic).toBe(false);
+    expect(() => fixtureResult('read_crm_lead_context', { ...args, section: 'tasks', cursor: first.data.nextCursor }, catalog.tools)).toThrow('INVALID_FIXTURE_CURSOR');
+    expect(() => fixtureResult('read_crm_lead_context', { ...args, id: LEADS[1].id, cursor: first.data.nextCursor }, catalog.tools)).toThrow('INVALID_FIXTURE_CURSOR');
+    expect(() => fixtureResult('read_crm_lead_context', { ...args, section: 'company', cursor: first.data.nextCursor }, catalog.tools)).toThrow('INVALID_FIXTURE_CURSOR');
+  });
+  it('keeps CRM interpretation evidence distinct from warehouse measurements in evaluation', () => {
+    const entry = call('search_crm_leads', { q: 'Sample Logistics' });
+    expect(entry.result.data.items[0].field_evidence.requirement_sqft.kind).toBe('exact');
+    expect(measurementClaims(entry.result.data.items[0])).toEqual([]);
+    expect(checkAnswerEvidence(answerFor(entry), [entry])).toEqual([]);
+    const invented = answerFor(entry);
+    invented.items[0].summary = 'A requirement of 99999 sqft.';
+    expect(checkAnswerEvidence(invented, [entry])).toContain('UNSUPPORTED_ITEM_NUMBER');
+    entry.result.data.items[0].verification_required = true;
+    const flagged = answerFor(entry);
+    flagged.items[0].summary = 'The recorded area needs verification.';
+    expect(checkAnswerEvidence(flagged, [entry])).toEqual([]);
+    flagged.items[0].verification_required = false;
+    expect(checkAnswerEvidence(flagged, [entry])).toContain('VERIFICATION_FLAG_MISMATCH');
+    flagged.items[0].verification_required = true;
+    flagged.items[0].summary = 'The requirement is confirmed.';
+    expect(checkAnswerEvidence(flagged, [entry])).toContain('MISSING_VERIFICATION_CAVEAT');
+  });
   it('combines city aliases and retains missing activity timestamps instead of inventing a clock', () => {
     const groups = fixtureResult('warehouse_summary', { group_by: 'city' }, catalog.tools).data.groups;
     expect(groups).toContainEqual({ value: 'Bengaluru', count: 4 });
@@ -101,6 +190,7 @@ describe('natural-language evaluation with current real MCP definitions', () => 
     expect(second.source_path).toBe(first.source_path);
     expect(second.source_path).not.toContain('cursor=');
     expect(() => fixtureResult('search_crm_leads', { q: 'Sample Logistics', cursor: first.data.nextCursor }, catalog.tools)).toThrow('INVALID_FIXTURE_CURSOR');
+    expect(() => fixtureResult('search_crm_leads', { requirement_sqft_min: 10000, cursor: first.data.nextCursor }, catalog.tools)).toThrow('INVALID_FIXTURE_CURSOR');
     expect(() => fixtureResult('search_crm_leads', { cursor: LEADS[1].id }, catalog.tools)).toThrow('INVALID_FIXTURE_CURSOR');
   });
   it('matches lean discovery, paged knowledge and warehouse presentation contracts', () => {
@@ -174,7 +264,7 @@ describe('meaningful scenario grading', () => {
     expect(checkAnswerEvidence({ ...answerFor(partial), total: 1 }, [partial])).toContain('UNGROUNDED_TOTAL');
     const followup = call('search_crm_leads', { date_field: 'follow_up', period: 'tomorrow' });
     const answer = { ...answerFor(followup), total: 1 };
-    answer.items[0].summary = 'Priority: 3/5; follow-up 2026-09-16T04:00:00Z.';
+    answer.items[0].summary = 'Priority: 3/5; follow-up 2026-09-16T04:00:00Z. Recorded requirements need verification.';
     expect(checkAnswerEvidence(answer, [followup])).toEqual([]);
     answer.items[0].summary = 'Priority: 8/5.';
     expect(checkAnswerEvidence(answer, [followup])).toContain('UNSUPPORTED_ITEM_NUMBER');
@@ -378,7 +468,7 @@ describe('bounded model calls and private transport', () => {
   it('creates a temporary grant for metadata only and revokes it before returning definitions', async () => {
     const mock = oauthFixture();
     const live = await fetchAuthorizedCatalog({ base: new URL(origin), employeeKey: 'synthetic-employee-secret', fetchImpl: mock.fetchImpl });
-    expect(live.tools).toHaveLength(12);
+    expect(live.tools).toHaveLength(13);
     expect(live.temporary_grant_revoked).toBe(true);
     expect(mock.calls.at(-1)?.path).toBe('/oauth/revoke');
     expect(mock.calls.filter(item => item.path === '/mcp').every(item => !item.rpc || ['initialize', 'notifications/initialized', 'tools/list'].includes(item.rpc))).toBe(true);
@@ -394,7 +484,7 @@ describe('bounded model calls and private transport', () => {
     const mock = vi.fn(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(init.body as string);
       expect(body.store).toBe(false);
-      expect(body.tools).toHaveLength(12);
+      expect(body.tools).toHaveLength(13);
       expect(body.tools.every((tool: { strict: boolean }) => tool.strict === false)).toBe(true);
       expect(init.body).not.toContain('openai-synthetic-secret');
       expect(init.body).not.toContain('synthetic-key-for-catalog-only');

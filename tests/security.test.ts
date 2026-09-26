@@ -5,7 +5,7 @@ import {
   authenticateKey, parseKeyRegistry, requireScope, resolvePrincipal,
   type KeyRegistration, type Scope,
 } from '../src/lib/auth';
-import { databaseOptions, withReadOnlyTransaction } from '../src/lib/db';
+import { databaseOptions, withConsoleWriteTransaction, withReadOnlyTransaction } from '../src/lib/db';
 import { numericValue, sanitizeLabel } from '../src/lib/privacy';
 
 const token = `wog_ctx_${'A'.repeat(43)}`;
@@ -226,8 +226,8 @@ function transactionPool(waitingCount = 0) {
   return { pool: { connect, waitingCount } as unknown as Pool, client, query, release, connect };
 }
 
-describe('read-only transaction lifecycle', () => {
-  it('starts read-only, sets only transaction-local limits, and commits before releasing', async () => {
+describe('transaction lifecycle', () => {
+  it('uses one repeatable read snapshot, sets only transaction-local limits, and commits before releasing', async () => {
     const { pool, client, query, release } = transactionPool();
     const operation = vi.fn(async (connection: PoolClient) => {
       expect(connection).toBe(client);
@@ -236,7 +236,7 @@ describe('read-only transaction lifecycle', () => {
     });
     await expect(withReadOnlyTransaction(operation, pool)).resolves.toEqual({ value: 7 });
     const statements = query.mock.calls.map(([sql]) => sql as string);
-    expect(statements[0]).toBe('BEGIN READ ONLY');
+    expect(statements[0]).toBe('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     expect(statements).toContain("SET LOCAL statement_timeout = '4000ms'");
     expect(statements).toContain("SET LOCAL lock_timeout = '1000ms'");
     expect(statements).toContain("SET LOCAL idle_in_transaction_session_timeout = '6000ms'");
@@ -244,6 +244,17 @@ describe('read-only transaction lifecycle', () => {
     expect(statements).not.toContain('ROLLBACK');
     expect(release).toHaveBeenCalledExactlyOnceWith(false);
     expect(release.mock.invocationCallOrder[0]).toBeGreaterThan(query.mock.invocationCallOrder.at(-1)!);
+  });
+
+  it('preserves the default isolation for enabled console writes', async () => {
+    vi.stubEnv('CONTEXT_CONSOLE_WRITES_ENABLED', 'true');
+    try {
+      const { pool, query, release } = transactionPool();
+      await expect(withConsoleWriteTransaction(async () => 'saved', pool)).resolves.toBe('saved');
+      expect(query.mock.calls[0][0]).toBe('BEGIN');
+      expect(query.mock.calls.at(-1)?.[0]).toBe('COMMIT');
+      expect(release).toHaveBeenCalledExactlyOnceWith(false);
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it('rolls back an operation failure and preserves its original error', async () => {

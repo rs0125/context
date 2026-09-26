@@ -29,6 +29,9 @@ test('tool path pinning blocks external URLs, traversal, fragments, and write ro
   }
   assert.equal(resolveReadPath(base, '/api/v1/warehouses').searchParams.get('limit'), '2');
   assert.equal(resolveReadPath(base, '/api/v1/warehouses/filters?city=Bengaluru').pathname, '/api/v1/warehouses/filters');
+  const contextPath = '/api/v1/crm/opportunities/11111111-1111-4111-8111-111111111111/context?section=notes';
+  assert.equal(resolveReadPath(base, contextPath).searchParams.get('limit'), '2');
+  assert.throws(() => resolveReadPath(base, `${contextPath}&limit=25`), /TRIAL_RECORD_LIMIT/);
   assert.throws(() => resolveReadPath(base, '/api/v1/warehouses?limit=25'), /TRIAL_RECORD_LIMIT/);
   assert.throws(() => resolveReadPath(base, '/api/v1/warehouses?limit=2&limit=2'), /TRIAL_RECORD_LIMIT/);
   // Unknown query policy remains the deterministic API's responsibility.
@@ -63,7 +66,10 @@ test('credential echoes and forbidden response fields are not forwarded to the m
     assert.equal(trace[0].result, undefined);
   }
   assert.doesNotThrow(() => assertNoForbiddenFields({ data: { source_status: { notes: { status: 'ok' } } } }));
-  assert.throws(() => assertNoForbiddenFields({ data: { items: [{ notes: 'private notes' }] } }), /FORBIDDEN_RESPONSE_FIELD/);
+  assert.doesNotThrow(() => assertNoForbiddenFields({ data: { items: [{ notes: { state: 'redacted', text: 'Call [phone omitted].', redacted: true, truncated: false } }] } }));
+  assert.throws(() => assertNoForbiddenFields({ data: { items: [{ raw_notes: 'unreviewed notes' }] } }), /FORBIDDEN_RESPONSE_FIELD/);
+  assert.throws(() => assertNoForbiddenFields({ data: { items: [{ notes: { phone: 'hidden' } }] } }), /FORBIDDEN_RESPONSE_FIELD/);
+  assert.throws(() => assertNoForbiddenFields({ data: { source_status: { email: 'hidden' } } }), /FORBIDDEN_RESPONSE_FIELD/);
 });
 
 test('briefing priorities are explicitly truncated without changing aggregate counts', async () => {

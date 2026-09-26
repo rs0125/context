@@ -9,16 +9,31 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 import { clockContext, resolveDateQuery } from '../src/lib/query-time';
 import { WAREHOUSE_FILTER_CATALOG } from '../src/lib/warehouse-fields';
 import { getOpenApiDocument } from '../src/lib/openapi';
+import { CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS, CRM_INDUSTRIES } from '../src/lib/crm-fields';
 
 const origin = 'https://context.example.test';
 const employee = { id: 7, email: 'employee@example.test', is_active: true, dashboardAccess: true, adminAccess: false, twenty_user_id: null };
 const now = new Date('2026-09-25T00:00:00Z');
 const meta = { requestId: 'synthetic-mcp-test', generatedAt: now.toISOString() };
-const contextData = { employee_id: 7, read_only: true, scopes: ['knowledge:read'], knowledge_discovery: { permitted: true, status: 'not_checked', index_path: '/api/v1/wiki/pages', search_path: '/api/v1/wiki/search' }, server_clock: clockContext(now) };
+const contextData = { constraints: { contacts: 'masked_or_excluded', narrative_context: 'redacted_lead_context', media: 'excluded', crm_scope: 'created or assigned; verified Twenty admins see all', max_page_size: 25 }, employee_id: 7, read_only: true, scopes: ['knowledge:read'], knowledge_discovery: { permitted: true, status: 'not_checked', index_path: '/api/v1/wiki/pages', search_path: '/api/v1/wiki/search' }, server_clock: clockContext(now) };
 const queryContext = { ...resolveDateQuery(new URLSearchParams(), ['created'], now), sort: 'id_asc', returned_count: 1, has_more: true };
 const matchingPolicy = { mode: 'permissive', include_unknown: false, range_matching: 'overlap', guidance: 'Verify uncertain candidates.' };
 const sourceStream = { source_watermark_at: now.toISOString(), last_run_at: now.toISOString(), status: 'ok' };
-const crmAccess = { access_scope: 'created_or_assigned', source_status: { opportunities: sourceStream, notes: sourceStream, tasks: sourceStream } };
+const crmAccess = {
+  access_scope: 'created_or_assigned', source_status: { opportunities: sourceStream, notes: sourceStream, tasks: sourceStream },
+  read_consistency: { database_snapshot: 'repeatable_read', transaction_started_at: now.toISOString(), lead_fields: 'same_row', cross_request_snapshot: false },
+  activity_status: { status: 'current', unavailable_streams: [] }, field_semantics: 'Recorded categories may be defaults; verify monetary units.',
+};
+const missingText = { state: 'missing', text: null, redacted: false, truncated: false };
+const ownership = { assigned_to: { state: 'missing', values: null, redacted: false }, supply_owners: { state: 'missing', values: null, redacted: false }, owner_workspace_member_id: null, created_by: { workspace_member_id: null, name: missingText, source: missingText }, updated_by: { workspace_member_id: null, name: missingText, source: missingText } };
+const richLead = {
+  close_date: null, ownership, verification_required: true,
+  id: '77777777-7777-4777-8777-777777777777', name: 'Synthetic Logistics', stage: 'NEW_LEAD', source_created_at: now.toISOString(),
+  lead_source: 'WEBSITE_SEO', lease_duration: 'LONG_TERM', industry_verticals: ['FMCG'], occupancy_timelines: null, preferred_languages: ['ENGLISH'], repeat_client: false,
+  budget: { kind: 'exact', value: 25, min: null, max: null, currency: null, period: null, area_basis: null, verification_required: true },
+  recorded_value: { amount_micros: '0', amount: '0', currency_code: null, verification_required: true },
+  last_note_at: null, last_task_at: now.toISOString(), recorded_follow_up_count: 0, field_evidence: { budget: { state: 'parsed', source: null } },
+};
 function key(scopes: KeyRegistration['scopes'] = ['knowledge:read', 'warehouses:read', 'crm:read']): KeyRegistration {
   return { id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: employee.email, scopes, expiresAt: '2099-01-01T00:00:00Z' };
 }
@@ -85,10 +100,10 @@ describe('MCP read-only protocol', () => {
     expect((await handleMcpRequest(rpc('tools/list', {}, { headers: { 'MCP-Protocol-Version': '1999-01-01' } }), deps)).status).toBe(400);
     expect(deps.read).not.toHaveBeenCalled();
   });
-  it('lists all twelve read tools with warehouse catalogs and business output contracts', async () => {
+  it('lists all thirteen read tools with warehouse catalogs and business output contracts', async () => {
     const response = await handleMcpRequest(rpc('tools/list'), { authenticate: async () => key() });
     const { result } = await wire(response);
-    expect(result.tools).toHaveLength(12);
+    expect(result.tools).toHaveLength(13);
     for (const tool of result.tools) {
       expect(tool.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
       expect(tool.outputSchema.required).toEqual(expect.arrayContaining(['source_path', 'status', 'data', 'meta']));
@@ -104,17 +119,29 @@ describe('MCP read-only protocol', () => {
     expect(crm.inputSchema.properties.date_field.enum).toContain('created');
     expect(crm.inputSchema.properties.period.enum).toContain('this_month');
     expect(crm.inputSchema.properties).toHaveProperty('q');
+    expect(crm.inputSchema.properties.lead_source.enum).toEqual(CRM_LEAD_SOURCES);
+    expect(crm.inputSchema.properties.lease_duration.enum).toEqual(CRM_LEASE_DURATIONS);
+    expect(crm.inputSchema.properties.industry.enum).toEqual(CRM_INDUSTRIES);
+    expect(crm.inputSchema.properties.requirement_sqft_min).toMatchObject({ type: 'integer', minimum: 1, maximum: 1_000_000_000 });
+    expect(crm.inputSchema.properties.repeat_client.enum).toEqual(['true', 'false']);
+    expect(crm.inputSchema.properties).not.toHaveProperty('budget_min');
+    expect(crm.inputSchema.properties).not.toHaveProperty('amount_min');
     expect(crm.description).toContain('view=created, date_field=created, period=this_month');
     const summary = result.tools.find((tool: { name: string }) => tool.name === 'crm_summary');
     expect(summary.inputSchema.properties).not.toHaveProperty('cursor');
-    expect(summary.outputSchema.properties.data.required).toEqual(expect.arrayContaining(['total', 'groups', 'groups_truncated', 'other_count', 'query_context', 'access_scope', 'source_status']));
+    expect(summary.inputSchema.properties.group_by.enum).toEqual(expect.arrayContaining(['lead_source', 'lease_duration']));
+    expect(summary.outputSchema.properties.data.required).toEqual(expect.arrayContaining(['total', 'groups', 'groups_truncated', 'other_count', 'query_context', 'access_scope', 'source_status', 'read_consistency', 'activity_status', 'field_semantics']));
+    const related = result.tools.find((tool: { name: string }) => tool.name === 'read_crm_lead_context');
+    expect(related.inputSchema.required).toEqual(['id', 'section']);
+    expect(related.inputSchema.properties.section.enum).toEqual(['notes', 'tasks', 'company', 'stage_history']);
+    expect(related.inputSchema.properties.limit.maximum).toBe(10);
   });
   it('limits tool discovery to granted scopes, rejects unknown tools and does not expose writes', async () => {
     const read = vi.fn();
     const deps = { authenticate: async () => key(['knowledge:read']), read };
     const { result } = await wire(await handleMcpRequest(rpc('tools/list'), deps));
     expect(result.tools.map((tool: { name: string }) => tool.name)).toEqual(['get_context', 'search_knowledge', 'read_knowledge']);
-    for (const name of ['search_crm_leads', 'crm_summary', 'crm_filters', 'warehouse_summary', 'update_warehouse', 'fetch', 'execute_sql']) {
+    for (const name of ['search_crm_leads', 'read_crm_lead_context', 'crm_summary', 'crm_filters', 'warehouse_summary', 'update_warehouse', 'fetch', 'execute_sql']) {
       const body = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: {} }), deps));
       expect(body.error ?? body.result?.isError).toBeTruthy();
     }
@@ -187,6 +214,12 @@ describe('MCP read-only protocol', () => {
     ['crm_filters', { employee_id: 42 }], ['search_crm_leads', { priority_min: 6 }],
     ['search_crm_leads', { period: 'whenever' }], ['search_crm_leads', { date_from: '09/01/2026' }],
     ['search_crm_leads', { cursor: 'a'.repeat(1025) }], ['search_warehouses', { cursor: 'a'.repeat(1025) }],
+    ['search_crm_leads', { requirement_sqft_min: 0 }], ['search_crm_leads', { requirement_sqft_max: 1_000_000_001 }],
+    ['search_crm_leads', { requirement_sqft_min: 12.5 }], ['search_crm_leads', { lead_source: 'PRIVATE_SOURCE' }],
+    ['search_crm_leads', { industry: 'UNLISTED_INDUSTRY' }], ['search_crm_leads', { repeat_client: 'maybe' }],
+    ['search_crm_leads', { budget_min: 10000 }], ['crm_summary', { group_by: 'recorded_value' }],
+    ['read_crm_lead_context', { id: richLead.id }], ['read_crm_lead_context', { id: richLead.id, section: 'all' }],
+    ['read_crm_lead_context', { id: richLead.id, section: 'notes', limit: 11 }], ['read_crm_lead_context', { id: richLead.id, section: 'notes', cursor: 'a'.repeat(2049) }],
   ])('rejects unsupported summary, identity or temporal inputs for %s', async (name, args) => {
     const read = vi.fn();
     const body = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: args }), { authenticate: async () => key(), read }));
@@ -222,22 +255,78 @@ describe('MCP read-only protocol', () => {
     const read = vi.fn(async (request: Request, path: string[]) => {
       expect(path).toEqual(['crm', 'filters']);
       expect(new URL(request.url).searchParams.get('view')).toBe('assigned');
-      return Response.json({ data: { cities: ['Sample City'], cities_truncated: true, stages: ['NEW_LEAD'], date_fields: ['created'], periods: ['this_month'], sorts: ['id_asc'], ...crmAccess }, meta });
+      return Response.json({ data: { cities: ['Sample City'], cities_truncated: true, stages: ['NEW_LEAD'], date_fields: ['created'], periods: ['this_month'], sorts: ['id_asc'], lead_sources: CRM_LEAD_SOURCES, lease_durations: CRM_LEASE_DURATIONS, industries: CRM_INDUSTRIES, filter_guidance: 'Unknown values do not match; recorded categories may be defaults.', ...crmAccess }, meta });
     });
     const body = await wire(await handleMcpRequest(rpc('tools/call', { name: 'crm_filters', arguments: { view: 'assigned' } }), { authenticate: async () => key(), read }));
     expect(body.result.isError).not.toBe(true);
     expect(body.result.structuredContent.data.cities_truncated).toBe(true);
+    expect(body.result.structuredContent.data.lead_sources).toEqual(CRM_LEAD_SOURCES);
+    expect(body.result.structuredContent.data).not.toHaveProperty('micro_markets');
+  });
+  it.each(['search_crm_leads', 'read_crm_lead', 'crm_briefing'])('preserves structured details, unknown units and degraded activity for %s in one read', async name => {
+    const metadata = { ...crmAccess, activity_status: { status: 'degraded', unavailable_streams: ['notes'] } };
+    const data = name === 'search_crm_leads'
+      ? { items: [richLead], nextCursor: null, query_context: queryContext, ...metadata }
+      : name === 'read_crm_lead' ? { ...richLead, ...metadata, description: missingText, loss_reason: missingText }
+        : { as_of: now.toISOString(), timezone: 'Asia/Kolkata', total_active: 1, counts_by_stage: { NEW_LEAD: 1 }, counts_by_sla: { unknown: 1 }, follow_up_overdue: 0, priorities: [richLead], ...metadata };
+    const filters = { requirement_sqft_min: 10000, requirement_sqft_max: 50000, micro_market: 'North, East', lead_source: 'WEBSITE_SEO', lease_duration: 'LONG_TERM', industry: 'FMCG', repeat_client: 'false' };
+    const args = name === 'read_crm_lead' ? { id: richLead.id } : name === 'search_crm_leads' ? filters : {};
+    const read = vi.fn(async (request: Request) => {
+      if (name === 'search_crm_leads') expect(Object.fromEntries(new URL(request.url).searchParams)).toEqual({ ...filters, requirement_sqft_min: '10000', requirement_sqft_max: '50000' });
+      return Response.json({ data, meta });
+    });
+    const body = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: args }), { authenticate: async () => key(), read }));
+    expect(body.result.isError).not.toBe(true);
+    expect(read).toHaveBeenCalledOnce();
+    const result = body.result.structuredContent.data;
+    const lead = name === 'search_crm_leads' ? result.items[0] : name === 'crm_briefing' ? result.priorities[0] : result;
+    expect(lead).toMatchObject(richLead);
+    expect(result.read_consistency).toEqual(crmAccess.read_consistency);
+    expect(result.activity_status).toEqual(metadata.activity_status);
+    expect(result.field_semantics).toBe(crmAccess.field_semantics);
   });
   it('returns a tool error when a successful read violates the declared aggregate contract', async () => {
     const read = vi.fn(async () => Response.json({ data: { total: '37', groups: [] }, meta }));
     const body = await wire(await handleMcpRequest(rpc('tools/call', { name: 'crm_summary', arguments: {} }), { authenticate: async () => key(), read }));
     expect(body.result?.isError ?? body.error).toBeTruthy();
   });
+  it.each(['notes', 'tasks', 'company', 'stage_history'])('routes one related %s section and preserves independent source clocks and coverage', async section => {
+    const text = { state: 'redacted', text: 'Recorded context. Contact [phone omitted].', redacted: true, truncated: false };
+    const narrative = { id: richLead.id, title: text, body: text, source_created_at: now.toISOString(), source_updated_at: now.toISOString() };
+    const item = section === 'notes' ? narrative : section === 'tasks' ? { ...narrative, status: 'TODO', due_at: null, assignee: null, assignee_status: 'unassigned' }
+      : section === 'company' ? { id: richLead.id, name: text, employees: null, ideal_customer_profile: null, city: null, state: null, country: null, source_created_at: now.toISOString(), source_updated_at: now.toISOString() }
+        : { id: 'synthetic-transition', from_stage: 'NEW_LEAD', to_stage: 'SITE_VISIT', changed_at: now.toISOString(), detected_at: now.toISOString() };
+    const data = { ...crmAccess, section, items: [item], nextCursor: null,
+      read_consistency: { ...crmAccess.read_consistency, related_sources_atomic: false },
+      source_fetched_at: now.toISOString(), source_opportunity_updated_at: now.toISOString(), mirror_source_updated_at: '2026-09-24T00:00:00.000Z', lead_version_matches_mirror: false,
+      freshness_basis: section === 'stage_history' ? 'observed_mirror_history' : 'live_twenty_read', text_guidance: 'Separate observations; do not reconstruct masked contacts.',
+      coverage: { scanned: 1, returned: 1, withheld: 0, has_more: false,
+        ...(section === 'company' ? { relationship_policy: 'linked_company_only', link_status: 'available' } : section === 'stage_history' ? { relationship_policy: 'scoped_lead_history', history_complete: false } : { relationship_policy: 'single_lead_only', guidance: 'Shared activity is withheld.' }) } };
+    const read = vi.fn(async (request: Request, path: string[]) => {
+      expect(path).toEqual(['crm', 'opportunities', richLead.id, 'context']);
+      expect(Object.fromEntries(new URL(request.url).searchParams)).toEqual({ section, limit: '2' });
+      return Response.json({ data, meta });
+    });
+    const body = await wire(await handleMcpRequest(rpc('tools/call', { name: 'read_crm_lead_context', arguments: { id: richLead.id, section, limit: 2 } }), { authenticate: async () => key(), read }));
+    expect(body.result.isError).not.toBe(true);
+    expect(read).toHaveBeenCalledOnce();
+    expect(body.result.structuredContent.data).toEqual(data);
+    expect(body.result.structuredContent.source_path).toBe(`/api/v1/crm/opportunities/${richLead.id}/context?section=${section}&limit=2`);
+  });
   it('documents matching temporal and summary contracts in the REST specification', () => {
     const document = getOpenApiDocument();
     const crm = document.paths['/crm/opportunities'].get.parameters;
-    expect(crm.map(parameter => parameter.name)).toEqual(expect.arrayContaining(['q', 'date_field', 'period', 'date_from', 'date_to', 'sort', 'follow_up_status']));
+    expect(crm.map(parameter => parameter.name)).toEqual(expect.arrayContaining(['q', 'date_field', 'period', 'date_from', 'date_to', 'sort', 'follow_up_status', 'requirement_sqft_min', 'requirement_sqft_max', 'micro_market', 'lead_source', 'lease_duration', 'industry', 'repeat_client']));
     expect(document.components.schemas.Opportunity.properties).toHaveProperty('source_created_at');
+    expect(Object.keys(document.components.schemas.Opportunity.properties)).toEqual(expect.arrayContaining(['budget', 'recorded_value', 'lead_source', 'lease_duration', 'industry_verticals', 'occupancy_timelines', 'preferred_languages', 'repeat_client', 'last_note_at', 'last_task_at', 'recorded_follow_up_count']));
+    expect(document.components.schemas.CrmBudget.properties.currency.enum).toContain(null);
+    expect(document.components.schemas.CrmBudget.properties.verification_required.const).toBe(true);
+    expect(document.components.schemas.CrmReadConsistency.properties.cross_request_snapshot.const).toBe(false);
+    expect(document.components.schemas.OpportunityDetail.required).toEqual(expect.arrayContaining(['read_consistency', 'activity_status', 'field_semantics']));
+    expect(document.components.schemas.OpportunityDetail.required).toEqual(expect.arrayContaining(['ownership', 'close_date', 'description', 'loss_reason']));
+    expect(document.components.schemas.CrmBudget.properties.kind.enum).toEqual(expect.arrayContaining(['upper_bound', 'lower_bound']));
+    const related = document.paths['/crm/opportunities/{id}/context'].get.parameters;
+    expect(related.find(parameter => parameter.name === 'section')).toMatchObject({ required: true, schema: { enum: ['notes', 'tasks', 'company', 'stage_history'] } });
     for (const route of ['/warehouses/summary', '/crm/summary'] as const) {
       const params = document.paths[route].get.parameters.map(parameter => parameter.name);
       expect(params).toContain('group_limit');

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { searchOpportunities, summarizeOpportunities, getCrmFilterOptions, validateCrmQuery, getOpportunity } from '../src/lib/data';
 import type { Principal } from '../src/lib/auth';
 import type { CrmAccess } from '../src/lib/crm-live';
+import { CRM_INDUSTRIES, CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS } from '../src/lib/crm-fields';
 
 const id = '00000000-0000-4000-8000-000000000001';
 const id2 = '00000000-0000-4000-8000-000000000002';
@@ -73,6 +74,55 @@ describe('CRM task queries', () => {
     expect(db.query.mock.calls[0][1]).toContainEqual(['RATING_4', 'RATING_5']);
     expect(result.query_context).toMatchObject({ date_field: 'follow_up', start_at: '2026-09-25T18:30:00.000Z', end_before: '2026-09-26T18:30:00.000Z' });
   });
+  it('applies the same bounded structured filters to search and totals under the verified scope', async () => {
+    const filters = new URLSearchParams({ requirement_sqft_min: '30000', requirement_sqft_max: '50000',
+      micro_market: "O'Hare, North", lead_source: 'OUTREACH', lease_duration: 'LONG_TERM', industry: 'FMCG', repeat_client: 'false' });
+    const search = database();
+    await searchOpportunities(search.client, principal, filters, access);
+    const summary = database([{ total: 0, groups: [] }]);
+    await summarizeOpportunities(summary.client, principal, new URLSearchParams([...filters, ['group_by', 'lead_source']]), access);
+    const expected = [[id, id2], 30000, 50000, "O'Hare, North", 'OUTREACH', 'LONG_TERM', '["FMCG"]', false, 11];
+    expect(search.query.mock.calls[0][1]).toEqual(expected);
+    expect(summary.query.mock.calls[0][1]).toEqual(expected);
+    for (const db of [search, summary]) {
+      const sql = db.query.mock.calls[0][0] as string;
+      expect(sql).toContain('o.opportunity_id = ANY($1::text[])');
+      expect(sql).not.toContain("O'Hare, North");
+      expect(sql).toContain("jsonb_typeof(o.data->'industryVertical') = 'array'");
+      expect(sql).toContain('NOT EXISTS');
+      expect(sql).toContain('= $8::boolean');
+      expect(sql).not.toMatch(/regexp_split_to_table\([^)]*microMarket/);
+    }
+  });
+  it.each([
+    ['requirement_sqft_min', '30000', '40000'], ['requirement_sqft_max', '50000', '60000'],
+    ['micro_market', 'North', 'South'], ['lead_source', 'OUTREACH', 'BROKER'],
+    ['lease_duration', 'LONG_TERM', 'SHORT_TERM'], ['industry', 'FMCG', 'MANUFACTURING'],
+    ['repeat_client', 'true', 'false'],
+  ])('binds %s to the search cursor rather than silently changing the candidate set', async (name, initial, changed) => {
+    const db = database([{ opportunity_id: id }, { opportunity_id: id2 }]);
+    const query = new URLSearchParams({ [name]: initial, limit: '1' });
+    const first = await searchOpportunities(db.client, principal, query, access);
+    query.set('cursor', first.nextCursor!);
+    query.set(name, changed);
+    await expect(searchOpportunities(db.client, principal, query, access)).rejects.toMatchObject({ status: 400, code: 'INVALID_QUERY' });
+    expect(db.query).toHaveBeenCalledOnce();
+  });
+  it.each([
+    'requirement_sqft_min=0', 'requirement_sqft_max=-1', 'requirement_sqft_min=1.5',
+    'requirement_sqft_min=1000000001', 'requirement_sqft_min=40,000', 'requirement_sqft_max=1e6',
+    'requirement_sqft_min=50000&requirement_sqft_max=40000',
+    'micro_market=North,9876543210', 'micro_market=private%40example.test',
+    'lead_source=unknown', 'lease_duration=LONG', 'industry=FMCG,MANUFACTURING',
+    'industry=private%40example.test', 'repeat_client=yes', 'repeat_client=OPTION1',
+    'lead_source=OUTREACH&lead_source=BROKER',
+  ])('refuses ambiguous or unsafe structured filters before querying: %s', async input => {
+    for (const read of [searchOpportunities, summarizeOpportunities]) {
+      const db = database();
+      await expect(read(db.client, principal, new URLSearchParams(input), access)).rejects.toMatchObject({ status: 400 });
+      expect(db.query).not.toHaveBeenCalled();
+    }
+  });
   it('keeps date sorting and cursor comparisons at the same precision', async () => {
     const db = database([{ opportunity_id: id, sort_value: '2026-09-25T00:00:00.123Z' }, { opportunity_id: id2 }]);
     const query = new URLSearchParams('sort=created_desc&limit=1');
@@ -142,7 +192,7 @@ describe('scoped CRM aggregates and discovery', () => {
     expect(db.query.mock.calls[0][0]).toContain('sum(count)');
     expect(db.query.mock.calls[0][1][0]).toEqual([id, id2]);
   });
-  it.each(['city', 'priority'])('uses only referenced bindings for %s summaries', async group => {
+  it.each(['city', 'priority', 'lead_source', 'lease_duration'])('uses only referenced bindings for %s summaries', async group => {
     const db = database([{ total: 0, groups: [] }]);
     await summarizeOpportunities(db.client, principal, new URLSearchParams({ group_by: group }), { mode: 'all', memberId: id });
     expect(db.query.mock.calls[0][1]).toEqual([11]);
@@ -162,6 +212,11 @@ describe('scoped CRM aggregates and discovery', () => {
     const result = await getCrmFilterOptions(db.client, principal, new URLSearchParams('view=assigned'), access);
     expect(result.cities).toEqual(['Bengaluru']);
     expect(result.periods).toContain('this_month');
+    expect(result.lead_sources).toEqual(CRM_LEAD_SOURCES);
+    expect(result.lease_durations).toEqual(CRM_LEASE_DURATIONS);
+    expect(result.industries).toEqual(CRM_INDUSTRIES);
+    expect(result.summary_groups).toEqual(expect.arrayContaining(['lead_source', 'lease_duration']));
+    expect(result.filter_guidance).toContain('complete recorded label');
     expect(db.query.mock.calls[0][0]).toContain('o.opportunity_id = ANY($1::text[])');
     expect(db.query.mock.calls[0][0]).toContain('regexp_split_to_table(CASE WHEN btrim(o.city)');
     expect(db.query.mock.calls[0][0]).not.toContain("regexp_split_to_table(o.city, ',')");

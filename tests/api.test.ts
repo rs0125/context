@@ -5,12 +5,13 @@ import { authenticateKey, type KeyRegistration } from '../src/lib/auth';
 import { randomUUID } from 'node:crypto';
 import { HttpError } from '../src/lib/errors';
 import type { CrmAccess } from '../src/lib/crm-live';
+import type { getRelatedCrmContext } from '../src/lib/crm-related';
 
 const active = { id: 7, email: 'alex@example.test', is_active: true, dashboardAccess: true, adminAccess: false, twenty_user_id: '12345678-1111-1111-1111-123456789012' };
 function harness(options: { scopes?: KeyRegistration['scopes']; roster?: unknown[]; stale?: boolean } = {}) {
   const key: KeyRegistration = { id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: 'alex@example.test',
     scopes: options.scopes ?? ['knowledge:read', 'warehouses:read', 'crm:read'], expiresAt: '2099-01-01T00:00:00.000Z' };
-  const query = vi.fn(async (text: string) => {
+  const query = vi.fn(async (text: string, _values?: unknown[]) => {
     if (text.includes('"VerifiedNumber"')) return { rows: options.roster ?? [active] };
     if (text.includes('sync_checkpoints')) return { rows: [{ object: 'opportunities', last_run_at: options.stale ? '2000-01-01T00:00:00Z' : new Date(), last_run_status: 'ok' }] };
     if (text.includes('context_engine_private.knowledge_pages')) return { rows: [{ page_count: 1, pages: [{
@@ -184,6 +185,68 @@ describe('REST access boundary', () => {
     expect(response.status).toBe(503);
     expect(deps.query.mock.calls.every(([query]) => !query.includes('FROM public.opportunities'))).toBe(true);
   });
+  it('releases the preliminary transaction before upstream authorization and returns final snapshot freshness', async () => {
+    const deps = harness();
+    const originalQuery = deps.query.getMockImplementation()!;
+    const preliminaryAt = new Date(Date.now() - 120_000).toISOString();
+    const finalAt = new Date(Date.now() - 15_000).toISOString();
+    let transactions = 0;
+    let insideTransaction = false;
+    let authorizationComplete = false;
+    const events: string[] = [];
+    const transaction = async <T>(work: (client: PoolClient) => Promise<T>): Promise<T> => {
+      const number = ++transactions;
+      events.push(`begin:${number}`);
+      insideTransaction = true;
+      try { return await work({ query: deps.query } as unknown as PoolClient); }
+      finally { insideTransaction = false; events.push(`release:${number}`); }
+    };
+    deps.query.mockImplementation(async sql => {
+      if (sql.includes('sync_checkpoints')) {
+        expect(insideTransaction).toBe(true);
+        const observedAt = authorizationComplete ? finalAt : preliminaryAt;
+        return { rows: [{ object: 'opportunities', last_run_at: observedAt, last_updated_at: observedAt, last_run_status: 'ok', transaction_started_at: observedAt }] };
+      }
+      if (sql.includes('FROM public.opportunities')) {
+        expect(insideTransaction).toBe(true);
+        expect(authorizationComplete).toBe(true);
+        expect(transactions).toBe(2);
+      }
+      return originalQuery(sql);
+    });
+    deps.liveCrmAccess.mockImplementationOnce(async () => {
+      expect(insideTransaction).toBe(false);
+      events.push('live-access');
+      authorizationComplete = true;
+      return { mode: 'related', memberId: active.twenty_user_id, ids: [] };
+    });
+    const response = await handleApiRequest(request('crm/opportunities'), ['crm', 'opportunities'], { ...deps, transaction });
+    expect(response.status).toBe(200);
+    expect(events).toEqual(['begin:1', 'release:1', 'live-access', 'begin:2', 'release:2']);
+    expect((await response.json()).data.source_status.opportunities).toMatchObject({
+      last_run_at: finalAt, source_watermark_at: finalAt, status: 'ok',
+    });
+  });
+  it('rejects a mirror that becomes unhealthy during upstream authorization before reading lead details', async () => {
+    const deps = harness();
+    const originalQuery = deps.query.getMockImplementation()!;
+    let unhealthy = false;
+    deps.query.mockImplementation(async sql => {
+      if (unhealthy && sql.includes('sync_checkpoints')) {
+        return { rows: [{ object: 'opportunities', last_run_at: new Date(), last_run_status: 'error' }] };
+      }
+      return originalQuery(sql);
+    });
+    deps.liveCrmAccess.mockImplementationOnce(async () => {
+      unhealthy = true;
+      return { mode: 'related', memberId: active.twenty_user_id, ids: [] };
+    });
+    const response = await handleApiRequest(request('crm/opportunities'), ['crm', 'opportunities'], deps);
+    expect(response.status).toBe(503);
+    expect((await response.json()).error.code).toBe('CRM_SOURCE_STALE');
+    expect(deps.transactionMock).toHaveBeenCalledTimes(2);
+    expect(deps.query.mock.calls.every(([sql]) => !sql.includes('FROM public.opportunities'))).toBe(true);
+  });
   it('uses the verified Twenty admin result without granting WAG admins extra CRM access', async () => {
     const admin = harness();
     admin.liveCrmAccess.mockResolvedValue({ mode: 'all', memberId: active.twenty_user_id });
@@ -259,5 +322,142 @@ describe('REST access boundary', () => {
     const status = (date: string, value: string) => ({ source_status: { opportunities: { last_run_at: date, status: value, source_watermark_at: null } } });
     expect(() => assertFreshCrm(status(new Date().toISOString(), 'error'))).toThrow('successful recent sync');
     expect(() => assertFreshCrm(status('2099-01-01T00:00:00Z', 'ok'))).toThrow('successful recent sync');
+  });
+});
+
+describe('CRM related context integration', () => {
+  const id = '12345678-1234-1234-1234-123456789012';
+  const updatedAt = '2026-09-25T12:00:00.000Z';
+  const route = `crm/opportunities/${id}/context`;
+  const path = ['crm', 'opportunities', id, 'context'];
+  function contextHarness(section: 'notes' | 'tasks' = 'notes') {
+    const deps = harness();
+    const original = deps.query.getMockImplementation()!;
+    deps.query.mockImplementation(async (sql, values) => {
+      if (sql.includes('FROM public.opportunities')) {
+        const allowed = values?.[1];
+        return { rows: Array.isArray(allowed) && !allowed.includes(id) ? [] : [{ opportunity_id: id, twenty_updated_at: updatedAt }] };
+      }
+      if (sql.includes('FROM public.stage_transitions')) return { rows: [{ id: '7', from_stage: 'NEW_LEAD', to_stage: 'SITE_VISIT', changed_at: updatedAt, detected_at: updatedAt }] };
+      return original(sql, values);
+    });
+    const access: CrmAccess = { mode: 'related', memberId: active.twenty_user_id, ids: [id] };
+    deps.liveCrmAccess.mockResolvedValue(access);
+    const payload: Awaited<ReturnType<typeof getRelatedCrmContext>> = {
+      section, items: [{ id: '00000000-0000-4000-8000-000000000099', title: { state: 'present', text: 'Safe related context', redacted: false, truncated: false },
+        body: { state: 'missing', text: null, redacted: false, truncated: false }, source_created_at: updatedAt, source_updated_at: updatedAt }],
+      nextCursor: null, source_fetched_at: new Date().toISOString(), source_opportunity_updated_at: updatedAt,
+      freshness_basis: 'live_twenty_read', source_path: `/crm/opportunities/${id}/context`, text_guidance: 'Synthetic source content.',
+      coverage: { scanned: 1, returned: 1, withheld: 0, has_more: false, relationship_policy: 'single_lead_only', guidance: 'Synthetic page.' },
+    };
+    const relatedCrmContext = vi.fn<typeof getRelatedCrmContext>().mockResolvedValue(payload);
+    return { ...deps, relatedCrmContext, payload, access };
+  }
+
+  it.each(['notes', 'tasks'] as const)('reads %s between released transactions and rechecks live permissions before returning', async section => {
+    const deps = contextHarness(section);
+    let insideTransaction = false;
+    const events: string[] = [];
+    const transaction = async <T>(work: (client: PoolClient) => Promise<T>): Promise<T> => {
+      events.push('begin'); insideTransaction = true;
+      try { return await work({ query: deps.query } as unknown as PoolClient); }
+      finally { insideTransaction = false; events.push('release'); }
+    };
+    deps.liveCrmAccess.mockImplementation(async () => { expect(insideTransaction).toBe(false); events.push('live-access'); return deps.access; });
+    deps.relatedCrmContext.mockImplementation(async () => { expect(insideTransaction).toBe(false); events.push('related-context'); return deps.payload; });
+    const result = await handleApiRequest(request(`${route}?section=${section}&limit=5`), path, { ...deps, transaction });
+    expect(result.status).toBe(200);
+    expect(events).toEqual(['begin', 'release', 'live-access', 'related-context', 'live-access', 'begin', 'release']);
+    expect(deps.liveCrmAccess).toHaveBeenNthCalledWith(2, expect.objectContaining({ employeeId: 7 }), 'accessible', id);
+    expect(deps.relatedCrmContext).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ employeeId: 7 }), id, { section, limit: 5, cursor: undefined, access: deps.access });
+    expect((await result.json()).data).toMatchObject({ section, access_scope: 'created_or_assigned', freshness_basis: 'live_twenty_read',
+      source_opportunity_updated_at: updatedAt, mirror_source_updated_at: updatedAt, lead_version_matches_mirror: true,
+      read_consistency: { database_snapshot: 'repeatable_read', lead_fields: 'same_row', cross_request_snapshot: false, related_sources_atomic: false },
+      source_status: { opportunities: { status: 'ok' } } });
+    expect(deps.audit).toHaveBeenCalledWith(expect.objectContaining({ operation: 'crm/context', status: 200 }));
+  });
+
+  it('explicitly identifies differing live and mirrored lead versions without overwriting either clock', async () => {
+    const deps = contextHarness();
+    deps.payload.source_opportunity_updated_at = '2026-09-25T12:05:00.000Z';
+    const result = await handleApiRequest(request(`${route}?section=notes`), path, deps);
+    expect(result.status).toBe(200);
+    expect((await result.json()).data).toMatchObject({ source_opportunity_updated_at: '2026-09-25T12:05:00.000Z',
+      mirror_source_updated_at: updatedAt, lead_version_matches_mirror: false, read_consistency: { related_sources_atomic: false } });
+  });
+
+  it('withholds already-fetched context when final live assignment access is revoked', async () => {
+    const deps = contextHarness();
+    deps.liveCrmAccess.mockResolvedValueOnce(deps.access).mockResolvedValueOnce({ ...deps.access, ids: [] });
+    const result = await handleApiRequest(request(`${route}?section=notes`), path, deps);
+    expect(result.status).toBe(404);
+    expect(deps.relatedCrmContext).toHaveBeenCalledOnce();
+    expect(deps.query).toHaveBeenLastCalledWith(expect.stringContaining('ANY('), [id, []]);
+    expect(await result.text()).not.toContain('Safe related context');
+  });
+
+  it.each(['key', 'employee', 'source'] as const)('rechecks %s after the related HTTP read and withholds its payload on failure', async failure => {
+    const deps = contextHarness();
+    const original = deps.query.getMockImplementation()!;
+    let changed = false;
+    deps.relatedCrmContext.mockImplementationOnce(async () => { changed = true; return deps.payload; });
+    deps.query.mockImplementation(async (sql, values) => {
+      if (changed && failure === 'employee' && sql.includes('VerifiedNumber')) return { rows: [{ ...active, is_active: false }] };
+      if (changed && failure === 'source' && sql.includes('sync_checkpoints')) return { rows: [{ object: 'opportunities', last_run_at: new Date(), last_run_status: 'error' }] };
+      return original(sql, values);
+    });
+    const revalidateKey = vi.fn(async () => { if (changed && failure === 'key') throw new HttpError(401, 'UNAUTHORIZED', 'The connector was revoked.'); });
+    const result = await handleApiRequest(request(`${route}?section=notes`), path, { ...deps, revalidateKey });
+    expect(result.status).toBe({ key: 401, employee: 403, source: 503 }[failure]);
+    expect(revalidateKey).toHaveBeenCalledTimes(2);
+    expect(deps.query.mock.calls.every(([sql]) => !sql.includes('FROM public.opportunities'))).toBe(true);
+    expect(await result.text()).not.toContain('Safe related context');
+  });
+
+  it('fails closed when final upstream verification is unavailable rather than returning previously fetched notes', async () => {
+    const deps = contextHarness();
+    deps.liveCrmAccess.mockResolvedValueOnce(deps.access).mockRejectedValueOnce(new HttpError(503, 'CRM_AUTHORIZATION_UNAVAILABLE', 'Unavailable.'));
+    const result = await handleApiRequest(request(`${route}?section=notes`), path, deps);
+    expect(result.status).toBe(503);
+    expect(deps.transactionMock).toHaveBeenCalledTimes(1);
+    expect(await result.text()).not.toContain('Safe related context');
+  });
+
+  it('rechecks stored employee API keys inside the final transaction after context fetching', async () => {
+    vi.stubEnv('CONTEXT_CONSOLE_WRITES_ENABLED', 'true');
+    try {
+      const deps = contextHarness();
+      const key = { ...deps.authenticate(), source: 'database' as const, employeeId: 7 };
+      deps.authenticate.mockReturnValue(key);
+      const original = deps.query.getMockImplementation()!;
+      let revoked = false;
+      deps.query.mockImplementation(async (sql, values) => sql.includes('context_auth_private.employee_api_keys')
+        ? { rows: revoked ? [] : [{ id: key.id }] } : original(sql, values));
+      deps.relatedCrmContext.mockImplementationOnce(async () => { revoked = true; return deps.payload; });
+      const result = await handleApiRequest(request(`${route}?section=notes`), path, deps);
+      expect(result.status).toBe(401);
+      expect(deps.query.mock.calls.filter(([sql]) => sql.includes('context_auth_private.employee_api_keys'))).toHaveLength(2);
+      expect(await result.text()).not.toContain('Safe related context');
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it('reads stage observations in the final scoped transaction without a related HTTP read', async () => {
+    const deps = contextHarness();
+    const result = await handleApiRequest(request(`${route}?section=stage_history&limit=2`), path, deps);
+    expect(result.status).toBe(200);
+    expect(deps.relatedCrmContext).not.toHaveBeenCalled();
+    expect(deps.liveCrmAccess).toHaveBeenCalledOnce();
+    expect(deps.transactionMock).toHaveBeenCalledTimes(2);
+    expect((await result.json()).data).toMatchObject({ section: 'stage_history', freshness_basis: 'observed_mirror_history',
+      items: [{ id: '7', from_stage: 'NEW_LEAD', to_stage: 'SITE_VISIT' }], coverage: { history_complete: false } });
+  });
+
+  it.each(['', 'section=all', 'section=notes&limit=11', 'section=company&cursor=abc', 'section=notes&section=tasks', 'section=notes&q=private'])('rejects invalid context query %s before external reads or transactions', async query => {
+    const deps = contextHarness();
+    const result = await handleApiRequest(request(`${route}?${query}`), path, deps);
+    expect(result.status).toBe(400);
+    expect(deps.transactionMock).not.toHaveBeenCalled();
+    expect(deps.liveCrmAccess).not.toHaveBeenCalled();
+    expect(deps.relatedCrmContext).not.toHaveBeenCalled();
   });
 });

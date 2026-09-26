@@ -43,6 +43,8 @@ export function getPool(): Pool {
 }
 
 /** All business reads and roster checks use one bounded transaction/client.
+ * Repeatable read keeps records, derived metadata, and source checkpoints on
+ * one database snapshot. Independently synced sources retain their own ages.
  * No session-level SETs, migrations, named prepared statements, or per-source pools.
  */
 export async function withReadOnlyTransaction<T>(
@@ -75,7 +77,7 @@ async function withTransaction<T>(operation: (client: PoolClient) => Promise<T>,
   }
   let destroy = false;
   try {
-    await client.query(readOnly ? 'BEGIN READ ONLY' : 'BEGIN');
+    await client.query(readOnly ? 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY' : 'BEGIN');
     await client.query("SET LOCAL statement_timeout = '4000ms'");
     await client.query("SET LOCAL lock_timeout = '1000ms'");
     await client.query("SET LOCAL idle_in_transaction_session_timeout = '6000ms'");
