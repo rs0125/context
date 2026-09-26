@@ -57,10 +57,11 @@ async function dependencies(claims: Record<string, unknown> = {}, rows: unknown[
   const verify = vi.fn((value: string, expected: Parameters<typeof verifyGoogleIdToken>[1]) => verifyGoogleIdToken(value, expected, getKey));
   return { fetch, transaction: transaction as typeof withReadOnlyTransaction, verify, limit: vi.fn(), now: () => now, query };
 }
-function assertFailure(response: Response, code: string) {
+function assertFailure(response: Response, code: string, clearFlow = true) {
   expect(response.status).toBe(303);
   expect(response.headers.get('location')).toBe(`${origin}/?error=${code}`);
-  expect(response.headers.getSetCookie()).toEqual([expect.stringContaining('context_console_oauth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Secure')]);
+  expect(response.headers.getSetCookie()).toEqual(clearFlow
+    ? [expect.stringContaining('context_console_oauth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Secure')] : []);
   expect(response.headers.get('cache-control')).toContain('no-store');
   expect(response.headers.get('referrer-policy')).toBe('no-referrer');
 }
@@ -97,12 +98,12 @@ describe('Google console authorization request', () => {
     expect(new URL(response.headers.get('location')!).searchParams.get('redirect_uri')).toBe('http://localhost:3000/api/auth/google/callback');
   });
   it.each(['https://evil.example/api/auth/login', `${origin}/api/auth/login?next=https://evil.example`])('refuses a noncanonical or redirected request %s', async url => {
-    assertFailure(await handleGoogleLogin(new Request(url), { limit: vi.fn() }), 'google_invalid');
+    assertFailure(await handleGoogleLogin(new Request(url), { limit: vi.fn() }), 'google_invalid', false);
   });
   it('fails closed for missing Google configuration without disclosing configuration', async () => {
     vi.stubEnv('GOOGLE_CLIENT_SECRET', '');
     const response = await handleGoogleLogin(new Request(`${origin}/api/auth/login`));
-    assertFailure(response, 'google_unavailable');
+    assertFailure(response, 'google_unavailable', false);
     expect(await response.text()).toBe('');
   });
   it('returns a safe 405 for password POST without parsing credentials', async () => {
@@ -199,15 +200,15 @@ describe('Google callback browser binding, transport, and roster checks', () => 
     { label: 'wrong issuer', query: { iss: 'https://evil.example' } }, { label: 'missing code', query: { code: '' } },
     { label: 'huge code', query: { code: 'x'.repeat(2049) } }, { label: 'code with whitespace', query: { code: 'bad code' } },
     { label: 'error and code', query: { error: 'access_denied' } },
-  ])('rejects $label before any provider request or DB checkout', async ({ query }) => {
+  ])('rejects $label before any provider request or DB checkout', async ({ query, label }) => {
     const deps = await dependencies();
-    assertFailure(await handleGoogleCallback(callbackRequest(query), deps), 'google_invalid');
+    assertFailure(await handleGoogleCallback(callbackRequest(query), deps), 'google_invalid', !['missing state', 'wrong state'].includes(label));
     expect(deps.fetch).not.toHaveBeenCalled(); expect(deps.transaction).not.toHaveBeenCalled(); expect(deps.limit).not.toHaveBeenCalled();
   });
   it.each(['state', 'code', 'error', 'iss'])('rejects duplicated %s before any HTTP call', async field => {
     const deps = await dependencies(), request = callbackRequest();
     const url = new URL(request.url); url.searchParams.append(field, 'first'); url.searchParams.append(field, 'second');
-    assertFailure(await handleGoogleCallback(new Request(url, { headers: request.headers }), deps), 'google_invalid');
+    assertFailure(await handleGoogleCallback(new Request(url, { headers: request.headers }), deps), 'google_invalid', field !== 'state');
     expect(deps.fetch).not.toHaveBeenCalled(); expect(deps.transaction).not.toHaveBeenCalled();
   });
   it.each([
@@ -219,9 +220,9 @@ describe('Google callback browser binding, transport, and roster checks', () => 
     { label: 'missing', cookie: () => '' },
     { label: 'tampered', cookie: () => `${flowCookie()}changed` },
     { label: 'duplicated', cookie: () => `${flowCookie()}; ${flowCookie()}` },
-  ])('rejects a $label flow cookie and clears it', async ({ cookie }) => {
+  ])('rejects a $label flow cookie without consuming unbound browser state', async ({ cookie }) => {
     const deps = await dependencies();
-    assertFailure(await handleGoogleCallback(callbackRequest({}, cookie()), deps), 'google_invalid');
+    assertFailure(await handleGoogleCallback(callbackRequest({}, cookie()), deps), 'google_invalid', false);
     expect(deps.fetch).not.toHaveBeenCalled(); expect(deps.transaction).not.toHaveBeenCalled();
   });
   it('handles cancellation only after state validation and ignores provider error text', async () => {
@@ -233,7 +234,25 @@ describe('Google callback browser binding, transport, and roster checks', () => 
     expect(deps.fetch).not.toHaveBeenCalled(); expect(deps.transaction).not.toHaveBeenCalled();
     expect(response.headers.get('location')).not.toContain('untrusted');
     url.searchParams.set('state', 'X'.repeat(43));
-    assertFailure(await handleGoogleCallback(new Request(url, { headers: { cookie: flowCookie() } }), deps), 'google_invalid');
+    assertFailure(await handleGoogleCallback(new Request(url, { headers: { cookie: flowCookie() } }), deps), 'google_invalid', false);
+  });
+  it('preserves a newer tab B flow after the stale tab A callback, so B can complete', async () => {
+    const start = () => handleGoogleLogin(new Request(`${origin}/api/auth/login`), { limit: vi.fn(), now: () => now });
+    const first = await start(), second = await start();
+    const firstState = new URL(first.headers.get('location')!).searchParams.get('state')!;
+    const secondState = new URL(second.headers.get('location')!).searchParams.get('state')!;
+    const secondCookie = second.headers.getSetCookie()[0].split(';')[0];
+    const secondFlow = readSignedConsoleValue(secondCookie.split('=')[1], 'google-oauth');
+    const deps = await dependencies({ nonce: secondFlow.nonce });
+    assertFailure(await handleGoogleCallback(callbackRequest({ state: firstState }, secondCookie), deps), 'google_invalid', false);
+    expect(deps.fetch).not.toHaveBeenCalled(); expect(deps.transaction).not.toHaveBeenCalled();
+    const successful = await handleGoogleCallback(callbackRequest({ state: secondState }, secondCookie), deps);
+    expect(successful.headers.get('location')).toBe(`${origin}/`);
+    expect(successful.headers.getSetCookie()).toEqual([
+      expect.stringContaining('context_console_oauth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'),
+      expect.stringContaining('context_console_session='),
+    ]);
+    expect(deps.fetch).toHaveBeenCalledOnce(); expect(deps.transaction).toHaveBeenCalledOnce();
   });
   it('stops a callback rejected by the bounded anonymous admission limit before HTTP or DB', async () => {
     const deps = await dependencies();
@@ -275,6 +294,28 @@ describe('Google callback browser binding, transport, and roster checks', () => 
     const deps = await dependencies(); deps.fetch.mockResolvedValue(Response.json({ error: 'invalid_grant' }, { status: 400 }));
     assertFailure(await handleGoogleCallback(callbackRequest(), deps), 'google_invalid');
     expect(deps.transaction).not.toHaveBeenCalled();
+  });
+  it.each([
+    { status: 400, error: 'invalid_client' }, { status: 401, error: 'invalid_client' },
+    { status: 400, error: 'unauthorized_client' }, { status: 401, error: 'unauthorized_client' },
+  ])('classifies Google $status $error as service configuration unavailable without disclosing provider details', async ({ status, error }) => {
+    const deps = await dependencies();
+    deps.fetch.mockResolvedValue(Response.json({ error, error_description: `provider text ${clientSecret}`, other: 'private-provider-content' }, { status }));
+    const response = await handleGoogleCallback(callbackRequest(), deps);
+    assertFailure(response, 'google_unavailable');
+    expect(await response.text()).toBe('');
+    expect([...response.headers.values()].join(' ')).not.toMatch(/provider text|private-provider-content|synthetic-client-secret/);
+    expect(deps.verify).not.toHaveBeenCalled(); expect(deps.transaction).not.toHaveBeenCalled();
+  });
+  it.each([
+    { label: 'oversized error JSON', response: () => Response.json({ error: 'invalid_grant', error_description: 'x'.repeat(8192) }, { status: 400 }) },
+    { label: 'invalid error JSON', response: () => new Response('private-provider-error', { status: 401 }) },
+    { label: 'unknown error', response: () => Response.json({ error: 'unrecognized' }, { status: 400 }) },
+    { label: 'wrong error type', response: () => Response.json({ error: ['invalid_grant'] }, { status: 400 }) },
+  ])('fails safely on $label before verification or DB lookup', async ({ response }) => {
+    const deps = await dependencies(); deps.fetch.mockResolvedValue(response());
+    assertFailure(await handleGoogleCallback(callbackRequest(), deps), 'google_unavailable');
+    expect(deps.verify).not.toHaveBeenCalled(); expect(deps.transaction).not.toHaveBeenCalled();
   });
   it('redacts network and database errors and clears the temporary cookie', async () => {
     const deps = await dependencies();

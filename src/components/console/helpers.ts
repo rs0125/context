@@ -1,10 +1,21 @@
-import { SCOPE_OPTIONS, type PageDraft } from './types';
+import { SCOPE_OPTIONS, type ConsoleSession, type PageDraft } from './types';
 
 export class ConsoleApiError extends Error {
   constructor(public code: string, message: string, public status: number) {
     super(message);
     this.name = 'ConsoleApiError';
   }
+}
+
+export function consoleAccessEnded(error: unknown) {
+  return error instanceof ConsoleApiError && (error.status === 401
+    || (error.status === 403 && ['CONSOLE_ACCESS_DENIED', 'ADMIN_REQUIRED'].includes(error.code)));
+}
+
+/** Permission metadata only; never contains a token. Name-only edits preserve drafts. */
+export function consoleSessionKey(session: ConsoleSession) {
+  return JSON.stringify([session.employee.email, session.employee.isAdmin,
+    [...session.employee.scopes].sort(), session.capabilities?.writesEnabled === true]);
 }
 
 export async function consoleRequest<T>(url: string, options: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {

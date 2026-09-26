@@ -1,9 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AgentAccess } from './agent-access';
 import { KnowledgeWorkspace } from './knowledge-workspace';
-import { ConsoleApiError, consoleRequest, errorMessage, googleSignInError, loginErrorMessage } from './helpers';
+import { consoleAccessEnded, consoleRequest, consoleSessionKey, errorMessage, googleSignInError, loginErrorMessage } from './helpers';
 import { Icon } from './icons';
 import { Brand, ConfirmDialog, Notice, Spinner } from './ui';
 import type { ConsoleSession } from './types';
@@ -41,17 +41,47 @@ export function ConsoleApp() {
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [editorBusy, setEditorBusy] = useState(false);
   const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
+  const [keyRevision, setKeyRevision] = useState(0);
+  const sessionRef = useRef<ConsoleSession | null>(null);
+  const generation = useRef(0);
+  const inFlight = useRef<Promise<void> | null>(null);
+  const channel = useRef<BroadcastChannel | null>(null);
 
-  const sessionExpired = useCallback(() => { setSession(null); setDirty(false); setTab('access'); setMessage('Your session has ended. Sign in again to continue.'); }, []);
-  const loadSession = useCallback(async (signal?: AbortSignal) => {
-    setLoading(true); setError('');
-    try { setSession(await consoleRequest<ConsoleSession>('/api/console/me', { signal })); setCallbackError(''); }
-    catch (cause) {
-      if (signal?.aborted) return;
-      setSession(null);
-      if (!(cause instanceof ConsoleApiError && cause.status === 401)) setError(loginErrorMessage(cause));
-    } finally { if (!signal?.aborted) setLoading(false); }
+  const sessionExpired = useCallback(() => {
+    generation.current += 1; inFlight.current = null; sessionRef.current = null;
+    setSession(null); setLoading(false); setDirty(false); setEditorBusy(false); setPendingAction(null); setTab('access');
+    setMessage('Your session or access has changed. Sign in again to continue.');
   }, []);
+  const loadSession = useCallback((signal?: AbortSignal) => {
+    if (inFlight.current) return inFlight.current;
+    const request = generation.current;
+    if (!sessionRef.current) setLoading(true);
+    const work = (async () => {
+      try {
+        const next = await consoleRequest<ConsoleSession>('/api/console/me', { signal });
+        if (signal?.aborted || request !== generation.current) return;
+        const previous = sessionRef.current;
+        const nextKey = consoleSessionKey(next);
+        if (previous && consoleSessionKey(previous) !== nextKey) {
+          setDirty(false); setTab('access'); setPendingAction(null); setEditorBusy(false);
+        }
+        sessionRef.current = next; setSession(next); setError(''); setCallbackError(''); setMessage('');
+        // Identical metadata is ignored by other tabs, preventing refresh loops.
+        channel.current?.postMessage({ type: 'identity', sessionKey: nextKey });
+      } catch (cause) {
+        if (signal?.aborted || request !== generation.current) return;
+        if (consoleAccessEnded(cause)) {
+          if (sessionRef.current) sessionExpired();
+          else setSession(null);
+        } else setError(loginErrorMessage(cause));
+      } finally {
+        if (!signal?.aborted && request === generation.current) setLoading(false);
+      }
+    })();
+    inFlight.current = work;
+    void work.finally(() => { if (inFlight.current === work) inFlight.current = null; });
+    return work;
+  }, [sessionExpired]);
   useEffect(() => {
     const url = new URL(window.location.href);
     if (url.searchParams.has('error')) {
@@ -59,16 +89,42 @@ export function ConsoleApp() {
       url.searchParams.delete('error');
       window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
     }
-    const controller = new AbortController(); void loadSession(controller.signal); return () => controller.abort();
-  }, [loadSession]);
+    const refresh = () => { if (document.visibilityState === 'visible') void loadSession(); };
+    if (typeof BroadcastChannel !== 'undefined') {
+      const connection = new BroadcastChannel('wareongo-console-lifecycle'); channel.current = connection;
+      connection.onmessage = ({ data }: MessageEvent<unknown>) => {
+        if (!data || typeof data !== 'object') return;
+        const event = data as { type?: string; sessionKey?: string };
+        if (event.type === 'signed-out') { sessionExpired(); return; }
+        if (typeof event.sessionKey !== 'string' || event.sessionKey.length > 1024) return;
+        if (event.type === 'key-changed') {
+          if (sessionRef.current && event.sessionKey === consoleSessionKey(sessionRef.current)) setKeyRevision(value => value + 1);
+        } else if (event.type === 'identity' && (!sessionRef.current || event.sessionKey !== consoleSessionKey(sessionRef.current))) {
+          sessionExpired(); refresh();
+        }
+      };
+    }
+    window.addEventListener('focus', refresh); window.addEventListener('pageshow', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    const controller = new AbortController(); void loadSession(controller.signal);
+    return () => {
+      controller.abort(); generation.current += 1; inFlight.current = null;
+      window.removeEventListener('focus', refresh); window.removeEventListener('pageshow', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+      channel.current?.close(); channel.current = null;
+    };
+  }, [loadSession, sessionExpired]);
+  const keyChanged = useCallback(() => {
+    if (sessionRef.current) channel.current?.postMessage({ type: 'key-changed', sessionKey: consoleSessionKey(sessionRef.current) });
+  }, []);
   function guard(action: () => void) { if (editorBusy) return; if (dirty) setPendingAction(() => action); else action(); }
   async function logout() {
     setLogoutBusy(true); setError('');
     try {
       await consoleRequest('/api/auth/logout', { method: 'POST' });
-      setSession(null); setTab('access'); setDirty(false); setMessage('You’ve signed out.');
+      sessionExpired(); setMessage('You’ve signed out.'); channel.current?.postMessage({ type: 'signed-out' });
     } catch (cause) {
-      if (cause instanceof ConsoleApiError && cause.status === 401) sessionExpired();
+      if (consoleAccessEnded(cause)) sessionExpired();
       else setError(errorMessage(cause));
     } finally { setLogoutBusy(false); }
   }
@@ -85,7 +141,7 @@ export function ConsoleApp() {
     </aside>
     <div className="workspace-main">
       <header className="workspace-topbar"><div className="breadcrumb"><strong>{tab === 'access' ? 'Connect Claude' : 'Knowledge'}</strong></div>{session.employee.isAdmin && <span className="admin-badge">Administrator</span>}</header>
-      <main className="workspace-content" id="main-content">{error && <Notice>{error}</Notice>}{tab === 'access' ? <AgentAccess session={session} onSessionExpired={sessionExpired} /> : <KnowledgeWorkspace writesEnabled={session.capabilities?.writesEnabled === true} onSessionExpired={sessionExpired} onDirtyChange={setDirty} onBusyChange={setEditorBusy} />}</main>
+      <main className="workspace-content" id="main-content">{error && <Notice>{error}</Notice>}{tab === 'access' ? <AgentAccess key={`${consoleSessionKey(session)}:${keyRevision}`} session={session} onSessionExpired={sessionExpired} onKeyChanged={keyChanged} /> : <KnowledgeWorkspace key={consoleSessionKey(session)} writesEnabled={session.capabilities?.writesEnabled === true} onSessionExpired={sessionExpired} onDirtyChange={setDirty} onBusyChange={setEditorBusy} />}</main>
       <footer className="workspace-footer"><span>Wareongo Context</span></footer>
     </div>
     {pendingAction && <ConfirmDialog title="Leave without saving?" confirmLabel="Discard changes" destructive onCancel={() => setPendingAction(null)} onConfirm={() => { const action = pendingAction; setPendingAction(null); action(); }}><p>Your page has unsaved changes. Save them first if you want to keep them.</p></ConfirmDialog>}

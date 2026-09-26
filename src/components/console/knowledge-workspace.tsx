@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react';
-import { ConsoleApiError, consoleRequest, displayDate, emptyDraft, errorMessage, importMarkdown, makeSlug, validateDraft } from './helpers';
+import { ConsoleApiError, consoleAccessEnded, consoleRequest, displayDate, emptyDraft, errorMessage, importMarkdown, makeSlug, validateDraft } from './helpers';
 import { Icon } from './icons';
 import { ConfirmDialog, Notice, Spinner } from './ui';
 import { SCOPE_OPTIONS, type KnowledgeMetadata, type KnowledgePage, type PageDraft } from './types';
@@ -38,7 +38,7 @@ export function KnowledgeWorkspace({ writesEnabled, onSessionExpired, onDirtyCha
     try { const result = await consoleRequest<{ pages: KnowledgeMetadata[] }>('/api/console/knowledge', { signal }); setPages(result.pages); }
     catch (cause) {
       if (signal?.aborted) return;
-      if (cause instanceof ConsoleApiError && cause.status === 401) onSessionExpired();
+      if (consoleAccessEnded(cause)) onSessionExpired();
       else setListError(errorMessage(cause));
     } finally { if (!signal?.aborted) setLoading(false); }
   }, [onSessionExpired]);
@@ -66,7 +66,7 @@ export function KnowledgeWorkspace({ writesEnabled, onSessionExpired, onDirtyCha
       const next = toDraft(result.page); setDraft(next); setBaseline(serialize(next)); setSaved(result.page);
     } catch (cause) {
       if (request !== fetchSequence.current) return;
-      if (cause instanceof ConsoleApiError && cause.status === 401) onSessionExpired();
+      if (consoleAccessEnded(cause)) onSessionExpired();
       else setError(errorMessage(cause));
     } finally { if (request === fetchSequence.current) setFetching(false); }
   }
@@ -96,7 +96,7 @@ export function KnowledgeWorkspace({ writesEnabled, onSessionExpired, onDirtyCha
       setPages(current => [result.page, ...current.filter(page => page.id !== result.page.id)].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
       setSuccess(result.page.status === 'reviewed' ? 'Page saved and available to agents with the required permissions.' : 'Draft saved. Agents cannot read it until it is marked Reviewed.');
     } catch (cause) {
-      if (cause instanceof ConsoleApiError && cause.status === 401) onSessionExpired();
+      if (consoleAccessEnded(cause)) onSessionExpired();
       else if (cause instanceof ConsoleApiError && cause.code === 'REVISION_CONFLICT') { setConflict(true); setError('This page changed since you opened it. Your edits are still here. Copy any changes you need, then load the latest version before saving again.'); }
       else setError(errorMessage(cause));
     } finally { setSaving(false); }

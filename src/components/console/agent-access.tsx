@@ -1,12 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ConsoleApiError, consoleRequest, displayDate, errorMessage, makeSystemPrompt, mcpServerUrl } from './helpers';
+import { consoleAccessEnded, consoleRequest, displayDate, errorMessage, makeSystemPrompt, mcpServerUrl } from './helpers';
 import { Icon } from './icons';
 import { ConfirmDialog, Notice, Spinner } from './ui';
 import { SCOPE_OPTIONS, type ConsoleSession, type PersonalKey } from './types';
 
-export function AgentAccess({ session, onSessionExpired }: { session: ConsoleSession; onSessionExpired: () => void }) {
+export function AgentAccess({ session, onSessionExpired, onKeyChanged }: { session: ConsoleSession; onSessionExpired: () => void; onKeyChanged: () => void }) {
   const [key, setKey] = useState<PersonalKey | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -15,6 +15,7 @@ export function AgentAccess({ session, onSessionExpired }: { session: ConsoleSes
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied] = useState('');
   const [confirmRotation, setConfirmRotation] = useState(false);
+  const [expired, setExpired] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const keyRequestSequence = useRef(0);
   const copySequence = useRef(0);
@@ -22,29 +23,48 @@ export function AgentAccess({ session, onSessionExpired }: { session: ConsoleSes
   const prompt = makeSystemPrompt(session.apiBaseUrl);
   const mcpUrl = mcpServerUrl(session.apiBaseUrl);
   const effectiveScopes = key ? key.scopes.filter(scope => session.employee.scopes.includes(scope)) : session.employee.scopes;
+  const missingScopes = key ? SCOPE_OPTIONS.filter(scope => session.employee.scopes.includes(scope.value) && !key.scopes.includes(scope.value)) : [];
+  const expireKey = useCallback(() => { setKey(null); setRevealed(false); setExpired(true); setCopied(''); }, []);
 
   const loadKey = useCallback(async (signal?: AbortSignal) => {
     const request = ++keyRequestSequence.current;
     setLoading(true); setError(''); setKey(null); setRevealed(false);
     try {
       const result = await consoleRequest<{ key: PersonalKey | null }>('/api/console/key', { signal });
-      if (!signal?.aborted && request === keyRequestSequence.current) setKey(result.key);
+      if (!signal?.aborted && request === keyRequestSequence.current) {
+        if (result.key && Date.parse(result.key.expiresAt) <= Date.now()) expireKey();
+        else { setKey(result.key); if (result.key) setExpired(false); }
+      }
     }
     catch (cause) {
       if (signal?.aborted || request !== keyRequestSequence.current) return;
-      if (cause instanceof ConsoleApiError && cause.status === 401) onSessionExpired();
+      if (consoleAccessEnded(cause)) onSessionExpired();
       else setError(errorMessage(cause));
     } finally { if (!signal?.aborted && request === keyRequestSequence.current) setLoading(false); }
-  }, [onSessionExpired]);
+  }, [onSessionExpired, expireKey]);
 
   useEffect(() => {
     if (!writesEnabled) { setLoading(false); return; }
-    const controller = new AbortController(); void loadKey(controller.signal);
-    return () => controller.abort();
+    const controller = new AbortController();
+    let started = false;
+    const start = () => { if (!started && document.visibilityState === 'visible') { started = true; void loadKey(controller.signal); } };
+    start(); document.addEventListener('visibilitychange', start); window.addEventListener('focus', start);
+    return () => { controller.abort(); document.removeEventListener('visibilitychange', start); window.removeEventListener('focus', start); };
   }, [loadKey, writesEnabled]);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  useEffect(() => {
+    if (!key) return;
+    let expiryTimer: ReturnType<typeof setTimeout>;
+    const check = () => {
+      const remaining = Date.parse(key.expiresAt) - Date.now();
+      if (!Number.isFinite(remaining) || remaining <= 0) expireKey();
+      else expiryTimer = setTimeout(check, Math.min(remaining, 2_147_483_647));
+    };
+    check(); return () => clearTimeout(expiryTimer);
+  }, [key, expireKey]);
 
   async function copy(value: string, label: string) {
+    if (label === 'key' && (!key || Date.parse(key.expiresAt) <= Date.now())) { expireKey(); return; }
     const request = ++copySequence.current;
     setCopyError('');
     try {
@@ -62,10 +82,13 @@ export function AgentAccess({ session, onSessionExpired }: { session: ConsoleSes
     setBusy(true); setError('');
     try {
       const result = await consoleRequest<{ key: PersonalKey }>('/api/console/key', { method: 'POST' });
-      setKey(result.key); setRevealed(false); setConfirmRotation(false); setCopied('');
+      setKey(result.key); setExpired(false); setRevealed(false); setConfirmRotation(false); setCopied(''); onKeyChanged();
     } catch (cause) {
       setConfirmRotation(false);
-      if (cause instanceof ConsoleApiError && cause.status === 401) onSessionExpired();
+      // A network failure may happen after rotation committed. Reload before
+      // offering a previous key whose validity can no longer be established.
+      setKey(null); setRevealed(false); onKeyChanged();
+      if (consoleAccessEnded(cause)) onSessionExpired();
       else setError(errorMessage(cause));
     } finally { setBusy(false); }
   }
@@ -99,6 +122,8 @@ export function AgentAccess({ session, onSessionExpired }: { session: ConsoleSes
             {effectiveScopes.includes('crm:read') && <p className="setup-hint">CRM records follow your permissions in Twenty.</p>}
           </div>
           {error && <Notice action={<button className="text-button" onClick={() => void loadKey()}>Retry</button>}>{error}</Notice>}
+          {expired && <Notice tone="info">Your API key has expired. Create a new key, then reconnect Claude with it.</Notice>}
+          {missingScopes.length > 0 && <Notice tone="info" action={<button className="text-button" disabled={busy} onClick={() => setConfirmRotation(true)}>Replace key</button>}>Your account now includes {missingScopes.map(scope => scope.label).join(', ')}, but this key does not. Replace it and reconnect Claude to use the new access.</Notice>}
           {loading ? <div className="setup-key-loading"><Spinner label="Loading your key…" /></div> : key ? <>
             <label className="field-label" htmlFor="personal-key">Employee API key</label>
             <div className="setup-copy-row"><div className="secret-field"><input id="personal-key" type={revealed ? 'text' : 'password'} value={key.token} readOnly autoComplete="off" spellCheck={false} /><button className="icon-button" onClick={() => setRevealed(!revealed)} aria-label={revealed ? 'Hide API key' : 'Reveal API key'} aria-pressed={revealed}><Icon name={revealed ? 'eye-off' : 'eye'} /></button></div><button className="button button-primary" disabled={busy} onClick={() => void copy(key.token, 'key')}><Icon name={copied === 'key' ? 'check' : 'copy'} size={16} />{copied === 'key' ? 'Copied key' : 'Copy key'}</button></div>

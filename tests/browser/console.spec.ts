@@ -19,7 +19,7 @@ test.beforeEach(async ({ page }) => {
   browserErrors.set(page, errors);
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => {
-    if (message.type() === 'error' && !/^Failed to load resource: the server responded with a status of (?:401|409)\b/.test(message.text())) errors.push(message.text());
+    if (message.type() === 'error' && !/^Failed to load resource: the server responded with a status of (?:401|403|409)\b/.test(message.text())) errors.push(message.text());
   });
 });
 test.afterEach(async ({ page }) => { expect(browserErrors.get(page)).toEqual([]); });
@@ -31,11 +31,12 @@ async function screenshot(page: Page, filename: string) {
     style: 'nextjs-portal { display: none !important; }' });
 }
 
-async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boolean; signedIn?: boolean; conflict?: boolean; employeeScopes?: string[]; keyScopes?: string[]; entryPath?: string } = {}) {
+type ConsoleControl = { signedIn: boolean; admin: boolean; email?: string; scopes?: string[] };
+async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boolean; signedIn?: boolean; conflict?: boolean; employeeScopes?: string[]; keyScopes?: string[]; entryPath?: string; control?: ConsoleControl; shared?: boolean; expiresAt?: string } = {}) {
   const { admin = false, enabled = true, signedIn = true, conflict = false, employeeScopes = scopes, keyScopes = employeeScopes, entryPath = '/' } = options;
   let authenticated = signedIn;
   const mutations: { path: string; method: string; body: Record<string, unknown> | null }[] = [];
-  let key = { id: 'synthetic-key', token, expiresAt: '2026-10-25T00:00:00.000Z', scopes: keyScopes };
+  let key = { id: 'synthetic-key', token, expiresAt: options.expiresAt ?? '2026-10-25T00:00:00.000Z', scopes: keyScopes };
   let currentPage = { ...fixturePage };
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
@@ -47,7 +48,7 @@ async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boo
   const navigation = (destination: string) => `<script>location.replace(${JSON.stringify(destination)})</script>`;
   await page.route('https://accounts.google.com/**', route => route.fulfill({ contentType: 'text/html',
     body: navigation('http://localhost:3000/api/auth/google/callback?code=synthetic-code&state=synthetic-state') }));
-  await page.route('**/api/**', async route => {
+  await (options.shared ? page.context() : page).route('**/api/**', async route => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     const method = request.method();
@@ -61,13 +62,14 @@ async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boo
       authenticated = true;
       return route.fulfill({ contentType: 'text/html', body: navigation('/') });
     }
-    if (path === '/api/console/me') return authenticated
-      ? reply({ employee: { name: 'Alex Example', email: 'employee@wareongo.com', isAdmin: admin, scopes: employeeScopes }, apiBaseUrl: 'https://context.example.test/api/v1', capabilities: { writesEnabled: enabled } })
+    if (path === '/api/console/me') return (options.control?.signedIn ?? authenticated)
+      ? reply({ employee: { name: 'Alex Example', email: options.control?.email ?? 'employee@wareongo.com', isAdmin: options.control?.admin ?? admin, scopes: options.control?.scopes ?? employeeScopes }, apiBaseUrl: 'https://context.example.test/api/v1', capabilities: { writesEnabled: enabled } })
       : reply({ error: { code: 'CONSOLE_UNAUTHENTICATED', message: 'Sign in.' } }, 401);
     if (path === '/api/console/key') {
       if (method === 'POST') key = { ...key, token: rotatedToken };
       return reply({ key });
     }
+    if (path.startsWith('/api/console/knowledge') && !(options.control?.admin ?? admin)) return reply({ error: { code: 'ADMIN_REQUIRED', message: 'Administrator access is required to edit knowledge.' } }, 403);
     if (path === '/api/console/knowledge') {
       if (method === 'GET') return reply({ pages: [currentPage] });
       const body = request.postDataJSON();
@@ -80,7 +82,7 @@ async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boo
       currentPage = { ...request.postDataJSON(), updatedAt: '2026-09-25', revision: '124' };
       return reply({ page: currentPage });
     }
-    if (path === '/api/auth/logout') { authenticated = false; return reply({ signedOut: true }); }
+    if (path === '/api/auth/logout') { authenticated = false; if (options.control) options.control.signedIn = false; return reply({ signedOut: true }); }
     return reply({ error: { code: 'UNEXPECTED_TEST_REQUEST', message: 'No real API requests are allowed in this browser test.' } }, 500);
   });
   await page.goto(entryPath);
@@ -171,6 +173,7 @@ test('admin knowledge access does not widen the employee key read scopes', async
   await expect(page.getByLabel('Employee API key')).toHaveValue(token);
   await expect(page.getByRole('list', { name: 'Your read access' })).toHaveText('Company knowledge');
   await expect(page.getByText('CRM records follow your permissions in Twenty.')).toHaveCount(0);
+  await expect(page.getByRole('status').filter({ hasText: 'but this key does not' })).toBeVisible();
   await screenshot(page, 'google-admin-access.png');
 });
 
@@ -227,4 +230,61 @@ test('deferred storage disables writes without preventing GUI review on mobile',
   expect(mutations).toHaveLength(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await screenshot(page, 'google-knowledge-mobile-setup.png');
+});
+
+test('another tab logout clears the previously loaded employee key', async ({ page, context }) => {
+  const control = { signedIn: true, admin: false };
+  await mockConsole(page, { control, shared: true });
+  await expect(page.getByLabel('Employee API key')).toHaveValue(token);
+  const other = await context.newPage();
+  await other.goto('/');
+  await expect(other.getByLabel('Employee API key')).toHaveValue(token);
+  await other.getByRole('button', { name: 'Sign out', exact: true }).click();
+  await expect(other.getByRole('link', { name: 'Continue with Google' })).toBeVisible();
+  await expect(page.getByLabel('Employee API key')).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Continue with Google' })).toBeVisible();
+});
+
+test('live administrator denial clears stale knowledge and permissions', async ({ page }) => {
+  const control = { signedIn: true, admin: true };
+  await mockConsole(page, { control });
+  await page.getByRole('button', { name: 'Knowledge', exact: true }).click();
+  await page.getByRole('button', { name: /Sample guide/ }).click();
+  await expect(page.getByLabel('Markdown content')).toHaveValue(fixturePage.body);
+  control.admin = false;
+  await page.getByRole('button', { name: 'Refresh page list' }).click();
+  await expect(page.getByLabel('Markdown content')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Knowledge', exact: true })).toHaveCount(0);
+});
+
+test('focus preserves same-employee unsaved work and clears it when permissions change', async ({ page }) => {
+  const control = { signedIn: true, admin: true, scopes };
+  await mockConsole(page, { control });
+  await page.getByRole('button', { name: 'Knowledge', exact: true }).click();
+  await page.getByRole('button', { name: /Sample guide/ }).click();
+  await page.getByLabel('Markdown content').fill('Unsaved synthetic changes');
+  const sameRefresh = page.waitForResponse(response => response.url().endsWith('/api/console/me'));
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await sameRefresh;
+  await expect(page.getByLabel('Markdown content')).toHaveValue('Unsaved synthetic changes');
+  control.admin = false;
+  control.scopes = ['knowledge:read'];
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(page.getByLabel('Markdown content')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Knowledge', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('list', { name: 'Your read access' })).toHaveText('Company knowledge');
+});
+
+test('an expired open-page key is removed without polling the database', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-09-26T00:00:00Z') });
+  let keyReads = 0;
+  page.on('request', request => { if (new URL(request.url()).pathname === '/api/console/key') keyReads += 1; });
+  await mockConsole(page, { expiresAt: '2026-09-26T00:00:30Z' });
+  await expect(page.getByLabel('Employee API key')).toHaveValue(token);
+  const readsBeforeExpiry = keyReads;
+  await page.clock.fastForward(31_000);
+  await expect(page.getByLabel('Employee API key')).toHaveCount(0);
+  await expect(page.getByText('Your API key has expired.', { exact: false })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Create API key', exact: true })).toBeEnabled();
+  expect(keyReads).toBe(readsBeforeExpiry);
 });

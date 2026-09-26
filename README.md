@@ -56,6 +56,8 @@ For a new database, run `npm run console:migrate -- --apply`, then set `CONTEXT_
 
 Console rotation replaces only the current console-issued key. Keys registered separately through `CONTEXT_API_KEYS_JSON` remain valid until explicitly revoked from that registry.
 
+See the [employee authentication review](docs/auth-review.md) for remaining rollout work and the legacy-key retirement procedure. In particular, console logout currently clears browser cookies without server-side revocation of a copied session, and legacy environment keys must be retired or rebound before an employee email is reused.
+
 ## Connect an MCP client
 
 The remote MCP URL is `https://YOUR_HOST/mcp`, on the same deployment as the REST API and console. It is a protocol adapter over the existing read-only context engine; employee identity, scopes, field allowlists, warehouse uncertainty, and CRM visibility/freshness checks still apply. Sign in with Google in the console to obtain your own employee API key first.
@@ -290,7 +292,7 @@ After private storage is configured, `npm run test:console:live` checks its perm
 
 The live MCP check also exercises warehouse additions today, matching totals, CRM leads created this month, scoped filter discovery and tomorrow's follow-ups. `npm run test:warehouse:live` verifies actual warehouse SQL and timestamp semantics with one read-only pooled socket. `npm run test:crm-query:live` runs real PostgreSQL query builders against synthetic VALUES fixtures only; it checks permissions, date boundaries, stable pagination, counts and private-label search exclusion without reading CRM rows.
 
-`npm run test:tooling:agent` discovers the live MCP schemas through a temporary OAuth test grant, revokes that grant, then uses the dashboard's configured OpenAI key to evaluate eight ordinary employee questions against synthetic data. Credentials and business records are never supplied to the model. The run is bounded to 24 model calls and six tool calls per case. Reports stay under ignored `.local/tooling-eval/`; they contain synthetic evidence and grades, without raw model reasoning or credential values. Use `-- --origin http://localhost:3000` to target the canonical local server.
+`npm run test:tooling:agent` discovers the live MCP schemas through a temporary OAuth test grant, revokes that grant, then uses the dashboard's configured OpenAI key to evaluate thirteen ordinary employee questions against synthetic data. Credentials and business records are never supplied to the model. The run is bounded to 48 model calls and six tool calls per case. Reports stay under ignored `.local/tooling-eval/`; they contain synthetic evidence and grades, without raw model reasoning or credential values. Use `-- --origin http://localhost:3000` to target the canonical local server.
 
 With the local server running, exercise the real API and database path from a second terminal:
 

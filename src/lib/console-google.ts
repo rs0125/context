@@ -117,13 +117,15 @@ function redirect(url: string, status = 303) {
 }
 
 /** Only fixed error codes and the canonical home path reach the browser. */
-function failureResponse(error: unknown): Response {
+function failureResponse(error: unknown, clearFlow = false): Response {
   try {
     const code = error instanceof HttpError && error.code === 'CONSOLE_GOOGLE_CANCELLED' ? 'google_cancelled'
       : error instanceof HttpError && error.status === 403 ? 'google_denied'
         : error instanceof HttpError && [400, 401].includes(error.status) ? 'google_invalid' : 'google_unavailable';
     const response = redirect(`${consoleOrigin()}/?error=${code}`);
-    response.headers.append('Set-Cookie', consoleCookie('oauth', '', 0));
+    // A stale tab or unsolicited callback must not erase another pending flow.
+    // Only a callback bound to the current signed cookie can consume it.
+    if (clearFlow) response.headers.append('Set-Cookie', consoleCookie('oauth', '', 0));
     return response;
   } catch { return consoleErrorResponse(unavailable()); }
 }
@@ -152,9 +154,7 @@ function callbackFlow(request: Request, clientId: string, now: number) {
   if (request.method !== 'GET' || request.url.length > 8192) throw invalid();
   const url = new URL(request.url);
   if (url.origin !== consoleOrigin() || url.pathname !== GOOGLE_CALLBACK_PATH) throw invalid();
-  // Ignore unrecognized Google response fields, but never accept ambiguous
-  // duplicate security-sensitive parameters.
-  for (const field of ['state', 'code', 'error', 'iss']) if (url.searchParams.getAll(field).length > 1) throw invalid();
+  if (url.searchParams.getAll('state').length !== 1) throw invalid();
   const flow = readSignedConsoleValue(readConsoleCookie(request, 'oauth'), 'google-oauth');
   const seconds = Math.floor(now / 1000), state = url.searchParams.get('state');
   if (typeof flow.state !== 'string' || !RANDOM_VALUE.test(flow.state)
@@ -165,16 +165,24 @@ function callbackFlow(request: Request, clientId: string, now: number) {
     || Number(flow.exp) - Number(flow.iat) !== GOOGLE_FLOW_SECONDS
     || Object.keys(flow).some(key => !['state', 'nonce', 'verifier', 'clientId', 'iat', 'exp'].includes(key))
     || !state || !RANDOM_VALUE.test(state) || !timingSafeEqual(Buffer.from(state), Buffer.from(flow.state))) throw invalid();
-  const issuer = url.searchParams.get('iss');
+  return { flow: flow as Flow, params: url.searchParams };
+}
+
+function callbackCode(params: URLSearchParams) {
+  // Ignore unrecognized Google response fields, but never accept ambiguous
+  // duplicate security-sensitive parameters. At this point the browser flow
+  // has been bound, so an error consumes only that matching flow's cookie.
+  for (const field of ['code', 'error', 'iss']) if (params.getAll(field).length > 1) throw invalid();
+  const issuer = params.get('iss');
   if (issuer !== null && !['https://accounts.google.com', 'accounts.google.com'].includes(issuer)) throw invalid();
-  if (url.searchParams.has('error')) {
-    if (url.searchParams.has('code')) throw invalid();
-    if (url.searchParams.get('error') === 'access_denied') throw new HttpError(401, 'CONSOLE_GOOGLE_CANCELLED', 'Google sign-in was cancelled.');
+  if (params.has('error')) {
+    if (params.has('code')) throw invalid();
+    if (params.get('error') === 'access_denied') throw new HttpError(401, 'CONSOLE_GOOGLE_CANCELLED', 'Google sign-in was cancelled.');
     throw invalid();
   }
-  const code = url.searchParams.get('code');
+  const code = params.get('code');
   if (!code || code.length > 2048 || /[\s\x00-\x1f\x7f]/.test(code)) throw invalid();
-  return { flow: flow as Flow, code };
+  return code;
 }
 
 async function exchangeCode(code: string, verifier: string, config: ReturnType<typeof googleConfiguration>, requestFetch: typeof fetch) {
@@ -184,8 +192,19 @@ async function exchangeCode(code: string, verifier: string, config: ReturnType<t
       body: new URLSearchParams({ client_id: config.clientId, client_secret: config.clientSecret,
         redirect_uri: config.redirectUri, grant_type: 'authorization_code', code, code_verifier: verifier }) });
     if (!response.ok) {
+      if (response.status === 400 || response.status === 401) {
+        // Read only the bounded, enumerated OAuth error code. Descriptions and
+        // other provider content are neither returned nor logged. A bad client
+        // credential is an operator issue, not an expired employee sign-in.
+        let body: unknown;
+        try { body = JSON.parse(await boundedBody(response, 8 * 1024)); }
+        catch { throw unavailable(); }
+        if (body && typeof body === 'object' && !Array.isArray(body) && 'error' in body
+          && body.error === 'invalid_grant') throw invalid();
+        // Includes invalid_client, unauthorized_client, and unknown failures.
+        throw unavailable();
+      }
       await response.body?.cancel();
-      if (response.status === 400 || response.status === 401) throw invalid();
       throw unavailable();
     }
     const body: unknown = JSON.parse(await boundedBody(response, 32 * 1024));
@@ -200,9 +219,12 @@ async function exchangeCode(code: string, verifier: string, config: ReturnType<t
 
 export async function handleGoogleCallback(request: Request, dependencies: Partial<Dependencies> = {}) {
   const deps = { ...defaults, ...dependencies };
+  let clearFlow = false;
   try {
     const config = googleConfiguration();
-    const { flow, code } = callbackFlow(request, config.clientId, deps.now());
+    const { flow, params } = callbackFlow(request, config.clientId, deps.now());
+    clearFlow = true;
+    const code = callbackCode(params);
     deps.limit(request, 'console-google:callback', 30);
     // No database socket is checked out while talking to Google. Authorization
     // codes are one-use at Google and bound to this browser's PKCE verifier.
@@ -213,5 +235,5 @@ export async function handleGoogleCallback(request: Request, dependencies: Parti
     response.headers.append('Set-Cookie', consoleCookie('oauth', '', 0));
     response.headers.append('Set-Cookie', consoleCookie('session', createConsoleSession(identity, `google:${verified.sub}`, process.env, deps.now()), SESSION_SECONDS));
     return response;
-  } catch (error) { return failureResponse(error); }
+  } catch (error) { return failureResponse(error, clearFlow); }
 }

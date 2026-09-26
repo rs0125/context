@@ -1,7 +1,23 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ConsoleApiError, consoleRequest, emptyDraft, googleSignInError, importMarkdown, loginErrorMessage, makeConnectorSetup, makeSystemPrompt, mcpServerUrl, validateDraft } from '../src/components/console/helpers';
+import { ConsoleApiError, consoleAccessEnded, consoleRequest, consoleSessionKey, emptyDraft, googleSignInError, importMarkdown, loginErrorMessage, makeConnectorSetup, makeSystemPrompt, mcpServerUrl, validateDraft } from '../src/components/console/helpers';
 
 afterEach(() => vi.unstubAllGlobals());
+
+describe('console lifecycle boundaries', () => {
+  it('clears expired sessions and explicit permission denials, without treating all 403 responses as logout', () => {
+    for (const code of ['CONSOLE_ACCESS_DENIED', 'ADMIN_REQUIRED']) expect(consoleAccessEnded(new ConsoleApiError(code, 'Denied', 403))).toBe(true);
+    expect(consoleAccessEnded(new ConsoleApiError('CONSOLE_UNAUTHENTICATED', 'Expired', 401))).toBe(true);
+    expect(consoleAccessEnded(new ConsoleApiError('CONSOLE_ORIGIN_DENIED', 'Origin', 403))).toBe(false);
+    expect(consoleAccessEnded(new ConsoleApiError('CONSOLE_UNAVAILABLE', 'Unavailable', 503))).toBe(false);
+  });
+  it('ignores names and scope order, but detects identity and permission changes', () => {
+    const session = { employee: { email: 'employee@wareongo.com', name: 'Example', isAdmin: true, scopes: ['knowledge:read', 'crm:read'] }, apiBaseUrl: 'https://example.test/api/v1', capabilities: { writesEnabled: true } };
+    const original = consoleSessionKey(session);
+    expect(consoleSessionKey({ ...session, employee: { ...session.employee, name: 'Changed name', scopes: ['crm:read', 'knowledge:read'] } })).toBe(original);
+    for (const change of [{ email: 'other@wareongo.com' }, { isAdmin: false }, { scopes: ['knowledge:read'] }]) expect(consoleSessionKey({ ...session, employee: { ...session.employee, ...change } })).not.toBe(original);
+    expect(consoleSessionKey({ ...session, capabilities: { writesEnabled: false } })).not.toBe(original);
+  });
+});
 
 describe('sign-in failure messages', () => {
   const diagnostic = 'sensitive upstream diagnostic, password=test-only-secret, postgres://private-host';
