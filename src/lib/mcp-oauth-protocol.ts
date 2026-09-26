@@ -29,7 +29,7 @@ export function oauthScopes(value: unknown, fallback: readonly Scope[] = SCOPES)
   if (value === undefined || value === null) return [...fallback];
   if (typeof value !== 'string' || value.length > 100) oauthFail('invalid_scope', 'Only supported read scopes are available.');
   const scopes = value.split(' ');
-  if (!scopes.length || scopes.length > 3 || new Set(scopes).size !== scopes.length || scopes.some(scope => !SCOPES.includes(scope as Scope))) {
+  if (!scopes.length || scopes.length > SCOPES.length || new Set(scopes).size !== scopes.length || scopes.some(scope => !SCOPES.includes(scope as Scope))) {
     oauthFail('invalid_scope', 'Only supported read scopes are available.');
   }
   return scopes as Scope[];

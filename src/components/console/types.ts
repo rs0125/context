@@ -4,6 +4,12 @@ export const SCOPE_OPTIONS = [
   { value: 'crm:read', label: 'CRM context' },
 ] as const;
 
+// Knowledge-page restrictions intentionally retain their existing three scopes.
+export const READ_SCOPE_OPTIONS = [
+  ...SCOPE_OPTIONS,
+  { value: 'analytics:read', label: 'Website analytics' },
+] as const;
+
 export type Employee = { email: string; name: string; isAdmin: boolean; scopes: string[] };
 export type ConsoleSession = { employee: Employee; apiBaseUrl: string; capabilities?: { writesEnabled: boolean } };
 export type PersonalKey = { id: string; token: string; expiresAt: string; scopes: string[] };

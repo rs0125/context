@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   authenticateKey, parseKeyRegistry, requireScope, resolvePrincipal,
   type KeyRegistration, type Scope,
@@ -78,6 +78,7 @@ describe('employee API credentials', () => {
   it.each([
     'not-json', '{}', 'null',
     JSON.stringify([{ ...registration(), scopes: ['crm:read:all'] }]),
+    JSON.stringify([{ ...registration(), scopes: ['knowledge:read', 'knowledge:read'] }]),
     JSON.stringify([{ ...registration(), hash: token }]),
     JSON.stringify([{ ...registration(), unexpectedAdmin: true }]),
   ])('rejects malformed registry configuration', (raw) => {
@@ -87,6 +88,59 @@ describe('employee API credentials', () => {
 });
 
 describe('live employee permissions', () => {
+  beforeEach(() => { vi.spyOn(Date, 'now').mockReturnValue(now); });
+  afterEach(() => { vi.restoreAllMocks(); });
+  it.each(['invalid-date', '2026-09-24T23:59:59.999Z', '2026-09-25T00:00:00.000Z'])(
+    'rejects invalid or elapsed credential expiry %s before database work', async expiresAt => {
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+      try {
+        const { client, query } = rosterClient([employee]);
+        await expect(resolvePrincipal(client, registration({ expiresAt }))).rejects.toMatchObject({ status: 401, code: 'UNAUTHORIZED' });
+        expect(query).not.toHaveBeenCalled();
+      } finally { clock.mockRestore(); }
+    },
+  );
+
+  it('checks a legacy key expiry again after an upstream read reaches the exact expiration boundary', async () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      const key = registration({ expiresAt: new Date(now + 1000).toISOString() });
+      const { client, query } = rosterClient([employee]);
+      expect((await resolvePrincipal(client, key)).scopes).toEqual(allScopes);
+      expect(query).toHaveBeenCalledOnce();
+      clock.mockReturnValue(now + 1000);
+      await expect(resolvePrincipal(client, key)).rejects.toMatchObject({ status: 401, code: 'UNAUTHORIZED' });
+      expect(query).toHaveBeenCalledOnce();
+    } finally { clock.mockRestore(); }
+  });
+  it('permits explicitly registered analytics only while the active roster administrator flag remains true', async () => {
+    const key = parseKeyRegistry(JSON.stringify([registration({ scopes: [...allScopes, 'analytics:read'] })]))[0];
+    const { client, query } = rosterClient([{ ...employee, adminAccess: true }]);
+    expect((await resolvePrincipal(client, key)).scopes).toEqual([...allScopes, 'analytics:read']);
+    query.mockResolvedValueOnce({ rows: [{ ...employee, adminAccess: false }] });
+    const demoted = await resolvePrincipal(client, key);
+    expect(demoted.scopes).toEqual(allScopes);
+    expect(() => requireScope(demoted, 'analytics:read')).toThrowError(expect.objectContaining({ status: 403 }));
+    query.mockResolvedValueOnce({ rows: [{ ...employee, adminAccess: true, is_active: false }] });
+    await expect(resolvePrincipal(client, key)).rejects.toMatchObject({ status: 403, code: 'EMPLOYEE_INACTIVE' });
+    expect(key.scopes).toEqual([...allScopes, 'analytics:read']);
+  });
+
+  it.each([false, null, undefined, 'true', 1])('never derives analytics from Twenty membership, dashboard access or adminAccess=%s', async adminAccess => {
+    const { client } = rosterClient([{ ...employee, adminAccess }]);
+    const principal = await resolvePrincipal(client, registration({ scopes: [...allScopes, 'analytics:read'] }));
+    expect(principal.scopes).toEqual(allScopes);
+    expect(() => requireScope(principal, 'analytics:read')).toThrowError(expect.objectContaining({ status: 403 }));
+  });
+
+  it('never widens a previously issued key when its employee becomes an administrator', async () => {
+    const oldKey = registration();
+    const { client } = rosterClient([{ ...employee, adminAccess: true }]);
+    const principal = await resolvePrincipal(client, oldKey);
+    expect(principal.scopes).toEqual(allScopes);
+    expect(oldKey.scopes).toEqual(allScopes);
+    expect(() => requireScope(principal, 'analytics:read')).toThrowError(expect.objectContaining({ status: 403 }));
+  });
   it('resolves a single active employee using only the fixed credential identity', async () => {
     const { client, query } = rosterClient([employee]);
     const principal = await resolvePrincipal(client, registration());

@@ -55,7 +55,7 @@ describe('Google employee sessions and current roster authorization', () => {
     const request = cookieRequest(sessionCookie({ isAdmin: true }));
     expect(await getConsoleIdentity(request, client)).toMatchObject({ employeeId: 7, isAdmin: false, scopes: ['knowledge:read', 'warehouses:read', 'crm:read'] });
     query.mockResolvedValueOnce({ rows: [{ ...roster, adminAccess: true, dashboardAccess: false, twenty_user_id: null }] });
-    expect(await getConsoleIdentity(request, client)).toMatchObject({ isAdmin: true, scopes: ['knowledge:read', 'warehouses:read'] });
+    expect(await getConsoleIdentity(request, client)).toMatchObject({ isAdmin: true, scopes: ['knowledge:read', 'warehouses:read', 'analytics:read'] });
     query.mockResolvedValueOnce({ rows: [{ ...roster, dashboardAccess: false, twenty_user_id: null }] });
     expect(await getConsoleIdentity(request, client)).toMatchObject({ isAdmin: false, scopes: ['knowledge:read'] });
     query.mockResolvedValueOnce({ rows: [{ ...roster, is_active: false }] });
@@ -93,7 +93,7 @@ describe('Google employee sessions and current roster authorization', () => {
     const { client } = database([{ ...roster, ...permissions }]);
     const browser = await resolveConsoleEmployee(client, identity.email);
     const agent = await resolvePrincipal(client, { id: 'synthetic-key', hash: 'a'.repeat(64), employeeEmail: identity.email,
-      scopes: ['knowledge:read', 'warehouses:read', 'crm:read'], expiresAt: '2099-01-01T00:00:00Z' });
+      scopes: ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read'], expiresAt: '2099-01-01T00:00:00Z' });
     expect(browser.scopes).toEqual(agent.scopes);
     expect(browser.isAdmin).toBe(permissions.adminAccess === true);
   });

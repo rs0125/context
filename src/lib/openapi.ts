@@ -2,6 +2,9 @@ import { WAREHOUSE_FILTER_CATALOG, WAREHOUSE_NUMERIC_FIELDS, WAREHOUSE_SUMMARY_C
 import { ALL_STAGES, CRM_DATE_FIELDS, CRM_SORTS, CRM_FOLLOW_UP, CRM_SUMMARY_GROUPS } from "./data";
 import { DATE_PERIODS } from "./query-time";
 import { CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS, CRM_INDUSTRIES, CRM_OCCUPANCY_TIMELINES, CRM_LANGUAGES } from "./crm-fields";
+import { z } from "zod";
+import { SCOPES } from "./auth";
+import { ga4ToolInput, searchConsoleToolInput, analyticsQueryParameters, analyticsReportOutput, analyticsCapabilitiesOutput } from "./analytics-tooling";
 
 const errorResponses = Object.fromEntries(Object.entries({
   "400": { description: "Invalid query parameters or record identifier." },
@@ -405,7 +408,7 @@ export function getOpenApiDocument() {
     openapi: "3.1.0",
     info: {
       title: "Wareongo Context API",
-      version: "0.4.0",
+      version: "0.5.0",
       description: "Read-only company knowledge, warehouse specifications, and permitted CRM opportunities. Employees see created or assigned leads; verified Twenty admins see all mirrored leads. Send an employee API key in the Authorization header. The service enforces employee permissions and field allowlists before returning data. Authenticated responses must not be cached. Authorised CRM narratives are returned as bounded text with detected phone numbers, emails and links masked; raw contact fields and media are not exposed. Start with GET /context or GET /context.md.",
     },
     servers: [{ url: "/api/v1" }],
@@ -416,8 +419,29 @@ export function getOpenApiDocument() {
       { name: "Warehouses", description: "Permitted warehouse fields. Requires warehouses:read and active dashboard or administrator access in the employee roster." },
       { name: "CRM", description: "Requires crm:read and an active linked CRM user verified against live Twenty. Employees can read leads they created OR are assigned to. Current members of Twenty's built-in Admin role can read all mirrored leads; WAG dashboard admin status alone grants no such access. Incomplete or failed checks deny access. Mirror facts require a successful opportunity sync within 30 minutes." },
       { name: "Service", description: "Public service metadata without organisation records." },
+      { name: "Analytics", description: "Read-only GA4 and Google Search Console aggregates. Requires analytics:read on the credential AND current active VerifiedNumber.adminAccess=true. Twenty administrator status alone does not grant analytics access. Sources are pinned by server configuration; clients cannot choose another property or supply Google credentials." },
     ],
     paths: {
+      "/analytics/capabilities": {
+        get: { operationId: "analyticsCapabilities", tags: ["Analytics"], summary: "Discover available website analytics reports",
+          description: "Admin-only capabilities and registered custom dimensions. Missing fields and source failures are reported as unavailable, never as zero traffic. Does not depend on the optional Analytics Admin API.",
+          responses: jsonResponses("Available configured reports and source status.", false, z.toJSONSchema(analyticsCapabilitiesOutput)),
+        },
+      },
+      "/analytics/ga4": {
+        get: { operationId: "ga4Report", tags: ["Analytics"], summary: "Read a bounded GA4 report",
+          description: "Admin-only fixed report presets. Dates are inclusive in the GA4 property timezone; maximum 93 days. Default is the last 28 completed days. Rows can be paginated but are not a frozen snapshot. Preserve source_fetched_at, cache age and quality warnings. Event counts are not unique CRM leads, sequential conversion funnels or revenue. Grouped users are not additive; use overview for overall metrics.",
+          parameters: analyticsQueryParameters(ga4ToolInput),
+          responses: jsonResponses("Aggregate website metrics with source dates, quality and pagination.", false, z.toJSONSchema(analyticsReportOutput)),
+        },
+      },
+      "/analytics/search-console": {
+        get: { operationId: "searchConsoleReport", tags: ["Analytics"], summary: "Read Google organic search performance",
+          description: "Admin-only Search Console web-search reports. Dates use America/Los_Angeles. Finalized data can lag; data_state=all includes provisional data and is required for any range ending today, including this_month. Grouped top rows and anonymized queries are not a complete site total. Use group=summary for an aggregate and do not average CTR or position across rows. Filters are literal substrings. Page URLs are stripped of query strings and fragments and detected contacts are masked.",
+          parameters: analyticsQueryParameters(searchConsoleToolInput),
+          responses: jsonResponses("Search performance, coverage limits, source clock and pagination.", false, z.toJSONSchema(analyticsReportOutput)),
+        },
+      },
       "/context": {
         get: {
           operationId: "getContext",
@@ -429,7 +453,11 @@ export function getOpenApiDocument() {
             required: ["employee_id", "scopes", "knowledge_discovery", "read_only", "server_clock", "query_guidance", "api_specification", "context_markdown", "constraints"],
             properties: {
               employee_id: { type: "integer", description: "Internal employee identifier; no email or contact information is returned." },
-              scopes: { type: "array", items: { type: "string", enum: ["knowledge:read", "warehouses:read", "crm:read"] } },
+              scopes: { type: "array", items: { type: "string", enum: SCOPES } },
+              analytics_discovery: { type: "object", required: ["permitted", "status", "capabilities_path"], properties: {
+                permitted: { type: "boolean" }, status: { type: "string", enum: ["not_checked", "not_permitted"] },
+                capabilities_path: { type: ["string", "null"] },
+              } },
               knowledge_discovery: { type: "object", required: ["permitted", "status", "index_path", "search_path"], properties: {
                 permitted: { type: "boolean" }, status: { type: "string", enum: ["not_checked", "not_permitted"] },
                 index_path: { type: "string", const: "/api/v1/wiki/pages" }, search_path: { type: "string", const: "/api/v1/wiki/search" },

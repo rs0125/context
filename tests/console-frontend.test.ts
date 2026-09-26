@@ -110,6 +110,7 @@ describe('editor validation', () => {
     expect(validateDraft({ ...complete(), id: '../private' })).toMatch(/page ID/);
     expect(validateDraft({ ...complete(), summary: 'one\ntwo' })).toMatch(/one line/);
     expect(validateDraft({ ...complete(), scopes: ['knowledge:read', 'admin:write'] })).toMatch(/permissions/);
+    expect(validateDraft({ ...complete(), scopes: ['knowledge:read', 'analytics:read'] })).toMatch(/permissions/);
     expect(validateDraft({ ...complete(), scopes: ['warehouses:read'] })).toMatch(/permissions/);
     expect(validateDraft({ ...complete(), scopes: ['knowledge:read', 'knowledge:read'] })).toMatch(/permissions/);
   });

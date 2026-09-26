@@ -1,5 +1,5 @@
 import { ConsoleApiError } from '@/components/console/helpers';
-import { SCOPE_OPTIONS } from '@/components/console/types';
+import { READ_SCOPE_OPTIONS } from '@/components/console/types';
 import type { ConsentDetails } from './consent-view';
 
 export type AuthorizationPreview = ConsentDetails & { requestHandle: string };
@@ -31,7 +31,7 @@ export function readAuthorizationPreview(value: unknown, currentOrigin: string):
   if (!value || typeof value !== 'object') throw new Error('Invalid authorization response');
   const data = value as Record<string, unknown>;
   if (typeof data.requestHandle !== 'string' || !data.requestHandle || typeof data.clientName !== 'string' || !data.clientName.trim()
-    || !Array.isArray(data.requestedScopes) || !data.requestedScopes.length || data.requestedScopes.some(scope => !SCOPE_OPTIONS.some(option => option.value === scope))) {
+    || !Array.isArray(data.requestedScopes) || !data.requestedScopes.length || data.requestedScopes.some(scope => !READ_SCOPE_OPTIONS.some(option => option.value === scope))) {
     throw new Error('Invalid authorization response');
   }
   const clientOrigin = safeUrl(data.clientOrigin).origin;
@@ -79,6 +79,7 @@ export function authorizationError(error: unknown) {
   if (error instanceof ConsoleApiError) {
     if (error.code === 'CONNECTION_FAILED') return 'Cannot reach Wareongo Context. Check your connection and try again.';
     if (error.code === 'invalid_client') return 'The requesting application is not registered or its request is no longer valid. Start again from your AI tool’s connector settings.';
+    if (error.code === 'invalid_scope' && error.status === 400) return 'This connector registration does not include these permissions. Remove and re-add the connector, then try again.';
     if (error.status === 401) return 'The employee API key is invalid or expired. Check your own key and try again.';
     if (error.status === 403) return 'This connection is not permitted. Check the application address and your employee key’s permissions.';
     if (error.status === 409) return 'This authorization request has expired or was already used. Start the connection again from your AI tool.';

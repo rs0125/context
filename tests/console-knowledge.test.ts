@@ -220,6 +220,7 @@ describe('console knowledge validation and safe failures', () => {
     { title: 'line\nbreak' }, { body: ' ' }, { body: '\0' }, { body: 'x'.repeat(100001) },
     { body: '🧪'.repeat(25001) }, { scopes: [] }, { scopes: ['crm:read'] },
     { scopes: ['knowledge:read', 'knowledge:read'] }, { scopes: ['knowledge:read', 'admin:write'] },
+    { scopes: ['knowledge:read', 'analytics:read'] },
     { status: 'published' }, { revision: '123' }, { updatedAt: '2026-01-01' },
   ])('rejects invalid create payload %# before database writes', async invalid => {
     vi.stubEnv('CONTEXT_CONSOLE_WRITES_ENABLED', 'true');

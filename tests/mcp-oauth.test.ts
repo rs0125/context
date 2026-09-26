@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { authenticateMcpRequest, handleMcpOAuthRequest, revalidateMcpGrant, type McpOAuthDependencies } from '../src/lib/mcp-oauth';
-import { authorizationServerMetadata, createConsent, hashOAuth, parseAuthorization, protectedResourceMetadata, readConsent, validateRedirect } from '../src/lib/mcp-oauth-protocol';
+import { authorizationServerMetadata, createConsent, hashOAuth, oauthScopes, parseAuthorization, protectedResourceMetadata, readConsent, validateRedirect } from '../src/lib/mcp-oauth-protocol';
 import type { KeyRegistration } from '../src/lib/auth';
 import { createAnonymousLimiter } from '../src/lib/rate-limit';
 import { HttpError } from '../src/lib/errors';
@@ -129,9 +129,10 @@ async function registered(db: ReturnType<typeof database>) {
   expect(response.status).toBe(201);
   return await response.json();
 }
-async function consent(db: ReturnType<typeof database>) {
+async function consent(db: ReturnType<typeof database>, scope?: string) {
   const client = await registered(db);
   const params = new URLSearchParams({ response_type: 'code', client_id: client.client_id, redirect_uri: redirect, resource, code_challenge: challenge, code_challenge_method: 'S256', state: 'client-secret-state' });
+  if (scope !== undefined) params.set('scope', scope);
   const response = await handleMcpOAuthRequest(new Request(`${origin}/api/oauth/authorize?${params}`), 'authorize', db.deps);
   expect(response.status).toBe(200);
   return { client, params, preview: await response.json(), cookie: response.headers.get('set-cookie')!.split(';')[0] };
@@ -326,6 +327,81 @@ describe('MCP OAuth protocol and consent boundaries', () => {
 });
 
 describe('MCP OAuth token lifecycle and employee isolation', () => {
+  it('advertises and parses four supported read scopes while rejecting duplicate or unknown permissions', () => {
+    const scopes = [...key.scopes, 'analytics:read'];
+    expect(authorizationServerMetadata().scopes_supported).toEqual(scopes);
+    expect(protectedResourceMetadata().scopes_supported).toEqual(scopes);
+    expect(oauthScopes(scopes.join(' '))).toEqual(scopes);
+    for (const scope of ['analytics:write', 'analytics:read analytics:read', `${scopes.join(' ')} knowledge:read`]) {
+      expect(() => oauthScopes(scope)).toThrowError(expect.objectContaining({ error: 'invalid_scope' }));
+    }
+  });
+
+  it('preserves an old client registration when reconnecting without an explicit scope', async () => {
+    const db = database(); const start = await consent(db);
+    db.state().clients.get(start.client.client_id)!.scopes = [...key.scopes];
+    const response = await handleMcpOAuthRequest(new Request(`${origin}/api/oauth/authorize?${start.params}`), 'authorize', db.deps);
+    expect(response.status).toBe(200);
+    expect((await response.json()).requestedScopes).toEqual(key.scopes);
+    start.params.set('scope', 'analytics:read');
+    const widened = await handleMcpOAuthRequest(new Request(`${origin}/api/oauth/authorize?${start.params}`), 'authorize', db.deps);
+    expect(widened.status).toBe(400);
+    expect((await widened.json()).error.code).toBe('invalid_scope');
+  });
+
+  it('explains how to update an old three-scope registration when a client requests all four scopes explicitly', async () => {
+    const db = database(); const start = await consent(db);
+    db.state().clients.get(start.client.client_id)!.scopes = [...key.scopes];
+    start.params.set('scope', [...key.scopes, 'analytics:read'].join(' '));
+    const response = await handleMcpOAuthRequest(new Request(`${origin}/api/oauth/authorize?${start.params}`), 'authorize', db.deps);
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toEqual({ code: 'invalid_scope',
+      message: 'This connector registration does not include these permissions. Remove and re-add the connector to register again.' });
+    expect(db.state().clients.get(start.client.client_id)!.scopes).toEqual(key.scopes);
+    expect(db.state().grants.size).toBe(0);
+  });
+
+  it('denies analytics-only consent for nonadmins even if their key declares that scope', async () => {
+    vi.stubEnv('CONTEXT_API_KEYS_JSON', JSON.stringify([{ ...key, scopes: [...key.scopes, 'analytics:read'] }]));
+    const db = database(); const start = await consent(db, 'analytics:read');
+    const response = await handleMcpOAuthRequest(jsonRequest('/api/oauth/authorize', {
+      requestHandle: start.preview.requestHandle, approve: true, apiKey,
+    }, { Cookie: start.cookie }), 'authorize', db.deps);
+    expect(response.status).toBe(403);
+    expect((await response.json()).error.code).toBe('invalid_scope');
+    expect(db.state().grants.size).toBe(0);
+  });
+
+  it('does not widen previously consented grants after key or role changes, including refresh', async () => {
+    const db = database(); const auth = await authorized(db); const issued = await (await exchange(db, auth)).json();
+    db.roster.adminAccess = true;
+    vi.stubEnv('CONTEXT_API_KEYS_JSON', JSON.stringify([{ ...key, scopes: [...key.scopes, 'analytics:read'] }]));
+    expect((await authenticateMcpRequest(accessRequest(issued.access_token), db.deps)).scopes).toEqual(key.scopes);
+    const escalated = await refresh(db, auth.client.client_id, issued.refresh_token, { scope: 'analytics:read' });
+    expect(escalated.status).toBe(400);
+    expect((await escalated.json()).error).toBe('invalid_scope');
+    const renewed = await (await refresh(db, auth.client.client_id, issued.refresh_token)).json();
+    expect(renewed.scope).toBe(key.scopes.join(' '));
+    expect([...db.state().grants.values()][0].scopes).toEqual(key.scopes);
+  });
+
+  it('revokes analytics on current-role demotion and persists that narrowing on refresh', async () => {
+    const scopes = [...key.scopes, 'analytics:read'];
+    vi.stubEnv('CONTEXT_API_KEYS_JSON', JSON.stringify([{ ...key, scopes }]));
+    const db = database(); db.roster.adminAccess = true;
+    const auth = await authorized(db); const issued = await (await exchange(db, auth)).json();
+    expect(issued.scope).toBe(scopes.join(' '));
+    expect((await authenticateMcpRequest(accessRequest(issued.access_token), db.deps)).scopes).toEqual(scopes);
+    db.roster.adminAccess = false;
+    expect((await authenticateMcpRequest(accessRequest(issued.access_token), db.deps)).scopes).toEqual(key.scopes);
+    const renewed = await (await refresh(db, auth.client.client_id, issued.refresh_token)).json();
+    expect(renewed.scope).toBe(key.scopes.join(' '));
+    db.roster.adminAccess = true;
+    expect((await authenticateMcpRequest(accessRequest(renewed.access_token), db.deps)).scopes).toEqual(key.scopes);
+    const restored = await refresh(db, auth.client.client_id, renewed.refresh_token, { scope: 'analytics:read' });
+    expect(restored.status).toBe(400);
+    expect((await restored.json()).error).toBe('invalid_scope');
+  });
   it('exchanges PKCE code, narrows requested access to the employee, and authenticates only audience-bound OAuth access tokens', async () => {
     const db = database(); db.roster.dashboardAccess = false; db.roster.twenty_user_id = null;
     const auth = await authorized(db); const response = await exchange(db, auth);

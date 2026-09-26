@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { consoleAccessEnded, consoleRequest, displayDate, errorMessage, makeSystemPrompt, mcpServerUrl } from './helpers';
 import { Icon } from './icons';
 import { ConfirmDialog, Notice, Spinner } from './ui';
-import { SCOPE_OPTIONS, type ConsoleSession, type PersonalKey } from './types';
+import { READ_SCOPE_OPTIONS, type ConsoleSession, type PersonalKey } from './types';
 import styles from './agent-access.module.css';
 
 export function AgentAccess({ session, onSessionExpired, onKeyChanged }: { session: ConsoleSession; onSessionExpired: () => void; onKeyChanged: () => void }) {
@@ -24,7 +24,7 @@ export function AgentAccess({ session, onSessionExpired, onKeyChanged }: { sessi
   const prompt = makeSystemPrompt(session.apiBaseUrl);
   const mcpUrl = mcpServerUrl(session.apiBaseUrl);
   const effectiveScopes = key ? key.scopes.filter(scope => session.employee.scopes.includes(scope)) : session.employee.scopes;
-  const missingScopes = key ? SCOPE_OPTIONS.filter(scope => session.employee.scopes.includes(scope.value) && !key.scopes.includes(scope.value)) : [];
+  const missingScopes = key ? READ_SCOPE_OPTIONS.filter(scope => session.employee.scopes.includes(scope.value) && !key.scopes.includes(scope.value)) : [];
   const expireKey = useCallback(() => { setKey(null); setRevealed(false); setExpired(true); setCopied(''); }, []);
 
   const loadKey = useCallback(async (signal?: AbortSignal) => {
@@ -124,7 +124,7 @@ export function AgentAccess({ session, onSessionExpired, onKeyChanged }: { sessi
           <p className={styles.identity}>This key gives access as <strong>{session.employee.email}</strong>.</p>
           {error && <Notice action={<button className="text-button" onClick={() => void loadKey()}>Retry</button>}>{error}</Notice>}
           {expired && <Notice tone="info">Your API key has expired. Create a new key, then reconnect Claude with it.</Notice>}
-          {missingScopes.length > 0 && <Notice tone="info" action={<button className="text-button" disabled={busy} onClick={() => setConfirmRotation(true)}>Replace key</button>}>Your account now includes {missingScopes.map(scope => scope.label).join(', ')}, but this key does not. Replace it and reconnect Claude to use the new access.</Notice>}
+          {missingScopes.length > 0 && <Notice tone="info" action={<button className="text-button" disabled={busy} onClick={() => setConfirmRotation(true)}>Replace key</button>}>Your account now includes {missingScopes.map(scope => scope.label).join(', ')}, but this key does not. Replace it, then remove and re-add the Claude connector to approve the new access.</Notice>}
           {loading ? <div className={styles.keyState}><Spinner label="Loading your key…" /></div> : key ? <>
             <label className={styles.fieldLabel} htmlFor="personal-key">Employee API key</label>
             <div className={styles.copyRow}><div className={styles.secretField}><input id="personal-key" type={revealed ? 'text' : 'password'} value={key.token} readOnly autoComplete="off" spellCheck={false} /><button className="icon-button" onClick={() => setRevealed(!revealed)} aria-label={revealed ? 'Hide API key' : 'Reveal API key'} aria-pressed={revealed}><Icon name={revealed ? 'eye-off' : 'eye'} /></button></div><button className="button button-primary" disabled={busy} onClick={() => void copy(key.token, 'key')}><Icon name={copied === 'key' ? 'check' : 'copy'} size={16} />{copied === 'key' ? 'Copied key' : 'Copy key'}</button></div>
@@ -157,8 +157,9 @@ export function AgentAccess({ session, onSessionExpired, onKeyChanged }: { sessi
       <section className={styles.accessNotes} aria-labelledby="read-access-heading">
         <div className={styles.asideHeading}><Icon name="key" size={18} /><h2 id="read-access-heading">Your read access</h2></div>
         <p>Claude can retrieve these sources using your employee key.</p>
-        <div className={styles.scopeList} role="list" aria-label="Your read access">{SCOPE_OPTIONS.filter(scope => effectiveScopes.includes(scope.value)).map(scope => <span className={styles.scope} role="listitem" key={scope.value}>{scope.label}</span>)}</div>
+        <div className={styles.scopeList} role="list" aria-label="Your read access">{READ_SCOPE_OPTIONS.filter(scope => effectiveScopes.includes(scope.value)).map(scope => <span className={styles.scope} role="listitem" key={scope.value}>{scope.label}</span>)}</div>
         {effectiveScopes.includes('crm:read') && <p>CRM records follow your permissions in Twenty.</p>}
+        {effectiveScopes.includes('analytics:read') && <p>Website analytics is available only while you have Wareongo admin access.</p>}
         <div className={styles.boundary}><span className={styles.label}>Read-only by design</span><p>Research, compare and draft. Claude cannot change records, send messages or reserve a property through this connection.</p></div>
       </section>
       {effectiveScopes.includes('warehouses:read') && <div className={styles.verificationNote}><Icon name="file" size={18} /><p>Warehouse specifications can be approximate or incomplete. Ask Claude to flag details that need verification.</p></div>}

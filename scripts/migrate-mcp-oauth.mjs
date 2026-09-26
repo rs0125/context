@@ -5,16 +5,13 @@ import { parseArgs } from 'node:util';
 import pg from 'pg';
 import { readEnv } from './env-utils.mjs';
 import { migrationDatabaseOptions } from './migrate-knowledge.mjs';
+import { CREDENTIAL_SCOPE_CHECK as scopeCheck } from './credential-scope-sql.mjs';
 
 // Explicit one-off migration only. No business table, roster, key or wiki edits.
 const SCHEMA = 'context_mcp_private';
 const MARKER = 'context-mcp-oauth-schema-v1';
 const TABLE_MARKER = 'context-mcp-oauth-table-v1:';
 const ROLES = ['anon', 'authenticated', 'service_role'];
-const scopeCheck = `cardinality(scopes) BETWEEN 1 AND 3 AND array_ndims(scopes) = 1 AND array_lower(scopes, 1) = 1
-  AND array_position(scopes, NULL) IS NULL AND scopes <@ ARRAY['knowledge:read', 'warehouses:read', 'crm:read']::text[]
-  AND cardinality(scopes) = (CASE WHEN 'knowledge:read' = ANY(scopes) THEN 1 ELSE 0 END
-    + CASE WHEN 'warehouses:read' = ANY(scopes) THEN 1 ELSE 0 END + CASE WHEN 'crm:read' = ANY(scopes) THEN 1 ELSE 0 END)`;
 export const MCP_OAUTH_TABLE_SQL = {
   oauth_clients: `CREATE TABLE context_mcp_private.oauth_clients (
     id text PRIMARY KEY CHECK (id ~ '^wog_client_[A-Za-z0-9_-]{43}$'),
@@ -100,7 +97,7 @@ async function inspectTable(client, name) {
     || !constraints.some(value => value.type === 'p') || constraints.some(value => !value.validated)
     || !indexes.length || indexes.some(value => !value.valid || !value.ready)
     || !objects || Object.values(objects).some(count => count !== 0)) fail('MCP_RELATION_INCOMPATIBLE');
-  return { ...table, signature: createHash('sha256').update(JSON.stringify({ columns, constraints, indexes })).digest('hex') };
+  return { ...table, constraints, signature: createHash('sha256').update(JSON.stringify({ columns, constraints, indexes })).digest('hex') };
 }
 
 export async function migrateMcpOAuthStorage(client) {
@@ -129,8 +126,21 @@ export async function migrateMcpOAuthStorage(client) {
       }
       await client.query('LOCK TABLE context_mcp_private.oauth_clients, context_mcp_private.oauth_grants, context_mcp_private.oauth_codes, context_mcp_private.oauth_tokens IN SHARE ROW EXCLUSIVE MODE');
       for (const name of Object.keys(COLUMNS)) {
-        const table = await inspectTable(client, name);
+        let table = await inspectTable(client, name);
         if (table.marker !== `${TABLE_MARKER}${table.signature}`) fail('MCP_RELATION_COLLISION');
+        if (['oauth_clients', 'oauth_grants'].includes(name)) {
+          const constraint = table.constraints.find(value => value.name === `${name}_scopes_check` && value.type === 'c');
+          if (!constraint) fail('MCP_RELATION_INCOMPATIBLE');
+          if (!constraint.definition.includes("'analytics:read'")) {
+            // This only expands valid scope syntax. Stored registrations and
+            // grants are never widened, reissued, or reauthorized by migration.
+            await client.query(`ALTER TABLE context_mcp_private.${name}
+              DROP CONSTRAINT ${name}_scopes_check,
+              ADD CONSTRAINT ${name}_scopes_check CHECK (${scopeCheck})`);
+            table = await inspectTable(client, name);
+            await client.query(`COMMENT ON TABLE context_mcp_private.${name} IS '${TABLE_MARKER}${table.signature}'`);
+          }
+        }
         inspected.push(table);
       }
     } else {

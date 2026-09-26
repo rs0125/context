@@ -4,14 +4,14 @@ import { z } from 'zod';
 import { HttpError } from './errors';
 import { checkFailedCredential, noteFailedCredential } from './rate-limit';
 
-export const SCOPES = ['knowledge:read', 'warehouses:read', 'crm:read'] as const;
+export const SCOPES = ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read'] as const;
 export type Scope = typeof SCOPES[number];
 export type Principal = { employeeId: number; email: string; scopes: Scope[]; keyId: string; twentyUserId?: string | null };
 const registration = z.object({
   id: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
   hash: z.string().regex(/^[a-f0-9]{64}$/),
   employeeEmail: z.string().email().transform(v => v.toLowerCase()),
-  scopes: z.array(z.enum(SCOPES)).min(1).max(3),
+  scopes: z.array(z.enum(SCOPES)).min(1).max(SCOPES.length).refine(scopes => new Set(scopes).size === scopes.length),
   expiresAt: z.string().datetime(),
 }).strict();
 export type KeyRegistration = z.infer<typeof registration> & { source?: 'database'; employeeId?: number };
@@ -27,6 +27,9 @@ export function rosterReadScopes(employee: RosterAccess): Scope[] {
   const scopes: Scope[] = ['knowledge:read'];
   if (employee.dashboardAccess === true || employee.adminAccess === true) scopes.push('warehouses:read');
   if (rosterTwentyUserId(employee)) scopes.push('crm:read');
+  // This permission belongs only to the current WAG administrator role. Neither
+  // a dashboard flag nor a Twenty account/role grants organization analytics.
+  if (employee.adminAccess === true) scopes.push('analytics:read');
   return scopes;
 }
 
@@ -94,6 +97,10 @@ export async function authenticateRequestKey(request: Request, lookup: (hash: st
 }
 
 export async function resolvePrincipal(client: PoolClient, key: KeyRegistration): Promise<Principal> {
+  // Recheck for every source transaction, including after an upstream read.
+  // Environment credentials have no database expiry predicate to enforce this.
+  const expiresAt = Date.parse(key.expiresAt);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new HttpError(401, 'UNAUTHORIZED', 'A valid employee API key is required.');
   if (key.source === 'database') {
     if (process.env.CONTEXT_CONSOLE_WRITES_ENABLED !== 'true' || !key.employeeId) throw new HttpError(401, 'UNAUTHORIZED', 'A valid employee API key is required.');
     // Recheck inside each business-read transaction, including after a live CRM

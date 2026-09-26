@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { PoolClient } from 'pg';
-import { authenticateRequestKey, findDatabaseKey, parseKeyRegistry, resolvePrincipal, SCOPES, type KeyRegistration, type Scope } from './auth';
+import { authenticateRequestKey, findDatabaseKey, parseKeyRegistry, resolvePrincipal, type KeyRegistration, type Scope } from './auth';
 import { consoleOrigin, requireConsoleOrigin } from './console-auth';
 import { withConsoleWriteTransaction, withReadOnlyTransaction } from './db';
 import { HttpError } from './errors';
@@ -50,7 +50,7 @@ async function registeredClient(client: PoolClient, id: string): Promise<Client>
 }
 function requireClientAuthorization(client: Client, request: AuthorizationRequest) {
   if (!client.redirect_uris.includes(request.redirectUri)) oauthFail('invalid_redirect_uri', 'The callback URL does not match this client.');
-  if (request.scopes.some(scope => !client.scopes.includes(scope))) oauthFail('invalid_scope', 'The client did not register these read permissions.');
+  if (request.scopes.some(scope => !client.scopes.includes(scope))) oauthFail('invalid_scope', 'This connector registration does not include these permissions. Remove and re-add the connector to register again.');
 }
 async function currentGrantKey(client: PoolClient, grant: Grant): Promise<KeyRegistration> {
   if (grant.revoked_at !== null || !Number.isFinite(milliseconds(grant.expires_at)) || milliseconds(grant.expires_at) <= Date.now() || grant.resource !== mcpResource()) {
@@ -158,8 +158,12 @@ async function register(request: Request, deps: McpOAuthDependencies) {
 async function preview(request: Request, deps: McpOAuthDependencies) {
   if (request.url.length > 4096 || request.headers.get('sec-fetch-site') === 'cross-site') oauthFail();
   deps.anonymousLimit(request, 'preview', 60);
-  const authorization = parseAuthorization(new URL(request.url).searchParams);
+  const parameters = new URL(request.url).searchParams;
+  const authorization = parseAuthorization(parameters);
   const client = await deps.readTransaction(active => registeredClient(active, authorization.clientId));
+  // A previously registered client keeps its original scopes when reconnecting
+  // without an explicit scope. Adding a supported scope must not widen it.
+  if (!parameters.has('scope')) authorization.scopes = oauthScopes(client.scopes.join(' '));
   requireClientAuthorization(client, authorization);
   const consent = createConsent(request, authorization);
   const redirectOrigin = new URL(authorization.redirectUri).origin;

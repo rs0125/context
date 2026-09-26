@@ -17,7 +17,9 @@ async function main() {
   if (!label || !/^[a-zA-Z0-9_-]{1,64}$/.test(label)) throw new Error('Provide --label using 1–64 letters, numbers, hyphens, or underscores.');
   if (!Number.isInteger(days) || days < 1 || days > 90) throw new Error('--days must be between 1 and 90.');
   const scopes = [...new Set(values.scopes.split(','))];
-  if (!scopes.length || scopes.some(scope => !['knowledge:read', 'warehouses:read', 'crm:read'].includes(scope))) throw new Error('Unknown read scope.');
+  // Analytics is explicit opt-in here; the live active roster must still grant
+  // adminAccess === true on every request, regardless of this registration.
+  if (!scopes.length || scopes.some(scope => !['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read'].includes(scope))) throw new Error('Unknown read scope.');
   const file = path.resolve('.env.local');
   const env = await readEnv(file);
   let keys;

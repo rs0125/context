@@ -5,6 +5,7 @@ import { parseArgs } from 'node:util';
 import pg from 'pg';
 import { readEnv } from './env-utils.mjs';
 import { migrationDatabaseOptions } from './migrate-knowledge.mjs';
+import { CONSOLE_CREDENTIAL_SCOPE_CHECK } from './credential-scope-sql.mjs';
 
 // STAGED ONLY: invoking without --apply performs no network/database work.
 // This migration creates console credential storage. It does not touch source
@@ -35,11 +36,7 @@ const CREATE_TABLE = `CREATE TABLE context_auth_private.employee_api_keys (
   CONSTRAINT employee_api_keys_hash_check CHECK (token_hash ~ '^[0-9a-f]{64}$'),
   CONSTRAINT employee_api_keys_cipher_check CHECK (encrypted_token ~ '^v1[.][A-Za-z0-9_-]{16}[.][A-Za-z0-9_-]{68}[.][A-Za-z0-9_-]{22}$'),
   CONSTRAINT employee_api_keys_expiry_check CHECK (expires_at > created_at AND expires_at <= created_at + interval '31 days'),
-  CONSTRAINT employee_api_keys_scopes_check CHECK (cardinality(scopes) BETWEEN 1 AND 3 AND array_ndims(scopes) = 1
-    AND array_lower(scopes, 1) = 1 AND array_position(scopes, NULL) IS NULL
-    AND scopes @> ARRAY['knowledge:read']::text[] AND scopes <@ ARRAY['knowledge:read', 'warehouses:read', 'crm:read']::text[]
-    AND cardinality(scopes) = (CASE WHEN 'knowledge:read' = ANY(scopes) THEN 1 ELSE 0 END
-      + CASE WHEN 'warehouses:read' = ANY(scopes) THEN 1 ELSE 0 END + CASE WHEN 'crm:read' = ANY(scopes) THEN 1 ELSE 0 END))
+  CONSTRAINT employee_api_keys_scopes_check CHECK (${CONSOLE_CREDENTIAL_SCOPE_CHECK})
 )`;
 
 class MigrationError extends Error { constructor(code) { super(code); this.code = code; } }
@@ -66,7 +63,7 @@ async function inspect(client) {
     || constraints.length !== CONSTRAINT_NAMES.length || constraints.some(constraint => !constraint.validated || !CONSTRAINT_NAMES.includes(constraint.name)
       || constraint.type !== (constraint.name.endsWith('_pkey') ? 'p' : constraint.name.endsWith('_key') ? 'u' : 'c'))
     || !objects || Object.values(objects).some(count => count !== 0)) fail('CONSOLE_RELATION_INCOMPATIBLE');
-  return { ...table, signature: createHash('sha256').update(JSON.stringify({ columns, constraints })).digest('hex') };
+  return { ...table, constraints, signature: createHash('sha256').update(JSON.stringify({ columns, constraints })).digest('hex') };
 }
 
 export async function migrateConsoleStorage(client) {
@@ -94,6 +91,15 @@ export async function migrateConsoleStorage(client) {
       await client.query('LOCK TABLE context_auth_private.employee_api_keys IN SHARE ROW EXCLUSIVE MODE');
       table = await inspect(client);
       if (table.marker !== `${TABLE_MARKER}${table.signature}`) fail('CONSOLE_RELATION_COLLISION');
+      // Upgrade only our verified, locked table. Existing keys keep their
+      // scopes; an administrator must explicitly replace their key to opt in.
+      if (!table.constraints.find(value => value.name === 'employee_api_keys_scopes_check').definition.includes("'analytics:read'")) {
+        await client.query(`ALTER TABLE context_auth_private.employee_api_keys
+          DROP CONSTRAINT employee_api_keys_scopes_check,
+          ADD CONSTRAINT employee_api_keys_scopes_check CHECK (${CONSOLE_CREDENTIAL_SCOPE_CHECK})`);
+        table = await inspect(client);
+        await client.query(`COMMENT ON TABLE context_auth_private.employee_api_keys IS '${TABLE_MARKER}${table.signature}'`);
+      }
     } else {
       await client.query('CREATE SCHEMA context_auth_private');
       await client.query(`COMMENT ON SCHEMA context_auth_private IS '${MARKER}'`);

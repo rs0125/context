@@ -1,6 +1,5 @@
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
-import { SCOPES } from './auth';
 import { getConsoleIdentity, readConsoleSession, requireConsoleOrigin } from './console-auth';
 import { withConsoleWriteTransaction, withReadOnlyTransaction } from './db';
 import { HttpError } from './errors';
@@ -14,7 +13,10 @@ const slugSchema = z.string().max(100).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const revisionSchema = z.string().regex(/^\d{1,10}$/).refine(value => Number(value) <= 4_294_967_295);
 const textSchema = (maximum: number) => z.string().trim().min(1).max(maximum)
   .refine(value => !/[\u0000-\u001f\u007f]/.test(value));
-const scopesSchema = z.array(z.enum(SCOPES)).min(1).max(SCOPES.length)
+// Credential capabilities may grow independently of the wiki's existing
+// publication audiences. In particular, analytics does not widen wiki access.
+const KNOWLEDGE_SCOPES = ['knowledge:read', 'warehouses:read', 'crm:read'] as const;
+const scopesSchema = z.array(z.enum(KNOWLEDGE_SCOPES)).min(1).max(KNOWLEDGE_SCOPES.length)
   .refine(scopes => scopes.includes('knowledge:read') && new Set(scopes).size === scopes.length);
 const inputSchema = z.object({
   id: slugSchema,

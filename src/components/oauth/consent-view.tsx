@@ -17,6 +17,7 @@ const permissionLabels: Record<string, string> = {
   'knowledge:read': 'Company guides',
   'warehouses:read': 'Warehouse listings',
   'crm:read': 'CRM records',
+  'analytics:read': 'Website analytics (admins only)',
 };
 
 export function ConsentView({ details, loading, error, onRetry, onConnect, onCancel }: {

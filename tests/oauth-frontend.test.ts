@@ -26,6 +26,12 @@ describe('authorization request and preview', () => {
     expect(() => readAuthorizationPreview({ ...previewResponse, redirectUri: 'javascript:alert(1)' }, currentOrigin)).toThrow();
   });
 
+  it('accepts the admin analytics read permission without accepting write permissions', () => {
+    const requestedScopes = ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read'];
+    expect(readAuthorizationPreview({ ...previewResponse, requestedScopes }, currentOrigin).scopes).toEqual(requestedScopes);
+    expect(() => readAuthorizationPreview({ ...previewResponse, requestedScopes: [...requestedScopes, 'analytics:write'] }, currentOrigin)).toThrow();
+  });
+
   it('allows localhost only over HTTP and rejects insecure public callback addresses', () => {
     expect(readAuthorizationPreview({ ...previewResponse, clientOrigin: 'http://localhost:4000', redirectOrigin: 'http://localhost:4000', redirectUri: 'http://localhost:4000/callback', resource: 'http://localhost:3100/mcp' }, 'http://localhost:3100').redirectOrigin).toBe('http://localhost:4000');
     expect(() => readAuthorizationPreview({ ...previewResponse, clientOrigin: 'http://client.example.test' }, currentOrigin)).toThrow();
@@ -67,5 +73,14 @@ describe('authorization decisions', () => {
     expect(authorizationError(new ConsoleApiError('USED', secretDiagnostic, 409))).toContain('expired or was already used');
     expect(authorizationError(new ConsoleApiError('SETUP', secretDiagnostic, 503))).toContain('temporarily unavailable');
     expect(authorizationError(new Error(secretDiagnostic))).not.toContain(secretDiagnostic);
+  });
+
+  it('explains outdated connector scopes without reflecting diagnostics or changing employee-denial guidance', () => {
+    const diagnostic = 'error_description=private employee key and database password';
+    const message = authorizationError(new ConsoleApiError('invalid_scope', diagnostic, 400));
+    expect(message).toBe('This connector registration does not include these permissions. Remove and re-add the connector, then try again.');
+    expect(message).not.toContain(diagnostic);
+    expect(authorizationError(new ConsoleApiError('invalid_request', diagnostic, 400))).toBe('This connection request is invalid. Start again from your AI tool’s connector settings.');
+    expect(authorizationError(new ConsoleApiError('invalid_scope', diagnostic, 403))).toBe('This connection is not permitted. Check the application address and your employee key’s permissions.');
   });
 });

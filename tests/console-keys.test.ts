@@ -3,7 +3,7 @@ import type { PoolClient } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { decryptConsoleKey, encryptConsoleKey, getOwnConsoleKey, rotateOwnConsoleKey, KEY_LIFETIME_MS } from '../src/lib/console-keys';
 import { authenticateRequestKey, findDatabaseKey, resolvePrincipal } from '../src/lib/auth';
-import type { ConsoleIdentity } from '../src/lib/console-auth';
+import { resolveConsoleEmployee, type ConsoleIdentity } from '../src/lib/console-auth';
 
 const identity: ConsoleIdentity = { employeeId: 7, email: 'employee@wareongo.com', name: 'Test Employee', isAdmin: false, scopes: ['knowledge:read', 'warehouses:read'] };
 const secret = Buffer.alloc(32, 2).toString('base64url');
@@ -20,6 +20,30 @@ beforeEach(() => { vi.stubEnv('CONTEXT_KEY_ENCRYPTION_SECRET', secret); vi.stubE
 afterEach(() => vi.unstubAllEnvs());
 
 describe('employee-bound encrypted console keys', () => {
+  it.each([true, false])('issues analytics only for a current roster administrator (adminAccess=%s)', async adminAccess => {
+    const query = vi.fn(async (sql: string, values: unknown[]) => {
+      if (sql.includes('FROM public."VerifiedNumber"')) return { rows: [{ id: 7, email: identity.email, name: identity.name,
+        is_active: true, dashboardAccess: true, adminAccess, twenty_user_id: '11111111-1111-4111-8111-111111111111' }] };
+      const [id, employee_id, employee_email, token_hash, encrypted_token, scopes, expires_at] = values;
+      return { rows: [{ id, employee_id, employee_email, token_hash, encrypted_token, scopes, expires_at }] };
+    });
+    const client = { query } as unknown as PoolClient;
+    const currentIdentity = await resolveConsoleEmployee(client, identity.email);
+    const key = await rotateOwnConsoleKey(client, currentIdentity, now);
+    expect(key.scopes).toEqual(['knowledge:read', 'warehouses:read', 'crm:read', ...(adminAccess ? ['analytics:read'] : [])]);
+    expect(query.mock.calls[1][1][5]).toEqual(key.scopes);
+  });
+
+  it('does not widen old admin keys on retrieval, and removes analytics after role demotion', async () => {
+    const admin: ConsoleIdentity = { ...identity, isAdmin: true, scopes: [...identity.scopes, 'analytics:read'] };
+    const oldRow = row();
+    const oldKey = await getOwnConsoleKey(database([oldRow]).client, admin, now);
+    expect(oldKey?.scopes).toEqual(identity.scopes);
+    expect(oldRow.scopes).toEqual(identity.scopes);
+    const adminRow = row({ scopes: admin.scopes });
+    expect((await getOwnConsoleKey(database([adminRow]).client, identity, now))?.scopes).toEqual(identity.scopes);
+    expect(adminRow.scopes).toContain('analytics:read');
+  });
   it('encrypts for recopy with integrity bound to key ID, employee ID and email', () => {
     const encrypted = encryptConsoleKey(token, id, identity);
     expect(encrypted).not.toContain(token);
