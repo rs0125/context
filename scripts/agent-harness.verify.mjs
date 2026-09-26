@@ -5,7 +5,7 @@ import {
   createResponseClient, runScenario, evaluateScenario, assertNoForbiddenFields,
 } from './agent-harness.mjs';
 
-const base = validateBase('http://127.0.0.1:3100');
+const base = validateBase('http://127.0.0.1:3000');
 const deadline = () => Date.now() + 10_000;
 const budget = () => ({ contextCalls: 0, modelCalls: 0 });
 const refusal = {

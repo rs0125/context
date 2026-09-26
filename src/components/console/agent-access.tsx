@@ -21,6 +21,7 @@ export function AgentAccess({ session, onSessionExpired }: { session: ConsoleSes
   const writesEnabled = session.capabilities?.writesEnabled === true;
   const prompt = makeSystemPrompt(session.apiBaseUrl);
   const mcpUrl = mcpServerUrl(session.apiBaseUrl);
+  const effectiveScopes = key ? key.scopes.filter(scope => session.employee.scopes.includes(scope)) : session.employee.scopes;
 
   const loadKey = useCallback(async (signal?: AbortSignal) => {
     const request = ++keyRequestSequence.current;
@@ -94,6 +95,9 @@ export function AgentAccess({ session, onSessionExpired }: { session: ConsoleSes
           <h2 id="connect-account-heading">Connect your account</h2>
           <p>Click <strong>Connect</strong> beside Wareongo Context in Claude. On the Wareongo page that opens, paste this key and click <strong>Connect</strong>.</p>
           <p className="setup-identity">This key gives access as <strong>{session.employee.email}</strong>.</p>
+          <div className="setup-read-access"><span className="field-label">Your read access</span><div className="scope-list" role="list" aria-label="Your read access">{SCOPE_OPTIONS.filter(scope => effectiveScopes.includes(scope.value)).map(scope => <span className="scope-chip" role="listitem" key={scope.value}>{scope.label}</span>)}</div>
+            {effectiveScopes.includes('crm:read') && <p className="setup-hint">CRM records follow your permissions in Twenty.</p>}
+          </div>
           {error && <Notice action={<button className="text-button" onClick={() => void loadKey()}>Retry</button>}>{error}</Notice>}
           {loading ? <div className="setup-key-loading"><Spinner label="Loading your key…" /></div> : key ? <>
             <label className="field-label" htmlFor="personal-key">Employee API key</label>
@@ -108,7 +112,7 @@ export function AgentAccess({ session, onSessionExpired }: { session: ConsoleSes
         <section aria-labelledby="ask-claude-heading">
           <h2 id="ask-claude-heading">Ask Claude</h2>
           <p>In a chat, open <strong>+ → Connectors</strong> and enable <strong>Wareongo Context</strong>. Then ask normally.</p>
-          <p className="setup-example">Try: “{session.employee.scopes.includes('crm:read') ? 'Show my leads needing follow-up.' : session.employee.scopes.includes('warehouses:read') ? 'Find warehouses in Bengaluru with at least 5 docks.' : 'What company guides can you read?'}”</p>
+          <p className="setup-example">Try: “{effectiveScopes.includes('crm:read') ? 'Show my leads needing follow-up.' : effectiveScopes.includes('warehouses:read') ? 'Find warehouses in Bengaluru with at least 5 docks.' : 'What company guides can you read?'}”</p>
         </section>
       </li>
     </ol>
@@ -118,7 +122,6 @@ export function AgentAccess({ session, onSessionExpired }: { session: ConsoleSes
         <p>Other MCP apps can use this connector URL once an administrator enables them.</p>
         <h2>Direct REST access</h2><p>For tools that can already send authenticated HTTP requests. These instructions are not needed for the Claude connector.</p>
         <label className="field-label" htmlFor="api-base">API base URL</label><div className="setup-copy-row"><input id="api-base" readOnly value={session.apiBaseUrl} /><button className="button button-secondary" onClick={() => void copy(session.apiBaseUrl, 'base')}>{copied === 'base' ? 'Copied API URL' : 'Copy API URL'}</button></div>
-        <div className="scope-list" aria-label="Your permissions">{SCOPE_OPTIONS.filter(scope => session.employee.scopes.includes(scope.value)).map(scope => <span className="scope-chip" key={scope.value}>{scope.label}</span>)}</div>
         <label className="field-label" htmlFor="rest-instructions">REST instructions</label><textarea id="rest-instructions" className="prompt-text" value={prompt} readOnly spellCheck={false} />
         <div className="setup-advanced-actions"><button className="button button-secondary" onClick={() => void copy(prompt, 'prompt')}>{copied === 'prompt' ? 'Copied instructions' : 'Copy instructions'}</button><a className="text-link" href="/api/v1/openapi.json" target="_blank" rel="noreferrer">API reference<Icon name="external" size={14} /></a></div>
       </div>

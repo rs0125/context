@@ -16,8 +16,18 @@ const registration = z.object({
 }).strict();
 export type KeyRegistration = z.infer<typeof registration> & { source?: 'database'; employeeId?: number };
 
-export function isEnvironmentAdmin(email: string, env: NodeJS.ProcessEnv = process.env) {
-  return (env.ADMIN_EMAILS ?? '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean).includes(email.toLowerCase());
+type RosterAccess = { dashboardAccess: unknown; adminAccess: unknown; twenty_user_id: unknown };
+export function rosterTwentyUserId(employee: RosterAccess): string | null {
+  return typeof employee.twenty_user_id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(employee.twenty_user_id)
+    ? employee.twenty_user_id : null;
+}
+/** Shared by browser sessions and agent credentials; the current DB roster is
+ * authoritative. A WAG administrator does not imply a Twenty administrator. */
+export function rosterReadScopes(employee: RosterAccess): Scope[] {
+  const scopes: Scope[] = ['knowledge:read'];
+  if (employee.dashboardAccess === true || employee.adminAccess === true) scopes.push('warehouses:read');
+  if (rosterTwentyUserId(employee)) scopes.push('crm:read');
+  return scopes;
 }
 
 export function bearerKeyToken(request: Request) {
@@ -99,13 +109,12 @@ export async function resolvePrincipal(client: PoolClient, key: KeyRegistration)
   }>(`SELECT id, email, is_active, "dashboardAccess", "adminAccess", twenty_user_id
       FROM public."VerifiedNumber" WHERE lower(email) = $1 LIMIT 2`, [key.employeeEmail]);
   const employee = rows[0];
-  if (rows.length !== 1 || !employee || !employee.is_active || (key.employeeId !== undefined && employee.id !== key.employeeId)) throw new HttpError(403, 'EMPLOYEE_INACTIVE', 'Employee access is unavailable.');
-  const scopes = key.scopes.filter(scope => {
-    if (scope === 'warehouses:read') return employee.dashboardAccess || employee.adminAccess || isEnvironmentAdmin(employee.email);
-    if (scope === 'crm:read') return Boolean(employee.twenty_user_id);
-    return true;
-  });
-  return { employeeId: employee.id, email: employee.email.toLowerCase(), scopes, keyId: key.id, twentyUserId: employee.twenty_user_id };
+  if (rows.length !== 1 || !employee || employee.is_active !== true || !Number.isSafeInteger(employee.id) || employee.id <= 0
+    || typeof employee.email !== 'string' || employee.email.toLowerCase() !== key.employeeEmail
+    || (key.employeeId !== undefined && employee.id !== key.employeeId)) throw new HttpError(403, 'EMPLOYEE_INACTIVE', 'Employee access is unavailable.');
+  const currentScopes = rosterReadScopes(employee);
+  const scopes = key.scopes.filter(scope => currentScopes.includes(scope));
+  return { employeeId: employee.id, email: employee.email.toLowerCase(), scopes, keyId: key.id, twentyUserId: rosterTwentyUserId(employee) };
 }
 
 export function requireScope(principal: Principal, scope: Scope) {

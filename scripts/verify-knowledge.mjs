@@ -9,7 +9,7 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 
 async function main() {
   const { values } = parseArgs({ options: {
-    base: { type: 'string', default: 'http://127.0.0.1:3100' },
+    base: { type: 'string', default: 'http://127.0.0.1:3000' },
     source: { type: 'string', default: '.local/knowledge-import' },
     'key-file': { type: 'string', default: '.local/keys/local-trial.json' },
   } });

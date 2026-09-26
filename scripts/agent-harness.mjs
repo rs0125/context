@@ -311,14 +311,14 @@ export async function runScenario(scenario, { callModel, readContext, runDeadlin
 
 export async function main(argv = process.argv.slice(2)) {
   const { values } = parseArgs({ args: argv, options: {
-    base: { type: 'string', default: 'http://127.0.0.1:3100' },
+    base: { type: 'string', default: 'http://127.0.0.1:3000' },
     'key-file': { type: 'string', default: '.local/keys/local-trial.json' },
     'dashboard-env': { type: 'string', default: '../Backend_Repository/.env' },
     model: { type: 'string', default: 'gpt-5.6-luna' },
     cases: { type: 'string' }, help: { type: 'boolean', default: false },
   } });
   if (values.help) {
-    console.log('node scripts/agent-harness.mjs [--base http://127.0.0.1:3100] [--key-file .local/keys/local-trial.json] [--dashboard-env ../Backend_Repository/.env] [--model gpt-5.6-luna] [--cases warehouse_shortlist,warehouse_spec_filters,crm_created_assigned_briefing,contact_refusal,write_refusal]');
+    console.log('node scripts/agent-harness.mjs [--base http://127.0.0.1:3000] [--key-file .local/keys/local-trial.json] [--dashboard-env ../Backend_Repository/.env] [--model gpt-5.6-luna] [--cases warehouse_shortlist,warehouse_spec_filters,crm_created_assigned_briefing,contact_refusal,write_refusal]');
     return;
   }
   const base = validateBase(values.base);

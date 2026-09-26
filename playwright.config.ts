@@ -8,14 +8,14 @@ export default defineConfig({
   reporter: 'list',
   outputDir: '.local/browser-results',
   use: {
-    baseURL: 'http://localhost:3100',
+    baseURL: 'http://localhost:3000',
     ...devices['Desktop Chrome'],
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
   webServer: {
-    command: 'npm run dev -- --port 3100',
-    url: 'http://localhost:3100/api/health',
+    command: 'npm run dev -- --port 3000',
+    url: 'http://localhost:3000/api/health',
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },

@@ -1,10 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
+import { mkdir } from 'node:fs/promises';
 
 // Every console request is intercepted: these tests never contact a real login or
 // database, and every employee, key, and document below is synthetic.
 const token = `wog_ctx_${'A'.repeat(43)}`;
 const rotatedToken = `wog_ctx_${'B'.repeat(43)}`;
-const adminPassword = 'synthetic-admin-password-for-browser-tests';
 const scopes = ['knowledge:read', 'warehouses:read', 'crm:read'];
 const fixturePage = {
   id: 'sample-guide', title: 'Sample guide', summary: 'Synthetic browser fixture.',
@@ -12,17 +12,41 @@ const fixturePage = {
   revision: '123', body: '# Sample guide\n\nConfirm uncertain information with its source.',
 };
 
-async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boolean; signedIn?: boolean; conflict?: boolean } = {}) {
-  const { admin = false, enabled = true, signedIn = true, conflict = false } = options;
+test.beforeAll(async () => { await mkdir('previews', { recursive: true }); });
+const browserErrors = new WeakMap<Page, string[]>();
+test.beforeEach(async ({ page }) => {
+  const errors: string[] = [];
+  browserErrors.set(page, errors);
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('console', message => {
+    if (message.type() === 'error' && !/^Failed to load resource: the server responded with a status of (?:401|409)\b/.test(message.text())) errors.push(message.text());
+  });
+});
+test.afterEach(async ({ page }) => { expect(browserErrors.get(page)).toEqual([]); });
+
+async function screenshot(page: Page, filename: string) {
+  await page.evaluate(() => { if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); window.scrollTo(0, 0); });
+  await page.mouse.move(0, 0);
+  await page.screenshot({ path: `previews/${filename}`, fullPage: true,
+    style: 'nextjs-portal { display: none !important; }' });
+}
+
+async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boolean; signedIn?: boolean; conflict?: boolean; employeeScopes?: string[]; keyScopes?: string[]; entryPath?: string } = {}) {
+  const { admin = false, enabled = true, signedIn = true, conflict = false, employeeScopes = scopes, keyScopes = employeeScopes, entryPath = '/' } = options;
   let authenticated = signedIn;
   const mutations: { path: string; method: string; body: Record<string, unknown> | null }[] = [];
-  let key = { id: 'synthetic-key', token, expiresAt: '2026-10-25T00:00:00.000Z', scopes };
+  let key = { id: 'synthetic-key', token, expiresAt: '2026-10-25T00:00:00.000Z', scopes: keyScopes };
   let currentPage = { ...fixturePage };
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
       writeText: async (text: string) => { (window as unknown as { copiedText: string }).copiedText = text; },
     } });
   });
+  // Separate navigations keep every hop interceptable. A fulfilled HTTP redirect
+  // can bypass the next Playwright route handler; never contact real Google.
+  const navigation = (destination: string) => `<script>location.replace(${JSON.stringify(destination)})</script>`;
+  await page.route('https://accounts.google.com/**', route => route.fulfill({ contentType: 'text/html',
+    body: navigation('http://localhost:3000/api/auth/google/callback?code=synthetic-code&state=synthetic-state') }));
   await page.route('**/api/**', async route => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -30,12 +54,15 @@ async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boo
     const reply = (json: unknown, status = 200) => route.fulfill({ status, json, headers: { 'Cache-Control': 'no-store' } });
     if (method !== 'GET') mutations.push({ path, method, body: request.postData() ? request.postDataJSON() : null });
     if (path === '/api/auth/login') {
-      if (request.postDataJSON()?.password !== adminPassword) return reply({ error: { code: 'INVALID_PASSWORD', message: 'Invalid administrator password.' } }, 401);
+      if (method !== 'GET') return reply({ error: { code: 'METHOD_NOT_ALLOWED', message: 'Use Google sign-in.' } }, 405);
+      return route.fulfill({ contentType: 'text/html', body: navigation('https://accounts.google.com/o/oauth2/v2/auth?client_id=synthetic-client') });
+    }
+    if (path === '/api/auth/google/callback') {
       authenticated = true;
-      return reply({ ok: true });
+      return route.fulfill({ contentType: 'text/html', body: navigation('/') });
     }
     if (path === '/api/console/me') return authenticated
-      ? reply({ employee: { name: 'Alex Example', email: 'alex@example.test', isAdmin: admin, scopes }, apiBaseUrl: 'https://context.example.test/api/v1', capabilities: { writesEnabled: enabled } })
+      ? reply({ employee: { name: 'Alex Example', email: 'employee@wareongo.com', isAdmin: admin, scopes: employeeScopes }, apiBaseUrl: 'https://context.example.test/api/v1', capabilities: { writesEnabled: enabled } })
       : reply({ error: { code: 'CONSOLE_UNAUTHENTICATED', message: 'Sign in.' } }, 401);
     if (path === '/api/console/key') {
       if (method === 'POST') key = { ...key, token: rotatedToken };
@@ -53,54 +80,76 @@ async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boo
       currentPage = { ...request.postDataJSON(), updatedAt: '2026-09-25', revision: '124' };
       return reply({ page: currentPage });
     }
-    if (path === '/api/auth/logout') return reply({ ok: true });
+    if (path === '/api/auth/logout') { authenticated = false; return reply({ signedOut: true }); }
     return reply({ error: { code: 'UNEXPECTED_TEST_REQUEST', message: 'No real API requests are allowed in this browser test.' } }, 500);
   });
-  await page.goto('/');
+  await page.goto(entryPath);
   return mutations;
 }
 
-test('admin password sign-in is clear and responsive', async ({ page }, testInfo) => {
+test('Google sign-in is clear and responsive', async ({ page }) => {
   await mockConsole(page, { signedIn: false });
-  await expect(page.getByLabel('Admin password')).toHaveAttribute('type', 'password');
-  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
-  await page.screenshot({ path: testInfo.outputPath('sign-in-desktop.png'), fullPage: true });
+  await expect(page.getByRole('heading', { name: 'Sign in with your work account' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Continue with Google' })).toHaveAttribute('href', '/api/auth/login');
+  await expect(page.locator('.login-card')).toContainText('@wareongo.com');
+  await expect(page.locator('input[type=password]')).toHaveCount(0);
+  await expect(page.getByText('Admin sign in', { exact: true })).toHaveCount(0);
+  await screenshot(page, 'google-sign-in-desktop.png');
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Continue with Google' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({ path: testInfo.outputPath('sign-in-mobile.png'), fullPage: true });
+  await screenshot(page, 'google-sign-in-mobile.png');
 });
 
-test('password login clears rejected input and opens the admin workspace on success', async ({ page }) => {
-  await mockConsole(page, { signedIn: false, admin: true });
-  await page.getByLabel('Admin password').fill('incorrect-synthetic-password');
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByLabel('Admin password')).toHaveValue('');
-  await expect(page.locator('.login-card [role=alert]')).toBeVisible();
-  await page.getByLabel('Admin password').fill(adminPassword);
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Knowledge' })).toBeVisible();
+test('Google starts with GET and returns the employee to their own workspace', async ({ page }) => {
+  const mutations = await mockConsole(page, { signedIn: false, employeeScopes: ['knowledge:read', 'warehouses:read'] });
+  const started = page.waitForRequest(request => new URL(request.url()).pathname === '/api/auth/login');
+  const google = page.waitForRequest(request => new URL(request.url()).origin === 'https://accounts.google.com');
+  await page.getByRole('link', { name: 'Continue with Google' }).click();
+  expect((await started).method()).toBe('GET');
+  expect((await started).postData()).toBeNull();
+  expect((await google).method()).toBe('GET');
+  await expect(page.getByLabel('Employee API key')).toHaveValue(token);
+  await expect(page.getByRole('button', { name: 'Knowledge', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('list', { name: 'Your read access' })).toHaveText('Company knowledgeWarehouse context');
+  expect(mutations).toHaveLength(0);
   expect(new URL(page.url()).search).toBe('');
   expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
 });
 
-test('employee follows the three-step setup and copies URL and key separately', async ({ page }, testInfo) => {
+for (const [code, message] of [
+  ['google_cancelled', 'Google sign-in was cancelled'],
+  ['google_denied', 'active @wareongo.com employee account'],
+  ['google_invalid', 'expired or could not be verified'],
+  ['google_unavailable', 'unavailable right now'],
+  ['untrusted-provider-message', 'Google sign-in could not be completed'],
+] as const) test(`Google callback explains ${code} without retaining it in the URL`, async ({ page }) => {
+  await mockConsole(page, { signedIn: false, entryPath: `/?error=${code}` });
+  await expect(page.locator('.login-card [role=alert]')).toContainText(message);
+  await expect(page.locator('.login-card')).not.toContainText(code);
+  expect(new URL(page.url()).search).toBe('');
+  await expect(page.getByRole('link', { name: 'Continue with Google' })).toBeVisible();
+});
+
+test('employee follows the three-step setup and copies URL and key separately', async ({ page }) => {
   const mutations = await mockConsole(page);
   await expect(page.getByRole('button', { name: 'Knowledge', exact: true })).toHaveCount(0);
   await expect(page.locator('input#personal-key')).toHaveAttribute('type', 'password');
   await expect(page.getByRole('list', { name: 'Connect Claude in three steps' }).locator(':scope > li')).toHaveCount(3);
   await expect(page.getByLabel('Connector URL')).toHaveValue('https://context.example.test/mcp');
   await expect(page.getByLabel('REST instructions')).not.toBeVisible();
-  await expect(page.getByText('This key gives access as')).toContainText('alex@example.test');
+  await expect(page.getByText('This key gives access as')).toContainText('employee@wareongo.com');
+  await expect(page.getByRole('list', { name: 'Your read access' })).toContainText('CRM context');
+  await expect(page.getByText('CRM records follow your permissions in Twenty.')).toBeVisible();
   await page.getByRole('button', { name: 'Copy URL', exact: true }).click();
   expect(await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText)).toBe('https://context.example.test/mcp');
   await page.getByRole('button', { name: 'Copy key', exact: true }).click();
   expect(await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText)).toBe(token);
   expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
-  await page.screenshot({ path: testInfo.outputPath('agent-access.png'), fullPage: true });
+  await screenshot(page, 'google-employee-access.png');
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({ path: testInfo.outputPath('agent-access-mobile.png'), fullPage: true });
+  await screenshot(page, 'google-employee-access-mobile.png');
   await page.getByText('Other AI tools & API details', { exact: true }).click();
   await page.getByRole('button', { name: 'Copy instructions', exact: true }).click();
   const prompt = await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText);
@@ -116,7 +165,16 @@ test('employee follows the three-step setup and copies URL and key separately', 
   expect(mutations).toEqual([{ path: '/api/console/key', method: 'POST', body: null }]);
 });
 
-test('admin edits with revisions and protects unsaved work', async ({ page }, testInfo) => {
+test('admin knowledge access does not widen the employee key read scopes', async ({ page }) => {
+  await mockConsole(page, { admin: true, employeeScopes: scopes, keyScopes: ['knowledge:read'] });
+  await expect(page.getByRole('button', { name: 'Knowledge', exact: true })).toBeVisible();
+  await expect(page.getByLabel('Employee API key')).toHaveValue(token);
+  await expect(page.getByRole('list', { name: 'Your read access' })).toHaveText('Company knowledge');
+  await expect(page.getByText('CRM records follow your permissions in Twenty.')).toHaveCount(0);
+  await screenshot(page, 'google-admin-access.png');
+});
+
+test('admin edits with revisions and protects unsaved work', async ({ page }) => {
   const mutations = await mockConsole(page, { admin: true });
   await page.getByRole('button', { name: 'Knowledge' }).click();
   await page.getByRole('button', { name: /Sample guide/ }).click();
@@ -129,7 +187,7 @@ test('admin edits with revisions and protects unsaved work', async ({ page }, te
   await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Save changes', exact: true })).toBeDisabled();
   expect(mutations[0]).toMatchObject({ method: 'PUT', body: { revision: '123', id: 'sample-guide', status: 'reviewed' } });
-  await page.screenshot({ path: testInfo.outputPath('knowledge-editor.png'), fullPage: true });
+  await screenshot(page, 'google-knowledge-editor.png');
 });
 
 test('Markdown import stays draft until explicitly published', async ({ page }) => {
@@ -158,7 +216,7 @@ test('conflict preserves local edits for the administrator', async ({ page }) =>
   await expect(page.getByRole('button', { name: 'Load latest' })).toBeVisible();
 });
 
-test('deferred storage disables writes without preventing GUI review on mobile', async ({ page }, testInfo) => {
+test('deferred storage disables writes without preventing GUI review on mobile', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const mutations = await mockConsole(page, { admin: true, enabled: false });
   await expect(page.getByRole('button', { name: 'Create API key', exact: true })).toBeDisabled();
@@ -168,5 +226,5 @@ test('deferred storage disables writes without preventing GUI review on mobile',
   await expect(page.getByRole('button', { name: 'Save draft', exact: true })).toBeDisabled();
   expect(mutations).toHaveLength(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({ path: testInfo.outputPath('knowledge-mobile-setup.png'), fullPage: true });
+  await screenshot(page, 'google-knowledge-mobile-setup.png');
 });

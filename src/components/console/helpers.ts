@@ -8,7 +8,7 @@ export class ConsoleApiError extends Error {
 }
 
 export async function consoleRequest<T>(url: string, options: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
-  if (!url.startsWith('/api/console/') && url !== '/api/auth/login' && url !== '/api/auth/logout') {
+  if (!url.startsWith('/api/console/') && url !== '/api/auth/logout') {
     throw new ConsoleApiError('INVALID_ENDPOINT', 'This workspace request is not supported.', 400);
   }
   let response: Response;
@@ -50,7 +50,7 @@ export function loginErrorMessage(error: unknown): string {
     case 'CONSOLE_ORIGIN_DENIED':
       return 'This address is not allowed for console sign-in. Open the configured console URL.';
     case 'CONSOLE_CONFIGURATION':
-      return 'Admin sign-in is not configured on this server.';
+      return 'Google sign-in is not configured on this server. Ask an administrator to finish setup.';
     case 'CONSOLE_SETUP_REQUIRED':
       return 'Workspace setup is incomplete. Finish console setup before signing in.';
     case 'DATABASE_CONFIGURATION':
@@ -60,13 +60,29 @@ export function loginErrorMessage(error: unknown): string {
     case 'CONSOLE_UNAVAILABLE':
       return 'The console is temporarily unavailable. Wait a moment and try again.';
     case 'CONSOLE_ACCESS_DENIED':
-      return 'The configured admin account is not available in the active employee roster. Check its access before signing in.';
+      return 'Your account does not have active employee access. Ask an administrator to check your access.';
   }
-  if (error.status === 401) return 'Sign-in failed. Check the admin password and try again.';
+  if (error.status === 401) return 'Your session has ended. Continue with Google to sign in again.';
   if (error.status === 429) return 'Too many sign-in attempts. Wait a moment and try again.';
-  if (error.status === 403) return 'Console sign-in is blocked for this request. Check the configured address and administrator access.';
+  if (error.status === 403) return 'Sign-in is blocked for this request. Check the console address and your employee access.';
   if (error.status >= 500) return 'The console is temporarily unavailable. Wait a moment and try again.';
   return 'Unable to sign in right now. Please try again.';
+}
+
+/** Callback query values are untrusted. Display fixed copy, never provider text. */
+export function googleSignInError(code: string | null): string {
+  switch (code) {
+    case 'google_cancelled':
+      return 'Google sign-in was cancelled. Continue with Google when you’re ready.';
+    case 'google_denied':
+      return 'Sign in with an active @wareongo.com employee account. Ask an administrator if you need access.';
+    case 'google_invalid':
+      return 'This sign-in attempt expired or could not be verified. Continue with Google to start again.';
+    case 'google_unavailable':
+      return 'Google sign-in is unavailable right now. Please try again, or ask an administrator to check setup.';
+    default:
+      return 'Google sign-in could not be completed. Please try again.';
+  }
 }
 
 export function makeSystemPrompt(apiBaseUrl: string) {
@@ -100,7 +116,7 @@ export function mcpServerUrl(apiBaseUrl: string) {
 }
 
 export function makeConnectorSetup(apiBaseUrl: string) {
-  return `CONNECT WAREONGO CONTEXT\n\nMCP server URL: ${mcpServerUrl(apiBaseUrl)}\n\n1. Add a custom connector in Claude using the MCP server URL above.\n2. On the Wareongo Context authorization page, review the requesting application and permissions, then enter your own employee API key and select Connect.\n3. Return to Claude and enable the connector for your conversation.\n\nDo not paste your API key or the administrator password into chat. The administrator password is only for the management console. The connector can read only the context allowed by your employee key.\n\nA URL or system prompt pasted into ordinary chat does not install a connector.`;
+  return `CONNECT WAREONGO CONTEXT\n\nMCP server URL: ${mcpServerUrl(apiBaseUrl)}\n\n1. Sign in to Wareongo Context with your @wareongo.com Google account to get your employee API key.\n2. Add a custom connector in Claude using the MCP server URL above.\n3. On the Wareongo Context authorization page, review the requesting application and permissions, then enter your own employee API key and select Connect.\n4. Return to Claude and enable the connector for your conversation.\n\nDo not paste your API key into chat. The connector can read only the context allowed by your employee key.\n\nA URL or system prompt pasted into ordinary chat does not install a connector.`;
 }
 
 export const emptyDraft = (): PageDraft => ({ id: '', title: '', summary: '', body: '', status: 'draft', scopes: ['knowledge:read'] });

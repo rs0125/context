@@ -34,7 +34,7 @@ function rosterClient(rows: Record<string, unknown>[]) {
 
 const employee = {
   id: 7, email: 'Employee@Example.Test', is_active: true,
-  dashboardAccess: true, adminAccess: false, twenty_user_id: 'twenty-test-user',
+  dashboardAccess: true, adminAccess: false, twenty_user_id: '11111111-1111-4111-8111-111111111111',
 };
 
 describe('employee API credentials', () => {
@@ -134,6 +134,13 @@ describe('live employee permissions', () => {
     }]);
     const principal = await resolvePrincipal(client, registration());
     expect(principal.scopes).toEqual(['knowledge:read', 'warehouses:read']);
+  });
+  it('never grants privileges through an environment admin list or truthy source values', async () => {
+    vi.stubEnv('ADMIN_EMAILS', employee.email);
+    try {
+      const { client } = rosterClient([{ ...employee, dashboardAccess: 'true', adminAccess: 1, twenty_user_id: 'malformed-twenty-id' }]);
+      expect(await resolvePrincipal(client, registration())).toMatchObject({ scopes: ['knowledge:read'], twentyUserId: null });
+    } finally { vi.unstubAllEnvs(); }
   });
 });
 

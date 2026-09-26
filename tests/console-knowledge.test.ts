@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { handleConsoleKnowledgeRequest } from '../src/lib/console-knowledge';
 import { HttpError } from '../src/lib/errors';
+import { consoleCookie, createConsoleSession } from '../src/lib/console-auth';
 
 const origin = 'https://console.example.invalid';
 const metadata = {
@@ -110,6 +111,28 @@ describe('console knowledge access and read responses', () => {
     expect((await handleConsoleKnowledgeRequest(request(), undefined, test.dependencies)).status).toBe(403);
     expect(test.identity).toHaveBeenCalledTimes(2);
     expect(test.query).toHaveBeenCalledOnce();
+  });
+  it('uses the current database admin flag with a real employee session for every knowledge operation', async () => {
+    vi.stubEnv('CONTEXT_CONSOLE_ORIGIN', origin);
+    vi.stubEnv('CONTEXT_SESSION_SECRET', Buffer.alloc(32, 1).toString('base64url'));
+    vi.stubEnv('CONTEXT_CONSOLE_WRITES_ENABLED', 'true');
+    const employee = { id: 7, email: 'employee@wareongo.com', name: 'Employee', is_active: true,
+      adminAccess: true, dashboardAccess: false, twenty_user_id: null };
+    const query = vi.fn(async (sql: string) => ({ rows: sql.includes('VerifiedNumber') ? [employee] : [metadata] }));
+    const client = { query } as unknown as PoolClient;
+    const transaction = async <T>(work: (client: PoolClient) => Promise<T>) => work(client);
+    const cookie = consoleCookie('session', createConsoleSession({ employeeId: 7, email: employee.email, name: employee.name,
+      isAdmin: true, scopes: ['knowledge:read'] }, 'google:107654321012345678901'), 28800).split(';')[0];
+    const incoming = (method: string) => {
+      const value = request(method, payload); value.headers.set('cookie', cookie); return value;
+    };
+    const dependencies = { readTransaction: transaction, writeTransaction: transaction };
+    expect((await handleConsoleKnowledgeRequest(incoming('GET'), undefined, dependencies)).status).toBe(200);
+    employee.adminAccess = false;
+    for (const method of ['GET', 'POST', 'PUT']) {
+      expect((await handleConsoleKnowledgeRequest(incoming(method), method === 'PUT' ? metadata.id : undefined, dependencies)).status).toBe(403);
+    }
+    expect(query.mock.calls.filter(([sql]) => !sql.includes('VerifiedNumber'))).toHaveLength(1);
   });
 
   it('returns a safe 404 for missing pages and rejects traversal before a page query', async () => {

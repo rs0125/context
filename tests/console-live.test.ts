@@ -4,7 +4,7 @@ import { describe, it, vi } from 'vitest';
 import { handleConsoleKnowledgeRequest } from '../src/lib/console-knowledge';
 import {
   consoleCookie, consoleOrigin, createConsoleSession, getConsoleIdentity,
-  PASSWORD_SESSION_SUBJECT, resolveConsoleEmployee, SESSION_SECONDS,
+  resolveConsoleEmployee, SESSION_SECONDS,
 } from '../src/lib/console-auth';
 import { readKnowledge } from '../src/lib/knowledge';
 
@@ -30,12 +30,9 @@ describe.skipIf(process.env.CONTEXT_LIVE_CONSOLE_TEST !== '1')('rollback-only co
       const { migrationDatabaseOptions } = await import(migrationModule);
       const env = await readEnv('.env.local') as Record<string, string>;
       check(env.CONTEXT_CONSOLE_WRITES_ENABLED === 'true', 'CONSOLE_LIVE_WRITES_NOT_CONFIGURED');
-      for (const name of ['CONTEXT_CONSOLE_ORIGIN', 'CONTEXT_SESSION_SECRET', 'CONTEXT_ADMIN_EMAIL',
-        'CONTEXT_ADMIN_PASSWORD', 'ADMIN_EMAILS', 'CONTEXT_CONSOLE_WRITES_ENABLED']) {
+      for (const name of ['CONTEXT_CONSOLE_ORIGIN', 'CONTEXT_SESSION_SECRET', 'CONTEXT_CONSOLE_WRITES_ENABLED']) {
         vi.stubEnv(name, env[name] ?? '');
       }
-      const email = process.env.CONTEXT_ADMIN_EMAIL?.trim().toLowerCase();
-      check(email && /^[^\s@]+@wareongo\.com$/.test(email), 'CONSOLE_LIVE_ADMIN_NOT_CONFIGURED');
       const origin = consoleOrigin();
 
       stage = 'CONNECT';
@@ -50,8 +47,16 @@ describe.skipIf(process.env.CONTEXT_LIVE_CONSOLE_TEST !== '1')('rollback-only co
       await connection.query("SET LOCAL idle_in_transaction_session_timeout = '6000ms'");
 
       stage = 'ADMIN_SESSION';
+      // Select an existing active admin without retaining or printing roster data.
+      const adminRows = await connection.query(`SELECT email FROM public."VerifiedNumber"
+        WHERE is_active = true AND "adminAccess" = true
+          AND lower(email) ~ '^[^[:space:]@]+@wareongo\\.com$'
+        ORDER BY id LIMIT 1`);
+      const email = adminRows.rows[0]?.email?.trim().toLowerCase();
+      check(email, 'CONSOLE_LIVE_ADMIN_NOT_CONFIGURED');
       const rosterIdentity = await resolveConsoleEmployee(connection, email);
-      const session = createConsoleSession({ ...rosterIdentity, isAdmin: true }, PASSWORD_SESSION_SUBJECT);
+      check(rosterIdentity.isAdmin, 'CONSOLE_LIVE_ROSTER_ADMIN_REQUIRED');
+      const session = createConsoleSession(rosterIdentity, 'google:synthetic-live-verification');
       const cookie = consoleCookie('session', session, SESSION_SECONDS).split(';')[0];
       function request(method: string, id?: string, body?: unknown) {
         return new Request(`${origin}/api/console/knowledge${id ? `/${id}` : ''}`, {

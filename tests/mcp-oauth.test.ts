@@ -29,7 +29,7 @@ afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 type Row = Record<string, any>;
 function database() {
   let state = { clients: new Map<string, Row>(), grants: new Map<string, Row>(), codes: new Map<string, Row>(), tokens: new Map<string, Row>() };
-  const roster: Row = { id: 19, email: key.employeeEmail, is_active: true, dashboardAccess: true, adminAccess: false, twenty_user_id: 'twenty-id' };
+  const roster: Row = { id: 19, email: key.employeeEmail, is_active: true, dashboardAccess: true, adminAccess: false, twenty_user_id: '10000000-0000-4000-8000-000000000019' };
   const dbKeys = new Map<string, Row>();
   const query = vi.fn(async (sql: string, values: any[] = []) => {
     if (sql.includes('pg_try_advisory_xact_lock')) return { rows: [{ locked: true }] };

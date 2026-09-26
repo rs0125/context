@@ -41,7 +41,7 @@ function keyResponse(row: StoredKey, identity: ConsoleIdentity, now: number): Co
   if (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= now) return null;
   if (row.employee_id !== identity.employeeId || row.employee_email !== identity.email
     || typeof row.id !== 'string' || !/^console_[a-f0-9-]{36}$/.test(row.id)
-    || !Array.isArray(row.scopes) || row.scopes.length < 1 || row.scopes.length > 3
+    || !Array.isArray(row.scopes) || row.scopes.length < 1 || row.scopes.length > 3 || new Set(row.scopes).size !== row.scopes.length
     || row.scopes.some(scope => !SCOPES.includes(scope as Scope))) throw new HttpError(503, 'CONSOLE_KEY_INVALID', 'The saved key could not be verified.');
   const token = decryptConsoleKey(row.encrypted_token, row.id, identity);
   if (createHash('sha256').update(token).digest('hex') !== row.token_hash) throw new HttpError(503, 'CONSOLE_KEY_INVALID', 'The saved key could not be verified.');

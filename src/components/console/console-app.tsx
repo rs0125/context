@@ -1,36 +1,16 @@
 'use client';
 
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { AgentAccess } from './agent-access';
 import { KnowledgeWorkspace } from './knowledge-workspace';
-import { ConsoleApiError, consoleRequest, errorMessage, loginErrorMessage } from './helpers';
+import { ConsoleApiError, consoleRequest, errorMessage, googleSignInError, loginErrorMessage } from './helpers';
 import { Icon } from './icons';
 import { Brand, ConfirmDialog, Notice, Spinner } from './ui';
 import type { ConsoleSession } from './types';
 
-function SignIn({ loading, error, message, onRetry, onSignedIn }: {
-  loading: boolean; error: string; message: string; onRetry: () => void; onSignedIn: () => Promise<void>;
+function SignIn({ loading, error, message, onRetry }: {
+  loading: boolean; error: string; message: string; onRetry: () => void;
 }) {
-  const [password, setPassword] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [loginError, setLoginError] = useState('');
-  const [passwordRejected, setPasswordRejected] = useState(false);
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (submitting || loading || !password) return;
-    setSubmitting(true); setLoginError(''); setPasswordRejected(false);
-    try {
-      const result = await consoleRequest<{ ok: boolean }>('/api/auth/login', { method: 'POST', body: { password } });
-      setPassword('');
-      if (result.ok !== true) throw new Error('Unexpected sign-in response');
-      await onSignedIn();
-    } catch (cause) {
-      setLoginError(loginErrorMessage(cause));
-      setPasswordRejected(cause instanceof ConsoleApiError && cause.status === 401);
-    } finally { setPassword(''); setSubmitting(false); }
-  }
-
   return <div className="login-shell">
     <header className="login-header"><Brand /></header>
     <main className="login-main" id="main-content">
@@ -39,16 +19,11 @@ function SignIn({ loading, error, message, onRetry, onSignedIn }: {
         <p className="login-description">Let Claude answer questions using company guides, warehouse listings and CRM records. Access is read-only: Claude cannot change your data.</p>
       </section>
       <section className="login-card" aria-labelledby="login-heading">
-        <h2 id="login-heading">Admin sign in</h2>
-        <p>Get the connection URL and API key, or edit company guides.</p>
+        <h2 id="login-heading">Sign in with your work account</h2>
+        <p>Use your <strong>@wareongo.com</strong> Google account to get your own connection key.</p>
         {message && <Notice tone="info">{message}</Notice>}
-        {error && <Notice action={<button className="text-button" onClick={onRetry} disabled={submitting}>Try again</button>}>{error}</Notice>}
-        {loading ? <div className="login-loading"><Spinner label="Checking your session…" /></div> : <form className="admin-login-form" method="post" action="/api/auth/login" onSubmit={event => void submit(event)}>
-          <label htmlFor="admin-password">Admin password</label>
-          <input id="admin-password" name="password" type="password" autoComplete="current-password" required value={password} onChange={event => { setPassword(event.target.value); setPasswordRejected(false); }} disabled={submitting} aria-invalid={passwordRejected} aria-describedby={loginError ? 'admin-login-error' : undefined} />
-          {loginError && <div id="admin-login-error"><Notice>{loginError}</Notice></div>}
-          <button className="button button-primary full-width" type="submit" disabled={submitting || !password}>{submitting ? <Spinner label="Signing in…" /> : <>Sign in<Icon name="arrow" size={17} /></>}</button>
-        </form>}
+        {error && <Notice action={<button className="text-button" onClick={onRetry}>Try again</button>}>{error}</Notice>}
+        {loading ? <div className="login-loading"><Spinner label="Checking your session…" /></div> : <a className="button button-primary full-width google-sign-in" href="/api/auth/login">Continue with Google<Icon name="arrow" size={17} /></a>}
       </section>
     </main>
     <footer className="login-footer"><span>Wareongo Context</span></footer>
@@ -59,6 +34,7 @@ export function ConsoleApp() {
   const [session, setSession] = useState<ConsoleSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [callbackError, setCallbackError] = useState('');
   const [message, setMessage] = useState('');
   const [tab, setTab] = useState<'access' | 'knowledge'>('access');
   const [dirty, setDirty] = useState(false);
@@ -67,18 +43,22 @@ export function ConsoleApp() {
   const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
 
   const sessionExpired = useCallback(() => { setSession(null); setDirty(false); setTab('access'); setMessage('Your session has ended. Sign in again to continue.'); }, []);
-  const loadSession = useCallback(async (signal?: AbortSignal, expectSession = false) => {
+  const loadSession = useCallback(async (signal?: AbortSignal) => {
     setLoading(true); setError('');
-    try { setSession(await consoleRequest<ConsoleSession>('/api/console/me', { signal })); }
+    try { setSession(await consoleRequest<ConsoleSession>('/api/console/me', { signal })); setCallbackError(''); }
     catch (cause) {
       if (signal?.aborted) return;
       setSession(null);
-      if (cause instanceof ConsoleApiError && cause.status === 401) {
-        if (expectSession) setError('Your session could not be opened. Allow cookies for this site and try again.');
-      } else setError(loginErrorMessage(cause));
+      if (!(cause instanceof ConsoleApiError && cause.status === 401)) setError(loginErrorMessage(cause));
     } finally { if (!signal?.aborted) setLoading(false); }
   }, []);
   useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('error')) {
+      setCallbackError(googleSignInError(url.searchParams.get('error')));
+      url.searchParams.delete('error');
+      window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
+    }
     const controller = new AbortController(); void loadSession(controller.signal); return () => controller.abort();
   }, [loadSession]);
   function guard(action: () => void) { if (editorBusy) return; if (dirty) setPendingAction(() => action); else action(); }
@@ -93,7 +73,7 @@ export function ConsoleApp() {
     } finally { setLogoutBusy(false); }
   }
 
-  if (!session) return <SignIn loading={loading} error={error} message={message} onRetry={() => void loadSession()} onSignedIn={async () => { setMessage(''); await loadSession(undefined, true); }} />;
+  if (!session) return <SignIn loading={loading} error={error || callbackError} message={message} onRetry={() => { setCallbackError(''); void loadSession(); }} />;
   const initials = (session.employee.name || session.employee.email).split(/[\s@.]+/).filter(Boolean).slice(0, 2).map(value => value[0]).join('').toUpperCase();
   return <div className="workspace-shell">
     <aside className="workspace-sidebar">

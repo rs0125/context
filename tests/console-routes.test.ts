@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { consoleCookie, createConsoleSession, PASSWORD_SESSION_SUBJECT, type ConsoleIdentity } from '../src/lib/console-auth';
+import { consoleCookie, createConsoleSession, type ConsoleIdentity } from '../src/lib/console-auth';
 import { encryptConsoleKey } from '../src/lib/console-keys';
 
 const mocks = vi.hoisted(() => ({ query: vi.fn(), read: vi.fn(), write: vi.fn() }));
@@ -9,10 +9,9 @@ vi.mock('../src/lib/db', () => ({ withReadOnlyTransaction: mocks.read, withConso
 import { GET as getMe } from '../src/app/api/console/me/route';
 import { GET as getKey, POST as rotateKey } from '../src/app/api/console/key/route';
 import { POST as logout } from '../src/app/api/auth/logout/route';
-import { POST as login } from '../src/app/api/auth/login/route';
 
 const origin = 'https://context.example.test';
-const identity: ConsoleIdentity = { employeeId: 19, email: 'employee@wareongo.com', name: 'Example', isAdmin: true, scopes: ['knowledge:read', 'warehouses:read'] };
+const identity: ConsoleIdentity = { employeeId: 19, email: 'employee@wareongo.com', name: 'Example', isAdmin: false, scopes: ['knowledge:read', 'warehouses:read'] };
 const roster = { id: 19, email: identity.email, name: identity.name, is_active: true, adminAccess: false, dashboardAccess: true, twenty_user_id: null };
 const token = `wog_ctx_${Buffer.alloc(32, 6).toString('base64url')}`;
 const id = 'console_11111111-1111-4111-8111-111111111111';
@@ -23,8 +22,6 @@ beforeEach(() => {
   vi.stubEnv('CONTEXT_SESSION_SECRET', Buffer.alloc(32, 1).toString('base64url'));
   vi.stubEnv('CONTEXT_KEY_ENCRYPTION_SECRET', Buffer.alloc(32, 2).toString('base64url'));
   vi.stubEnv('CONTEXT_CONSOLE_WRITES_ENABLED', 'true');
-  vi.stubEnv('CONTEXT_ADMIN_EMAIL', identity.email);
-  vi.stubEnv('CONTEXT_ADMIN_PASSWORD', 'synthetic-console-admin-password-12345');
   vi.stubEnv('ADMIN_EMAILS', '');
   mocks.query.mockReset(); mocks.read.mockReset(); mocks.write.mockReset();
   mocks.read.mockImplementation(async (work: (client: PoolClient) => unknown) => work(client));
@@ -43,25 +40,16 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 function request(route: string, method = 'GET', body?: string, headers: Record<string, string> = {}) {
-  const cookie = consoleCookie('session', createConsoleSession(identity, PASSWORD_SESSION_SUBJECT), 28800).split(';')[0];
+  const cookie = consoleCookie('session', createConsoleSession(identity, 'google:107654321012345678901'), 28800).split(';')[0];
   return new Request(`${origin}${route}`, { method, body, headers: { Cookie: cookie, ...(method === 'POST' ? { Origin: origin } : {}), ...headers } });
 }
 
 describe('console HTTP boundaries', () => {
-  it('issues the password session through the login route without a storage write', async () => {
-    const response = await login(new Request(`${origin}/api/auth/login`, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: process.env.CONTEXT_ADMIN_PASSWORD }) }));
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ ok: true });
-    expect(response.headers.get('set-cookie')).toContain('__Host-context_console_session=');
-    expect(mocks.read).toHaveBeenCalledOnce();
-    expect(mocks.write).not.toHaveBeenCalled();
-  });
-
   it('returns the current identity, full API base and deferred-write capability', async () => {
     vi.stubEnv('CONTEXT_CONSOLE_WRITES_ENABLED', 'false');
     const response = await getMe(request('/api/console/me'));
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ employee: { email: identity.email, name: identity.name, isAdmin: true, scopes: identity.scopes }, apiBaseUrl: `${origin}/api/v1`, capabilities: { writesEnabled: false } });
+    expect(await response.json()).toEqual({ employee: { email: identity.email, name: identity.name, isAdmin: false, scopes: identity.scopes }, apiBaseUrl: `${origin}/api/v1`, capabilities: { writesEnabled: false } });
     expect(response.headers.get('cache-control')).toContain('no-store');
     expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('employee_api_keys'))).toBe(false);
   });
@@ -111,9 +99,27 @@ describe('console HTTP boundaries', () => {
     expect((await rotateKey(request('/api/console/key', 'POST', JSON.stringify({ employeeId: 20, scopes: ['crm:read'] })))).status).toBe(400);
     expect(mocks.query).not.toHaveBeenCalled();
   });
+  it('rejects cross-employee key inputs even from an administrator', async () => {
+    mocks.query.mockResolvedValue({ rows: [{ ...roster, adminAccess: true }] });
+    expect((await getKey(request('/api/console/key?email=other@wareongo.com'))).status).toBe(400);
+    expect((await rotateKey(request('/api/console/key?employee_id=20', 'POST'))).status).toBe(400);
+    expect(mocks.query).not.toHaveBeenCalled();
+  });
+  it('intersects saved key scopes with freshly downgraded employee permissions', async () => {
+    mocks.query.mockResolvedValueOnce({ rows: [{ ...roster, dashboardAccess: false }] });
+    const response = await getKey(request('/api/console/key'));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ key: { token, scopes: ['knowledge:read'] } });
+  });
 
   it('checks employee deactivation again before a key read or rotation', async () => {
     mocks.query.mockResolvedValue({ rows: [{ ...roster, is_active: false }] });
+    expect((await getKey(request('/api/console/key'))).status).toBe(403);
+    expect((await rotateKey(request('/api/console/key', 'POST'))).status).toBe(403);
+    expect(mocks.query.mock.calls.some(([sql]) => !String(sql).includes('VerifiedNumber'))).toBe(false);
+  });
+  it('rejects removed employees before touching key storage', async () => {
+    mocks.query.mockResolvedValue({ rows: [] });
     expect((await getKey(request('/api/console/key'))).status).toBe(403);
     expect((await rotateKey(request('/api/console/key', 'POST'))).status).toBe(403);
     expect(mocks.query.mock.calls.some(([sql]) => !String(sql).includes('VerifiedNumber'))).toBe(false);

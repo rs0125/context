@@ -40,6 +40,7 @@ describe('employee-bound encrypted console keys', () => {
     expect(query.mock.calls[0][0]).toContain('WHERE employee_id = $1 AND employee_email = $2');
     await expect(getOwnConsoleKey(database([row({ employee_id: 8 })]).client, identity, now)).rejects.toThrow();
     await expect(getOwnConsoleKey(database([row({ token_hash: 'a'.repeat(64) })]).client, identity, now)).rejects.toThrow();
+    await expect(getOwnConsoleKey(database([row({ scopes: ['knowledge:read', 'knowledge:read'] })]).client, identity, now)).rejects.toThrow();
   });
 
   it('returns null for absent or expired keys', async () => {

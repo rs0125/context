@@ -20,7 +20,7 @@ async function mockAuthorization(page: Page, options: { rejectKey?: boolean; uns
     if (options.unsafeRedirect) return reply({ redirectUrl: 'https://unrelated.example.test/callback?code=synthetic-code' });
     return reply({ redirectUrl: body.approve ? `${redirectUri}?code=synthetic-code&state=synthetic-state` : `${redirectUri}?error=access_denied&state=synthetic-state` });
   });
-  const query = new URLSearchParams({ response_type: 'code', client_id: 'synthetic-client', redirect_uri: redirectUri, resource: 'http://localhost:3100/mcp', code_challenge: 'A'.repeat(43), code_challenge_method: 'S256', state: 'synthetic-state', scope: 'knowledge:read crm:read' });
+  const query = new URLSearchParams({ response_type: 'code', client_id: 'synthetic-client', redirect_uri: redirectUri, resource: 'http://localhost:3000/mcp', code_challenge: 'A'.repeat(43), code_challenge_method: 'S256', state: 'synthetic-state', scope: 'knowledge:read crm:read' });
   await page.goto(`/oauth/authorize?${query}`);
   return { posts, requests };
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ConsoleApiError, consoleRequest, emptyDraft, importMarkdown, loginErrorMessage, makeConnectorSetup, makeSystemPrompt, mcpServerUrl, validateDraft } from '../src/components/console/helpers';
+import { ConsoleApiError, consoleRequest, emptyDraft, googleSignInError, importMarkdown, loginErrorMessage, makeConnectorSetup, makeSystemPrompt, mcpServerUrl, validateDraft } from '../src/components/console/helpers';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -9,11 +9,11 @@ describe('sign-in failure messages', () => {
   it.each([
     ['CONNECTION_FAILED', 0, 'Cannot reach the console server. Check that it is running and refresh this page.'],
     ['CONSOLE_ORIGIN_DENIED', 403, 'This address is not allowed for console sign-in. Open the configured console URL.'],
-    ['CONSOLE_CONFIGURATION', 503, 'Admin sign-in is not configured on this server.'],
+    ['CONSOLE_CONFIGURATION', 503, 'Google sign-in is not configured on this server. Ask an administrator to finish setup.'],
     ['CONSOLE_SETUP_REQUIRED', 503, 'Workspace setup is incomplete. Finish console setup before signing in.'],
     ['DATABASE_CONFIGURATION', 503, 'The console data connection is not configured on this server.'],
-    ['CONSOLE_ACCESS_DENIED', 403, 'The configured admin account is not available in the active employee roster. Check its access before signing in.'],
-    ['CONSOLE_INVALID_CREDENTIALS', 401, 'Sign-in failed. Check the admin password and try again.'],
+    ['CONSOLE_ACCESS_DENIED', 403, 'Your account does not have active employee access. Ask an administrator to check your access.'],
+    ['CONSOLE_UNAUTHENTICATED', 401, 'Your session has ended. Continue with Google to sign in again.'],
     ['RATE_LIMITED', 429, 'Too many sign-in attempts. Wait a moment and try again.'],
   ])('distinguishes %s without including upstream diagnostics', (code, status, expected) => {
     const message = loginErrorMessage(new ConsoleApiError(code as string, diagnostic, status as number));
@@ -33,6 +33,17 @@ describe('sign-in failure messages', () => {
     expect(loginErrorMessage(new ConsoleApiError('UNKNOWN_DENIAL', diagnostic, 403))).toMatch(/blocked for this request/);
     expect(loginErrorMessage(new Error(diagnostic))).toBe('Unable to sign in right now. Please try again.');
     expect(loginErrorMessage({ code: 'CONSOLE_CONFIGURATION', message: diagnostic })).toBe('Unable to sign in right now. Please try again.');
+  });
+
+  it.each([
+    ['google_cancelled', 'cancelled'], ['google_denied', 'active @wareongo.com employee account'],
+    ['google_invalid', 'expired'], ['google_unavailable', 'unavailable right now'],
+  ])('explains the safe Google callback code %s', (code, text) => {
+    expect(googleSignInError(code)).toContain(text);
+  });
+
+  it.each([null, '', 'provider_secret=private-token', '<script>alert(1)</script>', 'https://evil.example.test'])('does not render arbitrary callback values (%s)', code => {
+    expect(googleSignInError(code)).toBe('Google sign-in could not be completed. Please try again.');
   });
 });
 
@@ -111,16 +122,17 @@ describe('console transport and agent instructions', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('posts the admin password as JSON only to the fixed same-origin login route', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(Response.json({ ok: true }));
+  it('keeps Google redirects outside the JSON console helper and retains same-origin logout', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ signedOut: true }));
     vi.stubGlobal('fetch', fetchMock);
-    await consoleRequest('/api/auth/login', { method: 'POST', body: { password: 'test-only-password' } });
-    expect(fetchMock).toHaveBeenCalledWith('/api/auth/login', expect.objectContaining({
-      method: 'POST', credentials: 'same-origin', redirect: 'error', cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' }, body: '{"password":"test-only-password"}',
-    }));
-    await expect(consoleRequest('/api/auth/login?password=test-only-password')).rejects.toMatchObject({ code: 'INVALID_ENDPOINT' });
+    await expect(consoleRequest('/api/auth/login')).rejects.toMatchObject({ code: 'INVALID_ENDPOINT' });
+    await expect(consoleRequest('/api/auth/login?code=example')).rejects.toMatchObject({ code: 'INVALID_ENDPOINT' });
     await expect(consoleRequest('/api/auth/google')).rejects.toMatchObject({ code: 'INVALID_ENDPOINT' });
+    expect(fetchMock).not.toHaveBeenCalled();
+    await consoleRequest('/api/auth/logout', { method: 'POST' });
+    expect(fetchMock).toHaveBeenCalledWith('/api/auth/logout', expect.objectContaining({
+      method: 'POST', credentials: 'same-origin', redirect: 'error', cache: 'no-store',
+    }));
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -134,6 +146,8 @@ describe('console transport and agent instructions', () => {
     const setup = makeConnectorSetup('https://context.example.test/api/v1/');
     expect(setup).toContain('MCP server URL: https://context.example.test/mcp');
     expect(setup).toContain('Do not paste your API key');
+    expect(setup).toContain('@wareongo.com Google account');
+    expect(setup).not.toMatch(/admin(?:istrator)? password/i);
     expect(setup).not.toContain('Authorization: Bearer');
     expect(setup).not.toContain('test-only-token');
     expect(mcpServerUrl('http://localhost:3100/api/v1')).toBe('http://localhost:3100/mcp');
