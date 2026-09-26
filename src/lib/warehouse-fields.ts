@@ -15,7 +15,6 @@ export type WarehouseNumericField = {
 };
 
 export const WAREHOUSE_NUMERIC_FIELDS: readonly WarehouseNumericField[] = [
-  { field: 'offered_space_sqft', column: 'w."offeredSpaceSqft"', kind: 'area', maximum: 1e9, allowZero: false, minParam: 'offered_area_min_sqft', maxParam: 'offered_area_max_sqft' },
   { field: 'dock_count', column: 'w."numberOfDocks"', kind: 'count', maximum: 10000, allowZero: true, integer: true, minParam: 'docks_min', maxParam: 'docks_max' },
   { field: 'clear_height_ft', column: 'w."clearHeightFt"', kind: 'length', maximum: 1000, allowZero: false, minParam: 'clear_height_min_ft', maxParam: 'clear_height_max_ft' },
   { field: 'asking_rate_per_sqft', column: 'w."ratePerSqft"', kind: 'rate', maximum: 1e6, allowZero: false, minParam: 'min_rate', maxParam: 'max_rate' },
@@ -60,7 +59,7 @@ export const WAREHOUSE_SUMMARY_GROUPS = ['city', 'state', 'zone', 'type', 'statu
 export const WAREHOUSE_FILTER_CATALOG: readonly WarehouseFilterDefinition[] = [
   ...WAREHOUSE_CATEGORY_FIELDS.map(({ name, description }) => ({ name, type: 'string' as const, description })),
   ...WAREHOUSE_BOOLEAN_FIELDS.map(({ name }) => ({ name, type: 'string' as const, enum: ['true', 'false', 'unknown'], description: `${name}: true, false, or missing (unknown); false never includes missing values.` })),
-  ...(['area_min_sqft', 'area_max_sqft'] as const).map(name => ({ name, type: 'number' as const, exclusiveMinimum: 0, maximum: 1e9, description: 'Bound on one of the first 100 total-space entries in square feet, not the sum of the array. The same first-100 limit applies to returned entries.' })),
+  ...(['area_min_sqft', 'area_max_sqft', 'offered_area_min_sqft', 'offered_area_max_sqft'] as const).map(name => ({ name, type: 'number' as const, exclusiveMinimum: 0, maximum: 1e9, description: 'Bound on one of the first 100 offered-area options from totalSpaceSqft, not the sum of the array. offered_area_min_sqft/max_sqft are aliases for area_min_sqft/max_sqft; combined bounds apply to the same option. Results use total_space_sqft.' })),
   ...WAREHOUSE_NUMERIC_FIELDS.flatMap(field => [field.minParam, field.maxParam].map(name => ({
     name, type: field.integer ? 'integer' as const : 'number' as const,
     ...(field.allowZero ? { minimum: 0 } : { exclusiveMinimum: 0 }), maximum: field.maximum,

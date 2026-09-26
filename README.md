@@ -202,7 +202,7 @@ Start with `GET /api/v1/warehouses/filters?city=Bengaluru` when you need availab
 | Location and category | `city`, `state`, `zone`, `micromarket`, `type`, `availability`, `status`, `listing_type`, `flooring_type`, `land_type`, `pollution_zone`, `water_supply`, `suitable_for` |
 | Recorded flags | `verified`, `fire_noc`, `lift_access`: each accepts `true`, `false`, or `unknown` |
 | Total area | `area_min_sqft`, `area_max_sqft` |
-| Offered area | `offered_area_min_sqft`, `offered_area_max_sqft` |
+| Offered area aliases | `offered_area_min_sqft`, `offered_area_max_sqft` — same `totalSpaceSqft` options as `area_min_sqft`/`area_max_sqft`; never summed |
 | Asking rate | `min_rate`, `max_rate` |
 | Docks and washrooms | `docks_min`, `docks_max`, `washrooms_min`, `washrooms_max` |
 | Dimensions | `clear_height_min_ft`, `clear_height_max_ft`, `gate_width_min_ft`, `gate_width_max_ft`, `plinth_height_min_ft`, `plinth_height_max_ft`, `dock_apron_min_ft`, `dock_apron_max_ft`, `approach_road_min_ft`, `approach_road_max_ft` |

@@ -44,9 +44,9 @@ describe('warehouse candidate evidence', () => {
   });
 
   it('does not label exact measurements uncertain just because unrelated fields are unfilled', async () => {
-    const { client } = database([row({ dock_count: '04 docks', offered_space_sqft: '1,50,000 sft' })]);
+    const { client } = database([row({ dock_count: '04 docks' })]);
     const item = await getWarehouse(client, 18);
-    expect(item).toMatchObject({ dock_count: 4, offered_space_sqft: 150000, verification_required: false });
+    expect(item).toMatchObject({ dock_count: 4, total_space_sqft: [10000, 50000], verification_required: false });
   });
 
   it('never forwards raw JSON, source notes, contacts or unsafe array labels', async () => {
@@ -64,6 +64,28 @@ describe('warehouse candidate evidence', () => {
 });
 
 describe('warehouse query boundary', () => {
+  it('uses the same area array for legacy offered-area filter names and canonical filters', async () => {
+    const { client, query } = database([{ ...row(), offered_space_sqft: '99999' }]);
+    const canonical = await searchWarehouses(client, new URLSearchParams('area_min_sqft=20000&area_max_sqft=60000'));
+    const aliases = await searchWarehouses(client, new URLSearchParams('offered_area_min_sqft=20000&offered_area_max_sqft=60000'));
+    expect(query.mock.calls[1]).toEqual(query.mock.calls[0]);
+    expect(aliases.items).toEqual(canonical.items);
+    expect(aliases.items[0].total_space_sqft).toEqual([10000, 50000]);
+    expect(aliases.items[0]).not.toHaveProperty('offered_space_sqft');
+    expect(aliases.items[0].field_evidence).not.toHaveProperty('offered_space_sqft');
+    expect(query.mock.calls[0][0]).not.toContain('offeredSpaceSqft');
+  });
+
+  it('intersects mixed area aliases on one option and keeps missing areas unknown', async () => {
+    const { client, query } = database([{ ...row(), total_space_sqft: [], offered_space_sqft: '99999' }]);
+    const output = await searchWarehouses(client, new URLSearchParams(
+      'area_min_sqft=10000&offered_area_min_sqft=20000&area_max_sqft=60000&offered_area_max_sqft=50000&include_unknown=true',
+    ));
+    expect(query.mock.calls[0][1]).toEqual([20000, 50000, 11]);
+    expect(query.mock.calls[0][0]).toContain('unnest(w."totalSpaceSqft")');
+    expect(output.items[0]).toMatchObject({ total_space_sqft: [], verification_required: true });
+  });
+
   it('uses possible interval overlap and keeps categorical filters, visibility and pagination conjunctive', async () => {
     const { client, query } = database();
     const parameters = new URLSearchParams({ city: 'Bangalore', micromarket: "King's Road", docks_min: '4', docks_max: '6', verified: 'true', fire_noc: 'unknown', lift_access: 'false' });
@@ -76,8 +98,8 @@ describe('warehouse query boundary', () => {
     expect(where).toContain('w."wogVerified" IS TRUE');
     expect(where).toContain('wd."fireNocAvailable" IS NULL');
     expect(where).toContain('w."liftAccess" IS FALSE');
-    expect(where).toMatch(/n1\.kind IN \('exact', 'approximate', 'range'\) AND n1\.upper >= \$\d+ AND n1\.lower <= \$\d+/);
-    expect(where).not.toContain("OR n1.kind = 'unknown'");
+    expect(where).toMatch(/n0\.kind IN \('exact', 'approximate', 'range'\) AND n0\.upper >= \$\d+ AND n0\.lower <= \$\d+/);
+    expect(where).not.toContain("OR n0.kind = 'unknown'");
     expect(where).toContain('ORDER BY w.id ASC');
     expect(sql).not.toContain("King's Road");
     expect(values).toEqual(['Bangalore', "King's Road", 4, 6, 12, 11]);
@@ -88,8 +110,8 @@ describe('warehouse query boundary', () => {
     const { client, query } = database();
     await searchWarehouses(client, new URLSearchParams('docks_min=4&power_max_kva=20&match_mode=strict&include_unknown=true'));
     const sql = query.mock.calls[0][0];
-    expect(sql).toMatch(/\(n1\.kind = 'exact' AND n1\.upper >= \$1 OR n1\.kind = 'unknown'\)/);
-    expect(sql).toMatch(/\(n8\.kind = 'exact' AND n8\.lower <= \$2 OR n8\.kind = 'unknown'\)/);
+    expect(sql).toMatch(/\(n0\.kind = 'exact' AND n0\.upper >= \$1 OR n0\.kind = 'unknown'\)/);
+    expect(sql).toMatch(/\(n7\.kind = 'exact' AND n7\.lower <= \$2 OR n7\.kind = 'unknown'\)/);
   });
 
   it('does not sum spaces or turn city aliases into substring search', async () => {
@@ -122,7 +144,9 @@ describe('warehouse query boundary', () => {
 
   it.each([
     'docks_min=6&docks_max=4', 'power_min_kva=30&power_max_kva=20', 'gate_width_min_ft=40&gate_width_max_ft=20',
-    'offered_area_min_sqft=0', 'clear_height_min_ft=0', 'gate_width_min_ft=0', 'min_rate=0', 'docks_min=-1',
+    'offered_area_min_sqft=0', 'offered_area_min_sqft=50000&area_max_sqft=30000',
+    'area_min_sqft=50000&offered_area_max_sqft=30000', 'offered_area_min_sqft=5&offered_area_max_sqft=4',
+    'clear_height_min_ft=0', 'gate_width_min_ft=0', 'min_rate=0', 'docks_min=-1',
     'docks_max=1.5', 'washrooms_max=10001', 'power_max_kva=1000001', 'dock_apron_max_ft=1001',
     'docks_min=4&docks_min=5', 'match_mode=loose', 'include_unknown=1', 'verified=yes', 'fire_noc=false&fire_noc=unknown',
     'contactPerson=Raj', 'warehouseType=PEB', 'q=owner', 'city=call%209876543210', 'state=private@example.com',

@@ -60,9 +60,9 @@ describe('independent warehouse measurement uncertainty checks', () => {
   });
 
   it('accepts valid Indian grouping without accepting malformed comma placement', () => {
-    expect(parseWarehouseMeasurement('1,25,000 sqft', 'offered_space_sqft'))
+    expect(parseWarehouseMeasurement('1,25,000 /sqft', 'asking_rate_per_sqft'))
       .toMatchObject({ kind: 'exact', value: 125000 });
-    expect(parseWarehouseMeasurement('12,50 sqft', 'offered_space_sqft'))
+    expect(parseWarehouseMeasurement('12,50 /sqft', 'asking_rate_per_sqft'))
       .toMatchObject({ kind: 'unknown' });
   });
 
@@ -106,7 +106,7 @@ describe('independent source-evidence privacy checks', () => {
   });
 
   it('does not turn a phone-length scalar into a warehouse measurement', () => {
-    for (const field of ['dock_count', 'clear_height_ft', 'asking_rate_per_sqft', 'offered_space_sqft']) {
+    for (const field of ['dock_count', 'clear_height_ft', 'asking_rate_per_sqft']) {
       const evidence = parseWarehouseMeasurement('9876543210', field);
       expect(evidence).toMatchObject({ kind: 'unknown' });
       expect(evidence.source ?? null).toBeNull();

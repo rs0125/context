@@ -136,7 +136,7 @@ function warehouse(row: Row, constrainedFields: readonly string[] = []) {
     id: row.id as number,
     city: sanitizeLabel(row.city), state: sanitizeLabel(row.state), zone: sanitizeLabel(row.zone),
     warehouse_type: sanitizeLabel(row.warehouse_type), total_space_sqft: areas,
-    offered_space_sqft: exact('offered_space_sqft'), dock_count: exact('dock_count'),
+    dock_count: exact('dock_count'),
     clear_height_ft: exact('clear_height_ft'), asking_rate_per_sqft: exact('asking_rate_per_sqft'),
     gate_size_ft: exact('gate_size_ft'), plinth_height_ft: exact('plinth_height_ft'),
     dock_apron_length_ft: exact('dock_apron_length_ft'), approach_road_width_ft: exact('approach_road_width_ft'),
@@ -177,9 +177,13 @@ function warehouseFilters(query: URLSearchParams, catalog = WAREHOUSE_FILTER_CAT
     if (value) where.push(`${field.column} IS ${value === 'unknown' ? 'NULL' : value.toUpperCase()}`);
   }
   const constrainedFields: string[] = [];
-  const areaMin = numbers.area_min_sqft;
-  const areaMax = numbers.area_max_sqft;
-  if (areaMin !== undefined && areaMax !== undefined && areaMin > areaMax) invalid('area_min_sqft must not exceed area_max_sqft');
+  // Older offered_area query names are aliases for the same maintained array.
+  // Intersect all supplied bounds so one option must satisfy the whole range.
+  const areaMins = [numbers.area_min_sqft, numbers.offered_area_min_sqft].filter((value): value is number => value !== undefined);
+  const areaMaxes = [numbers.area_max_sqft, numbers.offered_area_max_sqft].filter((value): value is number => value !== undefined);
+  const areaMin = areaMins.length ? Math.max(...areaMins) : undefined;
+  const areaMax = areaMaxes.length ? Math.min(...areaMaxes) : undefined;
+  if (areaMin !== undefined && areaMax !== undefined && areaMin > areaMax) invalid('Area minimum must not exceed area maximum, including offered_area aliases');
   if (areaMin !== undefined || areaMax !== undefined) {
     constrainedFields.push('total_space_sqft');
     const validArea = 'area_ordinality <= 100 AND area_sqft > 0 AND area_sqft <= 1000000000';

@@ -1,9 +1,9 @@
 import { WAREHOUSE_NUMERIC_FIELDS } from './warehouse-fields';
 
 const SUMMARY_FIELDS = ['id', 'city', 'state', 'micromarkets', 'warehouse_type', 'total_space_sqft',
-  'offered_space_sqft', 'asking_rate_per_sqft', 'dock_count', 'clear_height_ft', 'availability', 'verified',
+  'asking_rate_per_sqft', 'dock_count', 'clear_height_ft', 'availability', 'verified',
   'created_at', 'updated_at', 'verification_required'] as const;
-const SUMMARY_EVIDENCE = new Set(['offered_space_sqft', 'asking_rate_per_sqft', 'dock_count', 'clear_height_ft']);
+const SUMMARY_EVIDENCE = new Set(['asking_rate_per_sqft', 'dock_count', 'clear_height_ft']);
 
 /** Projection happens after the API's permissions, privacy and evidence mapping.
  * Preserve every estimate/range that triggered verification, plus evidence for

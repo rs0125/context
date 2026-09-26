@@ -4,7 +4,7 @@ import { readEnv } from './env-utils.mjs';
 
 // Read only product specifications. Never select contact, address, note, media,
 // uploader, owner, or internal commercial fields, even for this local profile.
-const numericFields = ['offeredSpaceSqft', 'numberOfDocks', 'clearHeightFt', 'centreHeight',
+const numericFields = ['numberOfDocks', 'clearHeightFt', 'centreHeight',
   'ratePerSqft', 'gateSizeFt', 'plinthHeightFt', 'dockApronLengthFt', 'floorStrengthPerSqm',
   'washroom_count', 'builtup_area', 'carpet_area', 'liftLoadCapacity', 'totalFloors',
   'approachRoadWidth', 'powerKva'];

@@ -32,7 +32,7 @@ function queryCursor(query: URLSearchParams, id: number | string) {
 function warehouseRow(id: number) {
   return {
     id, city: 'Bengaluru', state: 'Karnataka', zone: 'North', warehouse_type: 'Industrial',
-    total_space_sqft: [40000], offered_space_sqft: '40000', asking_rate_per_sqft: '25',
+    total_space_sqft: [40000], asking_rate_per_sqft: '25',
     dock_count: '4', clear_height_ft: '35', verified: true,
     created_at: new Date('2026-01-01T00:00:00Z'),
   };
@@ -90,11 +90,12 @@ describe('warehouse reads', () => {
     }]);
     const output = await getWarehouse(client, 4);
     expect(output).toMatchObject({
-      id: 4, total_space_sqft: [40000], asking_rate_per_sqft: null, offered_space_sqft: null, dock_count: null,
+      id: 4, total_space_sqft: [40000], asking_rate_per_sqft: null, dock_count: null,
     });
     expect(JSON.stringify(output)).not.toMatch(/987654321|Private address|private\.example/);
     expect(output).not.toHaveProperty('contactNumber');
     expect(output).not.toHaveProperty('company');
+    expect(output).not.toHaveProperty('offered_space_sqft');
   });
 
   it('applies visibility and bound identifiers to detail reads', async () => {
