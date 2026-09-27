@@ -408,7 +408,7 @@ export function getOpenApiDocument() {
     openapi: "3.1.0",
     info: {
       title: "Wareongo Context API",
-      version: "0.5.0",
+      version: "0.6.0",
       description: "Read-only company knowledge, warehouse specifications, and permitted CRM opportunities. Employees see created or assigned leads; verified Twenty admins see all mirrored leads. Send an employee API key in the Authorization header. The service enforces employee permissions and field allowlists before returning data. Authenticated responses must not be cached. Authorised CRM narratives are returned as bounded text with detected phone numbers, emails and links masked; raw contact fields and media are not exposed. Start with GET /context or GET /context.md.",
     },
     servers: [{ url: "/api/v1" }],
@@ -430,14 +430,14 @@ export function getOpenApiDocument() {
       },
       "/analytics/ga4": {
         get: { operationId: "ga4Report", tags: ["Analytics"], summary: "Read a bounded GA4 report",
-          description: "Admin-only fixed report presets. Dates are inclusive in the GA4 property timezone; maximum 93 days. Default is the last 28 completed days. Rows can be paginated but are not a frozen snapshot. Preserve source_fetched_at, cache age and quality warnings. Event counts are not unique CRM leads, sequential conversion funnels or revenue. Grouped users are not additive; use overview for overall metrics.",
+          description: "Admin-only report presets with AND filters for entry path, device, country label and session channel/source. Traffic reports include engagement rates, engagement time per session/per active user and average session duration by default; seconds, fraction units and same-row calculations are explicit in columns. pages reports viewed paths and engagement per active user; landing_pages reports session entry paths and session timing. Dates are inclusive in the GA4 property timezone; maximum 93 days. Default is the last 28 completed days. overview supports compare_to=previous_period for adjacent equal-length aggregate comparisons. Preserve both periods' dates, source_fetched_at, cache age and quality warnings. Rows are not a frozen snapshot. Events/key events are not unique CRM leads, sequential conversion funnels or revenue. Grouped users are not additive; do not average row rates or durations for overall metrics.",
           parameters: analyticsQueryParameters(ga4ToolInput),
           responses: jsonResponses("Aggregate website metrics with source dates, quality and pagination.", false, z.toJSONSchema(analyticsReportOutput)),
         },
       },
       "/analytics/search-console": {
         get: { operationId: "searchConsoleReport", tags: ["Analytics"], summary: "Read Google organic search performance",
-          description: "Admin-only Search Console web-search reports. Dates use America/Los_Angeles. Finalized data can lag; data_state=all includes provisional data and is required for any range ending today, including this_month. Grouped top rows and anonymized queries are not a complete site total. Use group=summary for an aggregate and do not average CTR or position across rows. Filters are literal substrings. Page URLs are stripped of query strings and fragments and detected contacts are masked.",
+          description: "Admin-only Search Console web-search reports. Dates use America/Los_Angeles. Finalized data can lag; data_state=all includes provisional data and is required for any range ending today, including this_month. group=query_page preserves query/page pairs. Exact and substring query/page filters, query exclusion, device and ISO alpha-3 country filters combine with AND. Grouped top rows and query-filtered results omit unavailable/anonymized queries. Use group=summary for aggregates; compare_to=previous_period compares adjacent equal-length windows with the same filters. Do not sum grouped rows or average CTR/position. Returned page URLs omit queries, fragments and detected contacts.",
           parameters: analyticsQueryParameters(searchConsoleToolInput),
           responses: jsonResponses("Search performance, coverage limits, source clock and pagination.", false, z.toJSONSchema(analyticsReportOutput)),
         },

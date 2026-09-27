@@ -3,18 +3,21 @@ import { HttpError } from './errors';
 import { redactCrmText } from './crm-redaction';
 
 export const ANALYTICS_PERIODS = ['today', 'yesterday', 'last_7_days', 'last_28_days', 'this_month', 'last_month'] as const;
-export const GA4_REPORT_PRESETS = ['overview', 'daily', 'acquisition', 'landing_pages', 'devices', 'countries', 'events', 'warehouse_interest', 'lead_sources'] as const;
-export const SEARCH_CONSOLE_GROUPS = ['summary', 'date', 'query', 'page', 'country', 'device'] as const;
-const COMMON = ['period', 'date_from', 'date_to', 'limit', 'cursor'] as const;
-export const GA4_QUERY_PARAMETER_NAMES = ['report', 'event_name', ...COMMON] as const;
-export const SEARCH_CONSOLE_QUERY_PARAMETER_NAMES = ['group', 'query_contains', 'page_contains', 'data_state', ...COMMON] as const;
+export const GA4_REPORT_PRESETS = ['overview', 'daily', 'acquisition', 'landing_pages', 'pages', 'devices', 'countries', 'events', 'warehouse_interest', 'lead_sources'] as const;
+export const SEARCH_CONSOLE_GROUPS = ['summary', 'date', 'query', 'page', 'query_page', 'country', 'device'] as const;
+const COMMON = ['period', 'date_from', 'date_to', 'limit', 'cursor', 'compare_to', 'device', 'country'] as const;
+export const GA4_QUERY_PARAMETER_NAMES = ['report', 'event_name', 'landing_page_contains', 'channel', 'source', ...COMMON] as const;
+export const SEARCH_CONSOLE_QUERY_PARAMETER_NAMES = ['group', 'query_contains', 'query_equals', 'query_not_contains', 'page_contains', 'page_equals', 'data_state', ...COMMON] as const;
 export const ANALYTICS_MAX_ROWS = 500;
 const DAY = 86_400_000;
 export function invalidAnalyticsQuery(message: string): never { throw new HttpError(400, 'INVALID_QUERY', message); }
 export type AnalyticsPeriod = typeof ANALYTICS_PERIODS[number];
 type DateQuery = { period: AnalyticsPeriod | null; date_from: string | null; date_to: string | null; limit: number; cursor: string | null };
-export type Ga4Query = DateQuery & { report: typeof GA4_REPORT_PRESETS[number]; event_name: string | null };
-export type SearchConsoleQuery = DateQuery & { group: typeof SEARCH_CONSOLE_GROUPS[number]; query_contains: string | null; page_contains: string | null; data_state: 'final' | 'all' };
+type SegmentQuery = { compare_to: 'previous_period' | null; device: 'desktop' | 'mobile' | 'tablet' | null; country: string | null };
+export type Ga4Query = DateQuery & SegmentQuery & { report: typeof GA4_REPORT_PRESETS[number]; event_name: string | null;
+  landing_page_contains: string | null; channel: string | null; source: string | null };
+export type SearchConsoleQuery = DateQuery & SegmentQuery & { group: typeof SEARCH_CONSOLE_GROUPS[number]; query_contains: string | null;
+  query_equals: string | null; query_not_contains: string | null; page_contains: string | null; page_equals: string | null; data_state: 'final' | 'all' };
 
 function parameters(query: URLSearchParams, allowed: readonly string[]) {
   if (query.toString().length > 4096) invalidAnalyticsQuery('Analytics query is too long.');
@@ -60,7 +63,19 @@ export function validateGa4Query(query: URLSearchParams): Ga4Query {
   if (event !== null && (!['events', 'warehouse_interest'].includes(report) || !/^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(event)
     || /\d{7}/.test(event))) invalidAnalyticsQuery('event_name is a literal GA event name, available only for events and warehouse_interest.');
   if (report === 'overview' && base.cursor) invalidAnalyticsQuery('overview has one aggregate row and does not support cursors.');
-  return { ...base, report, event_name: event };
+  const compare_to = comparison(query, report === 'overview');
+  return { ...base, report, event_name: event, compare_to, device: device(query), country: literal(query, 'country'),
+    landing_page_contains: literal(query, 'landing_page_contains'), channel: literal(query, 'channel'), source: literal(query, 'source') };
+}
+function comparison(query: URLSearchParams, aggregate: boolean): SegmentQuery['compare_to'] {
+  const value = query.get('compare_to');
+  if (value === null) return null;
+  if (!aggregate) invalidAnalyticsQuery('compare_to is available only for GA4 overview or Search Console summary.');
+  return enumValue(value, ['previous_period'] as const, 'compare_to');
+}
+function device(query: URLSearchParams): SegmentQuery['device'] {
+  const value = query.get('device');
+  return value === null ? null : enumValue(value, ['desktop', 'mobile', 'tablet'] as const, 'device');
 }
 function literal(query: URLSearchParams, name: string): string | null {
   const value = query.get(name);
@@ -69,11 +84,38 @@ function literal(query: URLSearchParams, name: string): string | null {
   for (let i = 0; i < 3; i++) {
     try { const next = decodeURIComponent(decoded); if (next === decoded) break; decoded = next; } catch { break; }
   }
-  const redacted = redactCrmText(decoded, { maxCharacters: 120 });
+  // Referral hostnames are useful source labels, while contacts and full URLs remain excluded.
+  const inspected = name === 'source' && /^(?:[a-z0-9-]+\.)+[a-z]{2,63}$/i.test(decoded) ? decoded.replaceAll('.', ' ') : decoded;
+  const redacted = redactCrmText(inspected, { maxCharacters: 120 });
   if (!value.trim() || value.length > 120 || /[\x00-\x1f\x7f\p{Cf}]/u.test(value)
     || redacted.redacted || redacted.truncated || redacted.state === 'unsupported') invalidAnalyticsQuery(`${name} must be a short literal without contact details or URLs.`);
-  if (name === 'page_contains' && /[?#@]/.test(decoded)) invalidAnalyticsQuery('page_contains must be a path fragment without query parameters, credentials or fragments.');
+  if (['page_contains', 'landing_page_contains'].includes(name) && /[?#@]/.test(decoded)) invalidAnalyticsQuery(`${name} must be a path fragment without query parameters, credentials or fragments.`);
   return value.trim();
+}
+function pageEquals(query: URLSearchParams): string | null {
+  const value = query.get('page_equals');
+  if (value === null) return null;
+  const invalid = () => invalidAnalyticsQuery('page_equals must be a public HTTP(S) URL without contacts, credentials, query parameters or fragments.');
+  if (!/^https?:\/\//.test(value) || value.length > 512 || /[?#\s\\\p{Cf}]/u.test(value)) return invalid();
+  try {
+    const url = new URL(value);
+    if (url.username || url.password || url.search || url.hash || url.port) return invalid();
+    let path = url.pathname;
+    for (let i = 0; i < 3; i++) { const next = decodeURIComponent(path); if (next === path) break; path = next; }
+    const inspected = `${url.hostname.replaceAll('.', ' ')} ${path}`.normalize('NFKC');
+    const redacted = redactCrmText(inspected, { maxCharacters: 512 });
+    if (/[?#@\\\x00-\x1f\x7f\p{Cf}]/u.test(path) || redacted.redacted || redacted.truncated || redacted.state === 'unsupported') return invalid();
+    return url.href;
+  } catch { return invalid(); }
+}
+/** Compare parsed hosts/origins, never substring-match a URL against a property. */
+export function validateSearchConsolePageScope(page: string | null, site: string) {
+  if (page === null) return;
+  const url = new URL(page);
+  const inScope = site.startsWith('sc-domain:')
+    ? url.hostname === site.slice(10) || url.hostname.endsWith(`.${site.slice(10)}`)
+    : (() => { const property = new URL(site); return url.origin === property.origin && url.pathname.startsWith(property.pathname); })();
+  if (!inScope) invalidAnalyticsQuery('page_equals must belong to the configured Search Console property.');
 }
 export function validateSearchConsoleQuery(query: URLSearchParams): SearchConsoleQuery {
   parameters(query, SEARCH_CONSOLE_QUERY_PARAMETER_NAMES);
@@ -82,7 +124,13 @@ export function validateSearchConsoleQuery(query: URLSearchParams): SearchConsol
   const state = enumValue(query.get('data_state') ?? 'final', ['final', 'all'] as const, 'data_state');
   if (group === 'summary' && base.cursor) invalidAnalyticsQuery('summary has one aggregate row and does not support cursors.');
   if (base.period === 'today' && state !== 'all') invalidAnalyticsQuery('For today, use data_state=all; today is not finalized.');
-  return { ...base, group, data_state: state, query_contains: literal(query, 'query_contains'), page_contains: literal(query, 'page_contains') };
+  if (query.has('query_equals') && query.has('query_contains')) invalidAnalyticsQuery('Use query_equals or query_contains, not both.');
+  if (query.has('page_equals') && query.has('page_contains')) invalidAnalyticsQuery('Use page_equals or page_contains, not both.');
+  const country = query.get('country');
+  if (country !== null && !/^[A-Za-z]{3}$/.test(country)) invalidAnalyticsQuery('Search Console country must be a three-letter ISO country code, such as ind.');
+  return { ...base, group, data_state: state, compare_to: comparison(query, group === 'summary'), device: device(query), country: country?.toLowerCase() ?? null,
+    query_contains: literal(query, 'query_contains'), query_equals: literal(query, 'query_equals'), query_not_contains: literal(query, 'query_not_contains'),
+    page_contains: literal(query, 'page_contains'), page_equals: pageEquals(query) };
 }
 export function analyticsLocalDate(timezone: string, now = new Date()): string {
   try {

@@ -43,15 +43,27 @@ For another MCP client, its requested OAuth scopes must include `analytics:read`
 
 | MCP tool | REST endpoint | Purpose |
 | --- | --- | --- |
-| `analytics_capabilities` | `GET /api/v1/analytics/capabilities` | Discover supported reports and available custom dimensions. |
-| `ga4_report` | `GET /api/v1/analytics/ga4` | Traffic, acquisition, audience and recorded event reports. |
+| `analytics_capabilities` | `GET /api/v1/analytics/capabilities` | Discover reports, returned metrics, metric definitions and available custom dimensions. |
+| `ga4_report` | `GET /api/v1/analytics/ga4` | Traffic, engagement, acquisition, audience and recorded event reports. |
 | `search_console_report` | `GET /api/v1/analytics/search-console` | Google organic Search clicks, impressions, CTR and position. |
 
 All REST requests require the employee bearer key. The server uses its service account only for upstream Google reads. The analytics console addition displays permission status; it is not a separate reporting dashboard.
 
-GA4 `report` presets are `overview` (default), `daily`, `acquisition`, `landing_pages`, `devices`, `countries`, `events`, `warehouse_interest`, and `lead_sources`. `event_name` is an optional exact event name, up to 80 characters, for `events` or `warehouse_interest`. Warehouse interest defaults to `view_listing`; lead sources use recorded `generate_lead` events. Custom-dimension reports require those dimensions to be available in the configured property; check capabilities before assuming they exist.
+GA4 `report` presets are `overview` (default), `daily`, `acquisition`, `landing_pages`, `pages`, `devices`, `countries`, `events`, `warehouse_interest`, and `lead_sources`. `landing_pages` describes the entry path of a session; `pages` ranks viewed paths by page views. `event_name` is an optional exact event name, up to 80 characters, for `events` or `warehouse_interest`. Warehouse interest defaults to `view_listing`; lead sources use recorded `generate_lead` events. Custom-dimension reports require those dimensions to be available in the configured property; check capabilities before assuming they exist.
 
-Search Console `group` values are `summary` (default), `date`, `query`, `page`, `country`, and `device`. Optional `query_contains` and `page_contains` are literal substring filters of up to 120 characters, not regular expressions. Use a path fragment for `page_contains`, without a URL query string or fragment. Contact-bearing filters are rejected.
+GA4 filters combine with AND and are case-sensitive: `landing_page_contains` is a literal entry-path fragment; `device` is `desktop`, `mobile`, or `tablet`; `country` is an exact country label such as `India`; `channel` is an exact session channel label such as `Organic Search`; and `source` is an exact session source such as `google`. Country, channel and source labels are limited to 120 characters. Acquisition reports show the combined source/medium, but the source filter accepts the source alone. Entry-path and acquisition filters describe session context; they do not isolate only events occurring on that page or establish a person's original acquisition source.
+
+Search Console `group` values are `summary` (default), `date`, `query`, `page`, `query_page`, `country`, and `device`. `query_page` returns search terms together with their pages. Supported filters combine with AND:
+
+| Filter | Meaning |
+| --- | --- |
+| `query_contains` / `query_equals` | Literal query substring / exact search query, up to 120 characters. Use one of these. |
+| `query_not_contains` | Exclude queries containing a literal substring, for example a brand name; up to 120 characters. |
+| `page_contains` / `page_equals` | Path substring up to 120 characters / exact full public HTTP(S) URL up to 512 characters. Use one of these. |
+| `device` | `desktop`, `mobile`, or `tablet`. |
+| `country` | Three-letter ISO 3166-1 alpha-3 code, such as `ind` for India; normalized to lowercase. This differs from GA4 country labels. |
+
+Filters are literal, not regular expressions. Search Console substring filters ignore case; exact queries and URL paths are case-sensitive. Contact-bearing filters are rejected. Page filters exclude URL queries, fragments and credentials. `page_equals` must belong to the configured Search Console property; it cannot select another property. Query filters exclude anonymized queries, and page filtering can change Google's aggregation basis; inspect `quality.aggregation_type`.
 
 Example tool arguments, without credentials:
 
@@ -63,6 +75,36 @@ Example tool arguments, without credentials:
 {"group":"query","period":"last_month","data_state":"final","limit":10}
 ```
 
+```json
+{"report":"overview","period":"last_28_days","channel":"Organic Search","device":"mobile","compare_to":"previous_period"}
+```
+
+```json
+{"group":"query_page","period":"last_28_days","page_contains":"/warehouses/bengaluru","query_not_contains":"wareongo","country":"ind","limit":10}
+```
+
+## GA4 engagement and timing
+
+`overview`, `daily`, `acquisition`, `landing_pages`, `devices` and `countries` include engagement and timing by default. Use the usual report/date/filter arguments; no metric selector is needed. `analytics_capabilities.ga4.reports[].metrics` lists each report's returned metrics, and `ga4.metric_definitions` describes the added metrics and calculations. Report columns carry the same definitions and, for computed values, a `calculation` formula.
+
+These six reports request ten native GA4 metrics: `activeUsers`, `totalUsers`, `sessions`, `engagedSessions`, `screenPageViews`, `eventCount`, `keyEvents`, `engagementRate`, `userEngagementDuration` and `averageSessionDuration`. Engagement rate is a fraction; total engagement duration and average session duration are seconds. Total engagement duration measures recorded foreground engagement across users, whereas average session duration is GA4's distinct session-duration metric. [Google metric definitions](https://developers.google.com/analytics/devguides/reporting/data/v1/api-schema)
+
+The server also returns five calculations from the same source row:
+
+| Returned metric | Calculation | Unit |
+| --- | --- | --- |
+| `averageEngagementTimePerSession` | `userEngagementDuration / sessions` | seconds |
+| `averageEngagementTimePerActiveUser` | `userEngagementDuration / activeUsers` | seconds |
+| `bounceRate` | `1 - engagementRate` | fraction |
+| `screenPageViewsPerSession` | `screenPageViews / sessions` | views per session |
+| `eventsPerSession` | `eventCount / sessions` | events per session |
+
+The two engagement-time averages use different denominators and should be named explicitly. They follow Google's [engagement overview definitions](https://support.google.com/analytics/answer/13391283?hl=en). Calculations never combine rows or fetch a separate denominator; a missing or zero denominator makes a ratio unavailable. Missing, restricted or invalid source values are not replaced with zero. For example, 4,800 engagement seconds across 120 sessions and 80 active users means 40 seconds per session and 60 seconds per active user; neither is the total engagement time or average session duration.
+
+`pages` includes total engagement seconds and average engagement seconds per active user alongside its existing views, users, events and key events. This describes activity associated with each viewed path. It does not add session-duration metrics or label engagement per active user as time per page view. Use `landing_pages` for session metrics by entry path, or filtered `overview` for an aggregate. `events`, `warehouse_interest` and `lead_sources` keep their event-count reports; filtering to an event would not establish overall session engagement.
+
+There are still intentional coverage limits: `newUsers`, revenue, ad costs, funnel reports, retention/cohort analysis and broader attribution dimensions are not exposed. Returned measurements reflect what the property collected and Google's processing, configuration and privacy limits; the connector cannot reconstruct missing tracking. The available engagement metrics do not establish CRM conversions or verified commercial outcomes.
+
 ## Dates, pages and freshness
 
 Use one `period`, or both inclusive `date_from` and `date_to` in `YYYY-MM-DD` format. Explicit ranges can span up to 93 days and cannot end in the future. Supported periods are `today`, `yesterday`, `last_7_days`, `last_28_days`, `this_month`, and `last_month`. The default `last_28_days`, like `last_7_days`, covers completed days and excludes today. `this_month` includes today.
@@ -71,14 +113,28 @@ GA4 uses its property's timezone; Search Console uses `America/Los_Angeles`. The
 
 `limit` is 1–25, default 10. Follow `nextCursor` unchanged with the same report, filters and resolved dates. Each report exposes at most 500 rows, and pages are not a frozen snapshot. Use the report's coverage and truncation fields; a returned page is not a full total. GA4 overview and Search Console summary return aggregate rows rather than paginated groups.
 
+Daily reports are chronological and still paginated. A 28-day trend needs all returned pages, even if the first page contains only ten dates. Missing dates are not fabricated as zero activity. Grouped Search Console paging cannot recover queries that Google omits.
+
+## Period comparisons
+
+Use `compare_to=previous_period` only with GA4 `report=overview` or Search Console `group=summary`, without a cursor. It compares the selected dates with the immediately preceding equal number of calendar days using the same filters. A 28-day window compares with the prior 28 days; a partial month compares with the preceding same-length window, not necessarily the previous calendar month or matched weekdays. Each window stays within the normal 93-day bound.
+
+The current report remains the top-level result. `comparison.baseline` preserves the previous period's resolved dates, source fetch time, cache age and quality; `comparison.metrics` contains current and previous values plus changes. These are independent source reads, not a frozen snapshot. If either read fails, the comparison fails rather than substituting zero or returning a misleading partial comparison.
+
+`absolute_change` is current minus previous. Counts, durations and per-session measurements include `relative_change_percent` when the previous value is nonzero. Engagement rate, bounce rate and CTR use `percentage_point_change`, so a change from `0.04` to `0.05` is one percentage point. Average position uses only the absolute change; a lower numeric position is not evidence that every search query improved. A zero baseline has no defined percentage change. Missing rows or null metrics remain unavailable, with `status=missing_data`; neither is converted to zero. Read the quality warnings for both periods before interpreting a difference.
+
 Reports can use a bounded five-minute in-memory cache. `source_fetched_at` records the Google fetch; `served_at` records this response. `cache.hit`, `cache.age_seconds`, and `cache.max_age_seconds` describe reuse. A later served timestamp does not make the underlying Google data newer. There is no stale-cache fallback after source errors.
 
 ## Interpret the results carefully
 
 - GA4 event counts, key events and form activity are recorded website signals, not unique CRM leads, completed deals, revenue, or proof of a sequential conversion funnel. Warehouse interest is recorded browsing activity, not verified demand. These reports do not join analytics users or events to CRM identities.
 - Search Console clicks and GA4 sessions measure different things. Grouped Search Console results are top rows and may omit anonymized or unavailable queries. Do not treat their sum as a complete property total; use the unfiltered summary for an aggregate.
-- Read each metric's `columns.unit`. Search Console CTR is a fraction (`0.05` means 5%), and position is an average search position. Do not sum users across groups or average row-level CTR or position. Preserve the returned metric meanings, quality flags and coverage limits.
+- Read each metric's `columns.unit`, `definition` and `calculation`. Rates are fractions (`0.05` means 5%); engagement and session times are seconds; Search Console position is an average search position. Do not sum users across groups or average row-level rates, durations or position. Request an aggregate report for the overall metric. Preserve the returned metric meanings, quality flags and coverage limits.
 - Exposed labels and paths are sanitized. Masked values can collide; do not infer hidden text or merge masked rows as though they were one original label.
 - Failed or denied reads mean unavailable data, not zero traffic or zero leads.
 
-An engine permission denial requires checking active admin status and the employee key or OAuth scopes. `ANALYTICS_CONFIGURATION` means source environment setup is incomplete or invalid. `ANALYTICS_SOURCE_DENIED` means Google denied the read; check API enablement and property access. Rate-limit, timeout, or invalid-response errors require a later retry or source investigation, not invented results. An unavailable custom report can return `ANALYTICS_REPORT_UNAVAILABLE`; use capabilities to choose a supported report.
+An engine permission denial requires checking active admin status and the employee key or OAuth scopes. `ANALYTICS_CONFIGURATION` means source environment setup is incomplete or invalid. `ANALYTICS_SOURCE_DENIED` means Google denied the read; check API enablement and property access. An unavailable custom report can return `ANALYTICS_REPORT_UNAVAILABLE`; use capabilities to choose a supported report.
+
+MCP tool failures returned by the API boundary include `error.recovery` with `retryable`, a stable `action`, and short guidance. Transient timeout, quota, busy and unavailable errors permit a later retry and retain `retry_after_seconds` when supplied. Configuration, access, unsupported-report and invalid-query errors require correcting the cause; they omit the generic retry delay. Unverified or inconsistent source responses require investigation. None establishes zero activity. Tool citations retain safe report/date parameters while omitting free-text filters and page URLs; `meta.requestId` identifies the returned evidence.
+
+See [Analytics MCP design review](analytics-mcp-review.md) for the research, scope decisions and natural-language evaluation cases.

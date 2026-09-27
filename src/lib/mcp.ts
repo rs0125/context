@@ -21,6 +21,19 @@ type Dependencies = {
   read: typeof handleApiRequest;
 };
 const annotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+const analyticsCitationFields = new Set(['report', 'group', 'period', 'date_from', 'date_to', 'limit', 'data_state', 'compare_to', 'device']);
+function analyticsRecovery(code: unknown, status: number) {
+  const recovery = (retryable: boolean, action: string, guidance: string) => ({ retryable, action, guidance });
+  if (code === 'ANALYTICS_CONFIGURATION') return recovery(false, 'check_source_configuration', 'An administrator must check the server analytics configuration. Do not repeat this request unchanged.');
+  if (code === 'ANALYTICS_SOURCE_DENIED') return recovery(false, 'check_google_access', 'An administrator must check Google API enablement and service-account access to the configured property.');
+  if (code === 'ANALYTICS_REPORT_UNAVAILABLE' || code === 'ANALYTICS_SOURCE_QUERY_UNAVAILABLE') return recovery(false, 'check_capabilities', 'Read analytics_capabilities and choose an available report or have an administrator check its custom dimensions.');
+  if (code === 'INVALID_QUERY') return recovery(false, 'correct_query', 'Correct the parameters using the tool schema and error message. Use either a period or paired dates; keep cursors with the same report and filters.');
+  if (status === 401 || status === 403) return recovery(false, 'check_engine_access', 'Check active administrator status and the analytics:read scope on the employee key or OAuth connection.');
+  if (['ANALYTICS_SOURCE_TIMEOUT', 'ANALYTICS_SOURCE_UNAVAILABLE', 'ANALYTICS_BUSY', 'ANALYTICS_SOURCE_RATE_LIMITED'].includes(String(code)) || status === 429) {
+    return recovery(true, 'retry_later', 'Retry after the indicated delay. If the source remains unavailable, report that limitation; failed reads are not zero activity.');
+  }
+  return recovery(false, 'investigate_source_response', 'No verified report is available. Have an administrator investigate the source response before relying on these metrics.');
+}
 const empty = z.object({}).strict();
 const label = z.string().trim().min(1).max(80);
 const pageSize = z.number().int().min(1).max(25).describe('Maximum records per page; default 10, maximum 25. Follow nextCursor for more.').optional();
@@ -145,14 +158,19 @@ function registerTools(server: McpServer, key: KeyRegistration, request: Request
     const citation = new URL(url);
     citation.searchParams.delete('cursor');
     if (path[0] === 'analytics') {
-      // Filters may contain contact-like text supplied by a caller. Keep those
-      // out of citations as well as the masked source labels in the response.
-      citation.searchParams.delete('query_contains');
-      citation.searchParams.delete('page_contains');
+      // Cite only bounded enums and dates. Arbitrary labels, exact queries and
+      // URLs may be sensitive even when validation rejects the report.
+      for (const name of [...citation.searchParams.keys()]) if (!analyticsCitationFields.has(name)) citation.searchParams.delete(name);
+      if (!response.ok && body.error && typeof body.error === 'object' && !Array.isArray(body.error)) {
+        const error = body.error as Record<string, unknown>;
+        body.error = { ...error, recovery: analyticsRecovery(error.code, response.status) };
+      }
     }
     const result = { source_path: citation.pathname + citation.search, status: response.status, ...body as Record<string, unknown> };
-    if (!response.ok && response.headers.has('retry-after')) {
-      Object.assign(result, { retry_after_seconds: Number(response.headers.get('retry-after')) });
+    const recovery = (body.error as { recovery?: { retryable: boolean } } | undefined)?.recovery;
+    if (!response.ok && recovery?.retryable !== false && response.headers.has('retry-after')) {
+      const seconds = Number(response.headers.get('retry-after'));
+      if (Number.isFinite(seconds) && seconds >= 0) Object.assign(result, { retry_after_seconds: seconds });
     }
     return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result, ...(!response.ok ? { isError: true } : {}) };
   };
@@ -160,13 +178,13 @@ function registerTools(server: McpServer, key: KeyRegistration, request: Request
   server.registerTool('get_context', { title: 'Available Wareongo context', description: 'Read identity, capabilities and the India server clock when needed. Does not load the wiki or count records; use search_knowledge for guidance and summary tools for totals.', inputSchema: empty, outputSchema: output(z.object({ employee_id: z.number().int(), scopes: z.array(z.string()), read_only: z.literal(true), knowledge_discovery: z.object({ permitted: z.boolean(), status: z.enum(['not_checked', 'not_permitted']), index_path: z.string(), search_path: z.string() }), server_clock: clock }).passthrough()), annotations }, () => call(['context']));
   if (allowed('analytics:read')) {
     server.registerTool('analytics_capabilities', { title: 'Discover website analytics',
-      description: 'Admin-only: discover available GA4 report presets, registered custom fields and Search Console capabilities. Check before warehouse-interest or lead-source reports; missing custom dimensions are unavailable, not zero activity. Configuration health is reported separately for each source. Does not grant broader property access.',
+      description: 'Admin-only: discover available GA4 reports, their returned metrics, metric definitions/calculations, registered custom fields and Search Console capabilities. Engagement rates and timing are included in traffic reports by default. Check before warehouse-interest or lead-source reports; missing custom dimensions are unavailable, not zero activity. Configuration health is separate for each source. Does not grant broader property access.',
       inputSchema: empty, outputSchema: output(analyticsCapabilitiesOutput), annotations }, () => call(['analytics', 'capabilities']));
     server.registerTool('ga4_report', { title: 'Report website traffic and events',
-      description: 'Admin-only aggregate website analytics. For "traffic this month" use report=overview, period=this_month; "where did visitors come from" use acquisition; "submitted enquiry events" use events, event_name=generate_lead. Read resolved dates, source timezone, freshness and quality warnings. Use overview for overall metrics; grouped pages and event counts do not establish unique leads, sequential funnels, CRM conversions or revenue. Follow nextCursor unchanged for more rows.',
+      description: 'Admin-only GA4 traffic, engagement and recorded events. For "engagement rate and average engagement/session time" use overview; it includes rates, average engagement seconds per session/per active user and average session duration. For "traffic change over four weeks" use overview, last_28_days, compare_to=previous_period; "where visitors came from" use acquisition; "most viewed pages" use pages; "submitted enquiry events" use events, event_name=generate_lead. Filter by entry path, device, country label, channel or source using AND. Use daily for a chronological trend and paginate for the whole range. Read units, calculations, source dates, freshness and quality; grouped averages are not overall averages. Events/key events are not unique CRM leads, sequential funnels or revenue.',
       inputSchema: ga4ToolInput, outputSchema: output(analyticsReportOutput), annotations }, args => call(['analytics', 'ga4'], args));
     server.registerTool('search_console_report', { title: 'Report Google Search performance',
-      description: 'Admin-only organic Google Search clicks, impressions, CTR and average position. Use group=summary for aggregate performance, query for search terms, page for pages or date for a trend. Dates use Pacific time; finalized data can lag and all may include provisional dates. Query/page rows are incomplete top results and anonymized queries are omitted. Never sum grouped rows as site totals or average CTR/position yourself. Follow nextCursor without changing filters.',
+      description: 'Admin-only Google organic web Search clicks, impressions, CTR and average position. Use summary with compare_to=previous_period for overall changes; query_page for search terms and their pages; date for a chronological trend. For searches reaching a particular page, filter page_equals with its full public URL and group=query. Query, page, device and country-code filters combine with AND. Dates use Pacific time; ranges ending today require data_state=all and may be provisional. Grouped top rows omit anonymized/unavailable queries: never sum them as site totals or average CTR/position. Follow nextCursor unchanged to inspect more rows; pagination cannot recover all source omissions.',
       inputSchema: searchConsoleToolInput, outputSchema: output(analyticsReportOutput), annotations }, args => call(['analytics', 'search-console'], args));
   }
   if (allowed('knowledge:read')) {
@@ -238,7 +256,7 @@ export async function handleMcpRequest(request: Request, overrides: Partial<Depe
     if (request.method === 'GET') throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Use MCP over HTTP POST.');
     const body = await boundedBody(request);
     const handler = createMcpHandler(server => registerTools(server, key, request, overrides.read ?? handleApiRequest), {
-      serverInfo: { name: 'wareongo-context', version: '0.5.0' }, instructions: `${MCP_INSTRUCTIONS} ${ANALYTICS_INSTRUCTIONS}`,
+      serverInfo: { name: 'wareongo-context', version: '0.6.0' }, instructions: `${MCP_INSTRUCTIONS} ${ANALYTICS_INSTRUCTIONS}`,
       maxSubscriptions: 0, verboseLogs: false,
     });
     const response = await handler(new Request(request.url, { method: 'POST', headers: request.headers, body, signal: request.signal }));
