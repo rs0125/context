@@ -43,15 +43,15 @@ For another MCP client, its requested OAuth scopes must include `analytics:read`
 
 | MCP tool | REST endpoint | Purpose |
 | --- | --- | --- |
-| `analytics_capabilities` | `GET /api/v1/analytics/capabilities` | Discover reports, returned metrics, metric definitions and available custom dimensions. |
-| `ga4_report` | `GET /api/v1/analytics/ga4` | Traffic, engagement, acquisition, audience and recorded event reports. |
+| `analytics_capabilities` | `GET /api/v1/analytics/capabilities` | Discover reports, returned metrics, metric definitions, available custom dimensions and event interpretation. |
+| `ga4_report` | `GET /api/v1/analytics/ga4` | Traffic, engagement, acquisition, audience, recorded first visits and form/event reports. |
 | `search_console_report` | `GET /api/v1/analytics/search-console` | Google organic Search clicks, impressions, CTR and position. |
 
 All REST requests require the employee bearer key. The server uses its service account only for upstream Google reads. The analytics console addition displays permission status; it is not a separate reporting dashboard.
 
-GA4 `report` presets are `overview` (default), `daily`, `acquisition`, `landing_pages`, `pages`, `devices`, `countries`, `events`, `warehouse_interest`, and `lead_sources`. `landing_pages` describes the entry path of a session; `pages` ranks viewed paths by page views. `event_name` is an optional exact event name, up to 80 characters, for `events` or `warehouse_interest`. Warehouse interest defaults to `view_listing`; lead sources use recorded `generate_lead` events. Custom-dimension reports require those dimensions to be available in the configured property; check capabilities before assuming they exist.
+GA4 `report` presets are `overview` (default), `daily`, `acquisition`, `landing_pages`, `pages`, `devices`, `countries`, `events`, `first_visits`, `form_submissions`, `warehouse_interest`, and `lead_sources`. `landing_pages` describes the entry path of a session; `pages` ranks viewed paths by page views. `event_name` is an optional exact event name, up to 80 characters, for `events` or `warehouse_interest`; `form_submissions` accepts only `form_submit` or `generate_lead`. Warehouse interest defaults to `view_listing`; lead sources use recorded `generate_lead` events. Custom-dimension reports require those dimensions to be available in the configured property; check capabilities before assuming they exist.
 
-GA4 filters combine with AND and are case-sensitive: `landing_page_contains` is a literal entry-path fragment; `device` is `desktop`, `mobile`, or `tablet`; `country` is an exact country label such as `India`; `channel` is an exact session channel label such as `Organic Search`; and `source` is an exact session source such as `google`. Country, channel and source labels are limited to 120 characters. Acquisition reports show the combined source/medium, but the source filter accepts the source alone. Entry-path and acquisition filters describe session context; they do not isolate only events occurring on that page or establish a person's original acquisition source.
+GA4 filters combine with AND and are case-sensitive: `landing_page_contains` is a literal entry-path fragment; `page_path_contains`, available only for `pages`, `events` and `form_submissions`, filters the recorded event's built-in `pagePath`; `device` is `desktop`, `mobile`, or `tablet`; `country` is an exact country label such as `India`; `channel` is an exact session channel label such as `Organic Search`; and `source` is an exact session source such as `google`. Path fragments, country, channel and source labels are limited to 120 characters. Page fragments exclude query strings, fragments, credentials and contact details. Acquisition reports show the combined source/medium, but the source filter accepts the source alone. Entry-path and acquisition filters describe session context; they do not isolate only events occurring on that page or establish a person's original acquisition source. Supplying both path filters requires both the session entry path and recorded event path to match their respective fragments.
 
 Search Console `group` values are `summary` (default), `date`, `query`, `page`, `query_page`, `country`, and `device`. `query_page` returns search terms together with their pages. Supported filters combine with AND:
 
@@ -80,6 +80,14 @@ Example tool arguments, without credentials:
 ```
 
 ```json
+{"report":"first_visits","period":"last_28_days","landing_page_contains":"/listings","limit":10}
+```
+
+```json
+{"report":"form_submissions","period":"last_month","event_name":"generate_lead","page_path_contains":"/request-warehouse","limit":10}
+```
+
+```json
 {"group":"query_page","period":"last_28_days","page_contains":"/warehouses/bengaluru","query_not_contains":"wareongo","country":"ind","limit":10}
 ```
 
@@ -101,9 +109,35 @@ The server also returns five calculations from the same source row:
 
 The two engagement-time averages use different denominators and should be named explicitly. They follow Google's [engagement overview definitions](https://support.google.com/analytics/answer/13391283?hl=en). Calculations never combine rows or fetch a separate denominator; a missing or zero denominator makes a ratio unavailable. Missing, restricted or invalid source values are not replaced with zero. For example, 4,800 engagement seconds across 120 sessions and 80 active users means 40 seconds per session and 60 seconds per active user; neither is the total engagement time or average session duration.
 
-`pages` includes total engagement seconds and average engagement seconds per active user alongside its existing views, users, events and key events. This describes activity associated with each viewed path. It does not add session-duration metrics or label engagement per active user as time per page view. Use `landing_pages` for session metrics by entry path, or filtered `overview` for an aggregate. `events`, `warehouse_interest` and `lead_sources` keep their event-count reports; filtering to an event would not establish overall session engagement.
+`pages` includes total engagement seconds and average engagement seconds per active user alongside its existing views, users, events and key events. This describes activity associated with each viewed path. It does not add session-duration metrics or label engagement per active user as time per page view. Use `landing_pages` for session metrics by entry path, or filtered `overview` for an aggregate. `events`, `first_visits`, `form_submissions`, `warehouse_interest` and `lead_sources` return event-count reports; filtering to an event would not establish overall session engagement.
 
 There are still intentional coverage limits: `newUsers`, revenue, ad costs, funnel reports, retention/cohort analysis and broader attribution dimensions are not exposed. Returned measurements reflect what the property collected and Google's processing, configuration and privacy limits; the connector cannot reconstruct missing tracking. The available engagement metrics do not establish CRM conversions or verified commercial outcomes.
+
+## Recorded first visits and form activity
+
+These are presets of the existing `ga4_report` tool and endpoint. They require no new environment variables, consent scopes or tool names. Both use standard GA4 dimensions and the existing bounded, sanitized report envelope; they do not require custom-dimension registration.
+
+| Preset | Returned dimensions | Returned metrics | Event restriction |
+| --- | --- | --- | --- |
+| `first_visits` | `landingPage` | `eventCount`, `totalUsers` | Fixed `first_visit`; `event_name` is not accepted. |
+| `form_submissions` | `eventName`, `pagePath` | `eventCount`, `totalUsers` | `form_submit` and `generate_lead`, or the one selected by `event_name`. |
+
+The default form report keeps the two event types in separate rows. `query_context.event_names` records the fixed two-event list when both are selected; a null singular `event_name` does not mean all events were requested. Do not add these event types together as successful submissions: a single interaction can produce both. `totalUsers` is GA's distinct-user count within each filtered group and is not additive across rows. Google's [Data API schema](https://developers.google.com/analytics/devguides/reporting/data/v1/api-schema) defines the standard dimensions and metrics; property-specific dimension/metric compatibility can be checked using [checkCompatibility](https://developers.google.com/analytics/devguides/reporting/data/v1/rest/v1beta/properties/checkCompatibility). A supported preset or registered metadata field does not establish that its production tracking has been verified.
+
+`first_visits` groups recorded `first_visit` events by the first pageview path of their session. It does not return the `newUsers` metric or reconstruct a visitor's later pages. Google describes `first_visit` as an [automatically collected event](https://support.google.com/analytics/answer/9234069?hl=en); the result reflects Analytics' recorded recognition of first visits, not verified first-ever visits by unique people.
+
+The event dictionary records `definition_basis` as `website_source_review` or `google_definition`. Its textual `limitations` explain that these definitions do not verify deployed code, property settings, historical coverage or delivery of every event.
+
+| Event | Source-reviewed meaning | Interpretation limit |
+| --- | --- | --- |
+| `contact_click` | A tracked click on a phone, email or WhatsApp link. | Does not prove a connected call, sent message, conversation or lead. |
+| `form_attempt` | A form submission attempt recorded by the form hook, including native or custom validation failures; repeated attempts can be recorded after validation or server failure. | Does not establish valid input, successful submission, a unique person or one event per button click. |
+| `generate_lead` | The frontend emits this after its form API service reports success; the hook suppresses repeats within that form-open lifecycle. | A recorded frontend success signal does not establish a unique CRM record, qualified lead, sale or revenue. |
+| `form_submit` | Google Enhanced Measurement can record a browser form submission; the inspected website does not emit it explicitly. | Collection depends on property settings and runtime behavior; a browser submission does not prove backend acceptance. |
+
+Google documents the automatic form events and their parameters in [Enhanced Measurement](https://support.google.com/analytics/answer/9216061?hl=en). The inspected website evidence is `src/hooks/useLeadAnalytics.ts`, `src/lib/analytics.ts`, `src/components/AnalyticsInteractions.tsx`, `src/services/formSubmission.ts` and `src/services/warehouseRequest.ts` in the sibling `website_combined/wareongo-website` repository. That source review does not constitute a live tracking test.
+
+`pagePath` is Google's built-in path without a query string. It is distinct from a registered `customEvent:page_path`: the website's `page_path` parameter can include allowlisted query values. Neither should silently replace the other. The lead form hook snapshots page context when the form opens, and later events reuse it. Therefore `generate_lead` can carry the opening page rather than the current submit-time page. Describe `form_submissions.pagePath` and `page_path_contains` as recorded event page context. The remembered CTA's `origin_page_path` and a session's `landingPage` are separate concepts.
 
 ## Dates, pages and freshness
 
@@ -127,7 +161,11 @@ Reports can use a bounded five-minute in-memory cache. `source_fetched_at` recor
 
 ## Interpret the results carefully
 
+Structured interpretation metadata accompanies the reports and discovery guidance. `individual_journeys_available`, `crm_linkage_available` and `event_counts_are_unique_leads` are explicitly false. `aggregation`, `page_basis` and `acquisition_basis` describe the report's scope; `interpretation.limits` explains that proposed causes and lead quality remain hypotheses without separate evidence. Read these fields and the event dictionary together with `quality.warnings`; returning a report does not turn unsupported interpretations into verified facts.
+
 - GA4 event counts, key events and form activity are recorded website signals, not unique CRM leads, completed deals, revenue, or proof of a sequential conversion funnel. Warehouse interest is recorded browsing activity, not verified demand. These reports do not join analytics users or events to CRM identities.
+- A form event grouped by a session landing page or acquisition source retains that session context; it does not reconstruct the order of page visits or demonstrate that a page caused a submission. Treat explanations for changes, high or low engagement, and differences between pages as hypotheses requiring further evidence. No CRM links or individual journeys are exposed by these aggregate reports.
+- Do not divide `form_submissions` counts by `landing_pages` sessions just because their path labels match: events on a page and sessions starting on a page describe different populations. For events per entry session, request `events` with the chosen `event_name` and `overview` with identical dates, `landing_page_contains` and other segment filters. Even then, events per session is not a visitor conversion rate or a count of unique CRM leads.
 - Search Console clicks and GA4 sessions measure different things. Grouped Search Console results are top rows and may omit anonymized or unavailable queries. Do not treat their sum as a complete property total; use the unfiltered summary for an aggregate.
 - Read each metric's `columns.unit`, `definition` and `calculation`. Rates are fractions (`0.05` means 5%); engagement and session times are seconds; Search Console position is an average search position. Do not sum users across groups or average row-level rates, durations or position. Request an aggregate report for the overall metric. Preserve the returned metric meanings, quality flags and coverage limits.
 - Exposed labels and paths are sanitized. Masked values can collide; do not infer hidden text or merge masked rows as though they were one original label.

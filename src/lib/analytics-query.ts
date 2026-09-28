@@ -3,10 +3,10 @@ import { HttpError } from './errors';
 import { redactCrmText } from './crm-redaction';
 
 export const ANALYTICS_PERIODS = ['today', 'yesterday', 'last_7_days', 'last_28_days', 'this_month', 'last_month'] as const;
-export const GA4_REPORT_PRESETS = ['overview', 'daily', 'acquisition', 'landing_pages', 'pages', 'devices', 'countries', 'events', 'warehouse_interest', 'lead_sources'] as const;
+export const GA4_REPORT_PRESETS = ['overview', 'daily', 'acquisition', 'landing_pages', 'pages', 'devices', 'countries', 'events', 'warehouse_interest', 'lead_sources', 'first_visits', 'form_submissions'] as const;
 export const SEARCH_CONSOLE_GROUPS = ['summary', 'date', 'query', 'page', 'query_page', 'country', 'device'] as const;
 const COMMON = ['period', 'date_from', 'date_to', 'limit', 'cursor', 'compare_to', 'device', 'country'] as const;
-export const GA4_QUERY_PARAMETER_NAMES = ['report', 'event_name', 'landing_page_contains', 'channel', 'source', ...COMMON] as const;
+export const GA4_QUERY_PARAMETER_NAMES = ['report', 'event_name', 'landing_page_contains', 'page_path_contains', 'channel', 'source', ...COMMON] as const;
 export const SEARCH_CONSOLE_QUERY_PARAMETER_NAMES = ['group', 'query_contains', 'query_equals', 'query_not_contains', 'page_contains', 'page_equals', 'data_state', ...COMMON] as const;
 export const ANALYTICS_MAX_ROWS = 500;
 const DAY = 86_400_000;
@@ -15,7 +15,7 @@ export type AnalyticsPeriod = typeof ANALYTICS_PERIODS[number];
 type DateQuery = { period: AnalyticsPeriod | null; date_from: string | null; date_to: string | null; limit: number; cursor: string | null };
 type SegmentQuery = { compare_to: 'previous_period' | null; device: 'desktop' | 'mobile' | 'tablet' | null; country: string | null };
 export type Ga4Query = DateQuery & SegmentQuery & { report: typeof GA4_REPORT_PRESETS[number]; event_name: string | null;
-  landing_page_contains: string | null; channel: string | null; source: string | null };
+  landing_page_contains: string | null; page_path_contains: string | null; channel: string | null; source: string | null };
 export type SearchConsoleQuery = DateQuery & SegmentQuery & { group: typeof SEARCH_CONSOLE_GROUPS[number]; query_contains: string | null;
   query_equals: string | null; query_not_contains: string | null; page_contains: string | null; page_equals: string | null; data_state: 'final' | 'all' };
 
@@ -60,12 +60,19 @@ export function validateGa4Query(query: URLSearchParams): Ga4Query {
   const base = common(query);
   const report = enumValue(query.get('report') ?? 'overview', GA4_REPORT_PRESETS, 'report');
   const event = query.get('event_name');
-  if (event !== null && (!['events', 'warehouse_interest'].includes(report) || !/^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(event)
-    || /\d{7}/.test(event))) invalidAnalyticsQuery('event_name is a literal GA event name, available only for events and warehouse_interest.');
+  if (event !== null && (!['events', 'warehouse_interest', 'form_submissions'].includes(report) || !/^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(event)
+    || /\d{7}/.test(event))) invalidAnalyticsQuery('event_name is a literal GA event name, available only for events, warehouse_interest and form_submissions.');
+  if (report === 'form_submissions' && event !== null && !['form_submit', 'generate_lead'].includes(event)) {
+    invalidAnalyticsQuery('form_submissions supports form_submit or generate_lead; omit event_name to report both separately.');
+  }
+  if (query.has('page_path_contains') && !['pages', 'events', 'form_submissions'].includes(report)) {
+    invalidAnalyticsQuery('page_path_contains filters recorded event page context and is available only for pages, events and form_submissions.');
+  }
   if (report === 'overview' && base.cursor) invalidAnalyticsQuery('overview has one aggregate row and does not support cursors.');
   const compare_to = comparison(query, report === 'overview');
   return { ...base, report, event_name: event, compare_to, device: device(query), country: literal(query, 'country'),
-    landing_page_contains: literal(query, 'landing_page_contains'), channel: literal(query, 'channel'), source: literal(query, 'source') };
+    landing_page_contains: literal(query, 'landing_page_contains'), page_path_contains: literal(query, 'page_path_contains'),
+    channel: literal(query, 'channel'), source: literal(query, 'source') };
 }
 function comparison(query: URLSearchParams, aggregate: boolean): SegmentQuery['compare_to'] {
   const value = query.get('compare_to');
@@ -89,7 +96,7 @@ function literal(query: URLSearchParams, name: string): string | null {
   const redacted = redactCrmText(inspected, { maxCharacters: 120 });
   if (!value.trim() || value.length > 120 || /[\x00-\x1f\x7f\p{Cf}]/u.test(value)
     || redacted.redacted || redacted.truncated || redacted.state === 'unsupported') invalidAnalyticsQuery(`${name} must be a short literal without contact details or URLs.`);
-  if (['page_contains', 'landing_page_contains'].includes(name) && /[?#@]/.test(decoded)) invalidAnalyticsQuery(`${name} must be a path fragment without query parameters, credentials or fragments.`);
+  if (['page_contains', 'landing_page_contains', 'page_path_contains'].includes(name) && /[?#@]/.test(decoded)) invalidAnalyticsQuery(`${name} must be a path fragment without query parameters, credentials or fragments.`);
   return value.trim();
 }
 function pageEquals(query: URLSearchParams): string | null {

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { HttpError } from './errors';
 import { redactCrmText } from './crm-redaction';
 import { buildAnalyticsComparison, previousAnalyticsDates } from './analytics-comparison';
+import { ANALYTICS_DIMENSION_DEFINITIONS, ANALYTICS_EVENT_DEFINITIONS, analyticsInterpretation, ga4EventNames } from './analytics-semantics';
 import { analyticsCredentials, analyticsSourceError, ga4PropertyId, googleAnalyticsRead, searchConsoleSite } from './analytics-google';
 import { ANALYTICS_MAX_ROWS, ANALYTICS_PERIODS, GA4_REPORT_PRESETS, SEARCH_CONSOLE_GROUPS,
   analyticsCalendar, analyticsLocalDate, analyticsPagination, invalidAnalyticsQuery,
@@ -19,9 +20,17 @@ type Quality = { provisional: boolean; warnings: string[]; data_loss_from_other_
   first_incomplete_date: string | null; aggregation_type: string | null };
 type Quota = Record<string, { consumed: number; remaining: number }> | null;
 const METRICS: Record<string, { unit: string; definition?: string; calculation?: string }> = {
-  activeUsers: { unit: 'users' }, totalUsers: { unit: 'users' }, sessions: { unit: 'sessions' },
-  engagedSessions: { unit: 'sessions' }, eventCount: { unit: 'events' }, keyEvents: { unit: 'key_events' }, screenPageViews: { unit: 'views' },
-  clicks: { unit: 'clicks' }, impressions: { unit: 'impressions' }, ctr: { unit: 'fraction' }, position: { unit: 'position' },
+  activeUsers: { unit: 'users', definition: 'Distinct active users as measured by GA4 within this filtered group, not a deduplicated count of real people across groups.' },
+  totalUsers: { unit: 'users', definition: 'Distinct GA4 users with a recorded event in this filtered group. Not CRM leads; users can appear in multiple rows.' },
+  sessions: { unit: 'sessions', definition: 'Recorded visits in this filtered report, including repeat visits by the same user.' },
+  engagedSessions: { unit: 'sessions', definition: 'Sessions meeting the property engagement criteria; engagement can depend on configured key events.' },
+  eventCount: { unit: 'events', definition: 'Recorded event occurrences, including repeated actions. Not unique submissions, converted sessions or CRM leads.' },
+  keyEvents: { unit: 'key_events', definition: 'Events designated as key events under the property configuration. Tracking and designation history are not verified here; zero does not prove no enquiries.' },
+  screenPageViews: { unit: 'views', definition: 'Recorded page/screen views, including repeats.' },
+  clicks: { unit: 'clicks', definition: 'Google Search clicks for this group, not GA4 sessions or distinct visitors.' },
+  impressions: { unit: 'impressions', definition: 'Recorded appearances in Google Search for this group.' },
+  ctr: { unit: 'fraction', definition: 'Google Search clicks divided by impressions for this group; not a website conversion rate.' },
+  position: { unit: 'position', definition: 'Google-reported average position over the impressions in this group; not a fixed rank or a prediction of traffic gains.' },
   engagementRate: { unit: 'fraction', definition: 'Google-reported proportion of sessions that were engaged; 0.6 means 60%.' },
   userEngagementDuration: { unit: 'seconds', definition: 'Total recorded time the website was in focus or app was in the foreground, in seconds. This is a total, not an average.' },
   averageSessionDuration: { unit: 'seconds', definition: 'Google-reported average session duration in seconds, distinct from foreground engagement time.' },
@@ -42,6 +51,8 @@ const STATIC_PRESETS: Record<Exclude<Ga4Query['report'], 'warehouse_interest' | 
   pages: { dimensions: ['pagePath'], metrics: ['screenPageViews', 'activeUsers', 'eventCount', 'keyEvents', 'userEngagementDuration'] },
   devices: { dimensions: ['deviceCategory'], metrics: GA_CORE }, countries: { dimensions: ['country'], metrics: GA_CORE },
   events: { dimensions: ['eventName'], metrics: ['eventCount', 'totalUsers'] },
+  first_visits: { dimensions: ['landingPage'], metrics: ['eventCount', 'totalUsers'] },
+  form_submissions: { dimensions: ['eventName', 'pagePath'], metrics: ['eventCount', 'totalUsers'] },
 };
 const CUSTOM_WAREHOUSE = ['warehouse_city', 'warehouse_state', 'market_slug'];
 const CUSTOM_LEADS = ['lead_type', 'origin_placement'];
@@ -123,7 +134,8 @@ export function safeAnalyticsLabel(value: string, name = ''): { value: string | 
 }
 function column(name: string, kind: Column['kind']): Column {
   return { name: name.replace('customEvent:', ''), kind,
-    ...(kind === 'metric' ? METRICS[name] ?? { unit: 'count' } : { unit: name === 'date' ? 'date' : 'label' }) };
+    ...(kind === 'metric' ? METRICS[name] ?? { unit: 'count' } : { unit: name === 'date' ? 'date' : 'label',
+      ...(ANALYTICS_DIMENSION_DEFINITIONS[name] ? { definition: ANALYTICS_DIMENSION_DEFINITIONS[name] } : {}) }) };
 }
 function numeric(value: string, unit: string): number | null {
   if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return null;
@@ -246,10 +258,10 @@ function preset(query: Ga4Query, available: string[]) {
     const dimensions = names.map(x => `customEvent:${x}`).filter(x => available.includes(x));
     if (!dimensions.length) throw new HttpError(400, 'ANALYTICS_REPORT_UNAVAILABLE', 'This report requires registered GA4 custom dimensions. Check analytics capabilities for available reports.');
     return { dimensions, metrics: ['eventCount', 'totalUsers'],
-      event: query.report === 'lead_sources' ? 'generate_lead' : query.event_name ?? 'view_listing',
+      events: ga4EventNames(query),
       missing: names.filter(x => !available.includes(`customEvent:${x}`)) };
   }
-  return { ...STATIC_PRESETS[query.report], event: query.event_name, missing: [] };
+  return { ...STATIC_PRESETS[query.report], events: ga4EventNames(query), missing: [] };
 }
 function envelope(system: 'ga4' | 'search_console', property: string, report: string,
   query: Ga4Query | SearchConsoleQuery, dates: ReturnType<typeof resolveAnalyticsDates>, columns: Column[],
@@ -269,13 +281,15 @@ function envelope(system: 'ga4' | 'search_console', property: string, report: st
   if (!items.length && !q.empty_reason) q.empty_reason = 'No report rows returned for these dates and filters; this does not establish zero underlying activity.';
   const served = new Date().toISOString();
   return { source: { system, property, timezone: dates.timezone }, source_status: { status: 'available' as const, read_only: true as const }, report,
-    query_context: { ...dates, event_name: 'event_name' in query ? (query.report === 'lead_sources' ? 'generate_lead' : query.report === 'warehouse_interest' ? query.event_name ?? 'view_listing' : query.event_name) : null,
+    query_context: { ...dates, event_name: 'event_name' in query && ga4EventNames(query).length === 1 ? ga4EventNames(query)[0] : null,
+      event_names: 'event_name' in query ? ga4EventNames(query) : [],
       query_contains: 'query_contains' in query ? query.query_contains : null,
       query_equals: 'query_equals' in query ? query.query_equals : null,
       query_not_contains: 'query_not_contains' in query ? query.query_not_contains : null,
       page_contains: 'page_contains' in query ? query.page_contains : null,
       page_equals: 'page_equals' in query ? query.page_equals : null,
       landing_page_contains: 'landing_page_contains' in query ? query.landing_page_contains : null,
+      page_path_contains: 'page_path_contains' in query ? query.page_path_contains : null,
       device: query.device, country: query.country, channel: 'channel' in query ? query.channel : null,
       source: 'source' in query ? query.source : null, compare_to: query.compare_to,
       data_state: 'data_state' in query ? query.data_state : null },
@@ -283,7 +297,7 @@ function envelope(system: 'ga4' | 'search_console', property: string, report: st
       offset: page.offset, source_row_count: sourceRowCount, cap_reached: capReached, max_rows: ANALYTICS_MAX_ROWS, snapshot: false as const },
     nextCursor, source_fetched_at: result.source_fetched_at, served_at: served,
     cache: { hit: result.cache_hit, max_age_seconds: 300, age_seconds: Math.max(0, Math.floor((Date.parse(served) - Date.parse(result.source_fetched_at)) / 1000)) },
-    quality: q, quota: result.data.quota, comparison: null };
+    quality: q, interpretation: analyticsInterpretation(query, items), quota: result.data.quota, comparison: null };
 }
 export async function ga4Report(params: URLSearchParams) {
   const query = validateGa4Query(params);
@@ -306,8 +320,11 @@ async function readGa4Report(query: Ga4Query, property: string, config: Awaited<
   const page = analyticsPagination(query, dates, `${analyticsCredentials().identity}:ga4:${property}`);
   const limit = query.report === 'overview' ? 1 : page.limit;
   const filter = (fieldName: string, value: string, matchType = 'EXACT') => ({ filter: { fieldName, stringFilter: { matchType, value, caseSensitive: true } } });
-  const filters = [selected.event ? filter('eventName', selected.event) : null,
+  const eventFilter = selected.events.length === 1 ? filter('eventName', selected.events[0])
+    : selected.events.length > 1 ? { filter: { fieldName: 'eventName', inListFilter: { values: selected.events, caseSensitive: true } } } : null;
+  const filters = [eventFilter,
     query.landing_page_contains ? filter('landingPage', query.landing_page_contains, 'CONTAINS') : null,
+    query.page_path_contains ? filter('pagePath', query.page_path_contains, 'CONTAINS') : null,
     query.device ? filter('deviceCategory', query.device) : null, query.country ? filter('country', query.country) : null,
     query.channel ? filter('sessionDefaultChannelGroup', query.channel) : null, query.source ? filter('sessionSource', query.source) : null].filter(x => x !== null);
   const body = { dateRanges: [{ startDate: dates.date_from, endDate: dates.date_to }],
@@ -324,7 +341,9 @@ async function readGa4Report(query: Ga4Query, property: string, config: Awaited<
   if (dates.includes_recent_days) warn(result.data.quality, 'Recent GA4 dates are still processing and may change. Fetch time is not a data-completeness timestamp.');
   if (selected.missing.length) warn(result.data.quality, `Unregistered dimensions omitted: ${selected.missing.join(', ')}.`);
   if (selected.metrics.includes('keyEvents')) warn(result.data.quality, 'Key events use the property configuration; they are not necessarily sales leads.');
-  if (query.report === 'events' || query.report === 'lead_sources' || query.report === 'warehouse_interest') warn(result.data.quality, 'Event counts are recorded website actions, not a sequential conversion funnel, unique CRM leads, or closed revenue.');
+  if (['events', 'lead_sources', 'warehouse_interest', 'first_visits', 'form_submissions'].includes(query.report)) warn(result.data.quality, 'Event counts are recorded website actions, not a sequential conversion funnel, unique CRM leads, or closed revenue.');
+  if (query.report === 'first_visits') warn(result.data.quality, 'This reports first_visit events by the entry page of that session. It does not link those visitors to later visits, enquiries or pipeline.');
+  if (query.report === 'form_submissions') warn(result.data.quality, 'form_submit and generate_lead may describe the same attempt. Keep event types separate; differences do not prove over- or under-firing. Recorded page context can be the page where the form opened.');
   if (query.report === 'lead_sources') warn(result.data.quality, 'Lead sources here means recorded form type and originating placement, not marketing channel attribution. Use acquisition for session channel/source.');
   if (query.report === 'warehouse_interest') warn(result.data.quality, 'Warehouse geography describes tracked property or search context, not the visitor location.');
   if (query.report === 'pages') warn(result.data.quality, 'Pages reports activity on each visited path. Landing pages reports the entry path of a session; these are different questions.');
@@ -419,15 +438,16 @@ export async function analyticsCapabilities() {
     return { read_only: true, access: 'admins_only', ga4: { status: config ? 'available' : errorCode === 'ANALYTICS_CONFIGURATION' ? 'not_configured' : 'unavailable', property,
       timezone: config?.timezone ?? null, custom_dimensions: config?.custom.map(x => x.replace('customEvent:', '')) ?? [],
       source_fetched_at: config?.source_fetched_at ?? null, error_code: errorCode,
+      event_definitions: ANALYTICS_EVENT_DEFINITIONS,
       metric_definitions: Object.entries(METRICS).filter(([, metric]) => metric.definition).map(([name, metric]) => ({
         name, unit: metric.unit, definition: metric.definition!, calculation: metric.calculation ?? null,
       })),
       reports: GA4_REPORT_PRESETS.map(name => {
-        if (!config) return { name, available: false, reason: 'GA4 report availability could not be verified.', dimensions: [], metrics: [], event_name: null };
+        if (!config) return { name, available: false, reason: 'GA4 report availability could not be verified.', dimensions: [], metrics: [], event_name: null, event_names: [] };
         try {
           const p = preset(validateGa4Query(new URLSearchParams({ report: name })), config.custom);
-          return { name, available: true, reason: null, dimensions: p.dimensions.map(x => x.replace('customEvent:', '')), metrics: gaOutputMetrics(p.metrics), event_name: p.event };
-        } catch { return { name, available: false, reason: 'No supported custom dimensions are registered for this report.', dimensions: [], metrics: [], event_name: null }; }
+          return { name, available: true, reason: null, dimensions: p.dimensions.map(x => x.replace('customEvent:', '')), metrics: gaOutputMetrics(p.metrics), event_name: p.events.length === 1 ? p.events[0] : null, event_names: p.events };
+        } catch { return { name, available: false, reason: 'No supported custom dimensions are registered for this report.', dimensions: [], metrics: [], event_name: null, event_names: [] }; }
       }) },
       search_console: { status: site ? 'configured_not_verified' : 'not_configured', property: site, timezone: 'America/Los_Angeles', groups: SEARCH_CONSOLE_GROUPS },
       periods: ANALYTICS_PERIODS, default_period: 'last_28_days', max_date_range_days: 93, max_rows_per_page: 25, max_report_rows: ANALYTICS_MAX_ROWS,
@@ -436,6 +456,9 @@ export async function analyticsCapabilities() {
         'Last 7 and 28 days mean completed days. This month includes today and may be incomplete.',
         'GA4 reports use the property timezone. Search Console uses Pacific Time and finalized data by default.',
         'GA4 pages reports visited paths by views; landing_pages reports session entries. Segment reports with device, country, channel, source or landing_page_contains.',
+        'first_visits reports recorded first_visit events by session entry path. It does not link the first visitors to later sessions or CRM.',
+        'form_submissions separates form_submit and generate_lead by recorded event page; page_path_contains filters that context on pages/events/form_submissions. Neither is a unique CRM-lead count.',
+        'Event definitions are Google definitions or audited website source behavior, not verification of deployed tracking throughout the selected dates. Missing fields in this connector do not prove they are absent upstream.',
         'GA4 traffic reports include session duration, foreground engagement time, rates and per-session activity. Metric definitions and calculated formulas are exposed; undefined averages are null, never zero.',
         'Search Console query_page shows query/page pairs. Exact query_equals/page_equals and query_not_contains support focused investigation; query filters exclude anonymized searches.',
         'Use compare_to=previous_period only for GA4 overview or Search Console summary. It compares adjacent equal calendar windows with the same filters, preserving both periods\' quality and fetch times.',

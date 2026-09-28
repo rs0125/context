@@ -43,8 +43,8 @@ describe('bounded GA4 presets and source semantics', () => {
     const report = await ga4Report(new URLSearchParams());
     expect(report.source).toEqual({ system: 'ga4', property: '123', timezone: 'Asia/Kolkata' });
     expect(report.query_context).toMatchObject({ date_from: '2026-08-29', date_to: '2026-09-25', inclusive: true });
-    expect(report.columns).toContainEqual({ name: 'screenPageViews', kind: 'metric', unit: 'views' });
-    expect(report.columns).toContainEqual({ name: 'keyEvents', kind: 'metric', unit: 'key_events' });
+    expect(report.columns).toContainEqual(expect.objectContaining({ name: 'screenPageViews', kind: 'metric', unit: 'views' }));
+    expect(report.columns).toContainEqual(expect.objectContaining({ name: 'keyEvents', kind: 'metric', unit: 'key_events' }));
     expect(report.quality.totals_included).toBe(true);
     expect(report.cache).toEqual({ hit: true, max_age_seconds: 300, age_seconds: 30 });
     expect(report.source_fetched_at).not.toBe(report.served_at);
@@ -307,7 +307,10 @@ describe('GA4 engagement metric semantics', () => {
     const capabilities = await analyticsCapabilities();
     expect(capabilities.ga4.reports.find(report => report.name === 'overview')?.metrics).toHaveLength(15);
     expect(capabilities.ga4.reports.find(report => report.name === 'pages')?.metrics).toContain('averageEngagementTimePerActiveUser');
-    expect(capabilities.ga4.metric_definitions).toHaveLength(8);
+    expect(capabilities.ga4.metric_definitions.map(metric => metric.name)).toEqual(expect.arrayContaining([
+      'engagementRate', 'userEngagementDuration', 'averageSessionDuration', 'averageEngagementTimePerSession',
+      'averageEngagementTimePerActiveUser', 'bounceRate', 'screenPageViewsPerSession', 'eventsPerSession',
+    ]));
     expect(capabilities.ga4.metric_definitions.find(metric => metric.name === 'userEngagementDuration')).toMatchObject({ unit: 'seconds', calculation: null });
     expect(capabilities.ga4.metric_definitions.find(metric => metric.name === 'averageEngagementTimePerActiveUser')).toMatchObject({ unit: 'seconds', calculation: 'userEngagementDuration / activeUsers' });
   });

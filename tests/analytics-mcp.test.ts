@@ -13,9 +13,13 @@ const report = {
   source: { system: 'ga4', property: 'properties/123', timezone: 'Asia/Kolkata' },
   source_status: { status: 'available', read_only: true }, report: 'overview',
   query_context: { date_from: '2026-09-01', date_to: '2026-09-25', timezone: 'Asia/Kolkata', local_date: '2026-09-26',
-    period: null, inclusive: true as const, includes_recent_days: true, event_name: null, query_contains: null, page_contains: null, data_state: null,
+    period: null, inclusive: true as const, includes_recent_days: true, event_name: null, event_names: [], query_contains: null, page_contains: null, data_state: null,
     landing_page_contains: null, device: null, country: null, channel: null, source: null,
+    page_path_contains: null,
     query_equals: null, page_equals: null, query_not_contains: null, compare_to: null },
+  interpretation: { aggregation: 'aggregate', page_basis: 'none', acquisition_basis: 'not_reported',
+    individual_journeys_available: false, crm_linkage_available: false, event_counts_are_unique_leads: false,
+    event_definitions: [], limits: ['Aggregate analytics cannot establish individual journeys or CRM attribution.'] },
   columns: [{ name: 'sessions', kind: 'metric', unit: 'count' }],
   items: [{ dimensions: {}, metrics: { sessions: 20 }, redacted: false, verification_required: false }],
   pagination: { limit: 10, returned_count: 1, has_more: false, next_cursor: null, offset: 0, source_row_count: 1,
@@ -152,7 +156,7 @@ describe('analytics MCP contract', () => {
   it('retains Search Console discovery when GA4 is unavailable', async () => {
     const partial = { read_only: true, access: 'admins_only',
       ga4: { status: 'unavailable', property: '123', timezone: null, source_fetched_at: null,
-        error_code: 'ANALYTICS_SOURCE_DENIED', custom_dimensions: [], reports: [], metric_definitions: [
+        error_code: 'ANALYTICS_SOURCE_DENIED', custom_dimensions: [], reports: [], event_definitions: [], metric_definitions: [
           { name: 'averageEngagementTimePerSession', unit: 'seconds', definition: 'Average recorded engagement per session.', calculation: 'userEngagementDuration / sessions' },
         ] },
       search_console: { status: 'configured_not_verified', property: 'sc-domain:example.test', timezone: 'America/Los_Angeles',
