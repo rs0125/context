@@ -129,22 +129,62 @@ const hasLimitation = (answer: string, topic: RegExp) => answer.split(/(?<=[.!?]
   && /\b(?:not|no|cannot|can't|can’t|doesn't|doesn’t|don't|don’t|isn't|isn’t|aren't|aren’t|unable|unsupported|unavailable|unknown|unproven|insufficient|unverified)\b|does not|do not|doesn.t prove|can.t establish/i.test(sentence));
 const gaRows = (trace: Trace[]) => trace.filter(t => t.name === 'ga4_report').flatMap(t => t.result?.data?.items ?? []);
 function formComparisonEvidence(trace: Trace[]) {
-  const reports = trace.filter(t => t.name === 'ga4_report' && t.result?.data?.items);
+  const reports = trace.filter(t => {
+    if (t.name !== 'ga4_report' || !t.result?.data?.items) return false;
+    const dates = t.result.data.query_context;
+    const today = Date.parse(`${dates.local_date}T00:00:00Z`);
+    return Number.isFinite(today) && dates.date_from === new Date(today - 28 * 86_400_000).toISOString().slice(0, 10)
+      && dates.date_to === new Date(today - 86_400_000).toISOString().slice(0, 10);
+  });
   const groups = [['/request-warehouse', 11, 101], ['/listings/bengaluru', 21, 445]] as const;
   const sameContext = (a: Trace, b: Trace) => ['date_from', 'date_to', 'timezone', 'device', 'country', 'channel', 'source']
     .every(key => a.result.data.query_context[key] === b.result.data.query_context[key]);
   const sessionReports = (path: string, sessions: number) => reports.filter(t => !t.args.page_path_contains
     && t.result.data.items.some((row: any) => row.metrics.sessions === sessions
       && (row.dimensions.landingPage === path || t.args.landing_page_contains === path)));
-  const aligned = groups.every(([path, events, sessions]) => reports.some(t => t.args.landing_page_contains === path
+  const alignedSeparateReads = groups.every(([path, events, sessions]) => reports.some(t => t.args.landing_page_contains === path
     && !t.args.page_path_contains && t.result.data.pagination.offset === 0 && !t.result.data.pagination.has_more
     && t.result.data.items.filter((row: any) => row.dimensions.eventName === 'form_submit')
       .reduce((sum: number, row: any) => sum + row.metrics.eventCount, 0) === events
     && sessionReports(path, sessions).some(s => sameContext(t, s))));
+  const validComposite = (t: Trace, path: string, events: number, sessions: number) => {
+    const data = t.result.data;
+    const performance = data.form_performance;
+    const rows = data.items;
+    if (t.args.report !== 'form_performance' || t.args.landing_page_contains !== path || t.args.page_path_contains
+      || !performance?.matching_cohort || performance.denominator !== 'matching_entry_sessions'
+      || performance.read_consistency !== 'independent_source_reads'
+      || data.query_context.landing_page_contains !== path || data.query_context.page_path_contains !== null
+      || data.pagination.offset !== 0 || data.pagination.has_more || rows.length !== 1
+      || rows[0].metrics.sessions !== sessions || rows[0].metrics.formSubmitEventCount !== events
+      || Math.abs(rows[0].metrics.formSubmitEventsPer100EntrySessions - events / sessions * 100) > 1e-9
+      || !Number.isFinite(rows[0].metrics.formSubmitEventsPer100EntrySessions)) return false;
+    const components = performance.components;
+    if (!Array.isArray(components) || components.length !== 3) return false;
+    const contextKeys = ['date_from', 'date_to', 'timezone', 'landing_page_contains', 'page_path_contains', 'device', 'country', 'channel', 'source'];
+    if (!components.every((component: any) => contextKeys.every(key => component.query_context?.[key] === data.query_context[key]))) return false;
+    const denominator = components.find((component: any) => component.name === 'sessions');
+    const numerator = components.find((component: any) => component.name === 'form_submit');
+    const ratio = performance.ratios?.find((value: any) => value.event_name === 'form_submit');
+    return denominator?.metric === 'sessions' && denominator.value === sessions && denominator.query_context.event_names.length === 0
+      && numerator?.metric === 'eventCount' && numerator.value === events && JSON.stringify(numerator.query_context.event_names) === '["form_submit"]'
+      && ratio?.status === 'available' && ratio.metric === 'formSubmitEventsPer100EntrySessions'
+      && Number.isFinite(ratio.value) && Math.abs(ratio.value - events / sessions * 100) < 1e-9;
+  };
+  const composites = groups.map(([path, events, sessions]) => reports.filter(t => validComposite(t, path, events, sessions)));
+  const alignedComposite = composites[0].some(first => composites[1].some(second => sameContext(first, second)));
   const unaligned = groups.every(([path, events, sessions]) => sessionReports(path, sessions).length > 0
     && reports.some(t => t.result.data.items.some((row: any) => row.dimensions.eventName === 'form_submit'
       && (row.dimensions.pagePath === path || t.args.page_path_contains === path) && row.metrics.eventCount === events)));
-  return { aligned, unaligned };
+  return { aligned: alignedSeparateReads || alignedComposite, unaligned };
+}
+function hasRecordedLeadEvents(trace: Trace[], period?: string) {
+  return trace.some(t => t.name === 'ga4_report' && (!period || t.args.period === period) && (
+    ['events', 'form_submissions'].includes(String(t.args.report)) && (!t.args.event_name || t.args.event_name === 'generate_lead')
+      && t.result?.data?.items?.some((row: any) => row.dimensions.eventName === 'generate_lead' && row.metrics.eventCount === 7)
+    || t.args.report === 'form_performance' && t.result?.data?.items?.some((row: any) => row.metrics.generateLeadEventCount === 7)
+      && t.result?.data?.form_performance?.components?.some((component: any) => component.name === 'generate_lead'
+        && component.metric === 'eventCount' && component.value === 7 && JSON.stringify(component.query_context?.event_names) === '["generate_lead"]')));
 }
 function reportsCalculatedFormRatio(answer: string) {
   const plain = answer.replace(/[*_~]/g, '');
@@ -176,8 +216,7 @@ const scenarios: Scenario[] = [
     check: trace => new Set(trace.filter(t => t.name === 'ga4_report' && t.args.report === 'daily')
       .flatMap(t => t.result?.data?.items ?? []).map(row => row.dimensions.date)).size === 28 },
   { id: 'recorded_lead_events', prompt: 'How many sales leads did the website generate this month? Tell me exactly what the source can establish.',
-    check: (trace, answer) => trace.some(t => t.name === 'ga4_report' && ['events', 'form_submissions'].includes(String(t.args.report)) && t.args.event_name === 'generate_lead'
-      && t.args.period === 'this_month') && /\b7\b/.test(answer) && /event/i.test(answer) && /(?:not|doesn.t|cannot|can.t|isn.t)[\s\S]{0,100}(?:unique|CRM|sales lead)/i.test(answer) },
+    check: (trace, answer) => hasRecordedLeadEvents(trace, 'this_month') && /\b7\b/.test(answer) && /event/i.test(answer) && /(?:not|doesn.t|cannot|can.t|isn.t)[\s\S]{0,100}(?:unique|CRM|sales lead)/i.test(answer) },
   { id: 'search_today', prompt: 'Show today’s Google Search performance totals and explain any freshness limitations.',
     check: (trace, answer) => trace.some(t => t.name === 'search_console_report' && t.args.period === 'today' && t.args.data_state === 'all')
       && /provisional|incomplete|unfinished|can change|may change/i.test(answer) },
@@ -201,7 +240,7 @@ const scenarios: Scenario[] = [
   { id: 'recent_key_event_configuration', prompt: 'Key events were configured only recently. Check the last 28 complete days: does a zero key-event total mean we received zero enquiries? Also check the recorded successful form events. Explain whether these reports establish why pages are underperforming or whether proposed causes need further evidence.',
     check: (trace, answer) => trace.some(t => t.name === 'ga4_report' && (!t.args.report || t.args.report === 'overview')
       && t.result?.data?.items?.some((row: any) => row.metrics.keyEvents === 0))
-      && gaRows(trace).some(row => row.dimensions.eventName === 'generate_lead' && row.metrics.eventCount === 7)
+      && hasRecordedLeadEvents(trace)
       && /\b7\b/.test(answer) && /configur|recent/i.test(answer)
       && hasLimitation(answer, /zero.*(?:enquir|inquir|lead)|(?:enquir|inquir|lead).*zero|key.?events?/i)
       && hasLimitation(answer, /caus|why|prove|explain|diagnos/i)
@@ -240,6 +279,62 @@ it('grades aligned form groups or an explicit ratio refusal, and rejects the obs
     expect(formComparisonEvidence(aligned).aligned).toBe(true);
     expect(check(aligned, counts + 'For matching entry groups, the event-per-session ratios are 10.9% and 4.7%. ' + caution)).toBe(true);
   }
+});
+
+it('accepts valid server-calculated form cohorts and rejects withheld, altered or mismatched composite evidence', async () => {
+  synthetic.scenario = 'form_event_session_denominators';
+  const trace: Trace[] = await Promise.all(['/request-warehouse', '/listings/bengaluru'].map(async path => {
+    const args = { report: 'form_performance', period: 'last_28_days', landing_page_contains: path };
+    return { name: 'ga4_report', args, result: { data: await ga4Report(new URLSearchParams(args)) } };
+  }));
+  const check = scenarios.find(scenario => scenario.id === 'form_event_session_denominators')!.check;
+  const answer = 'Recorded form_submit events are 11 and 21, from 101 and 445 entry sessions. The backend reports 10.89 and 4.72 events per 100 matching entry sessions. These are not visitor conversion rates. Unique CRM leads are unavailable.';
+  expect(formComparisonEvidence(trace).aligned).toBe(true);
+  expect(check(trace, answer)).toBe(true);
+  for (const change of ['status', 'component_date', 'comparison_date', 'both_comparison_dates', 'count', 'ratio', 'event_filter', 'page_filter']) {
+    const altered = structuredClone(trace);
+    const data = altered[0].result.data;
+    if (change === 'status') data.form_performance.ratios[0].status = 'source_quality_limited';
+    if (change === 'component_date') data.form_performance.components[0].query_context.date_to = '2025-01-01';
+    if (change === 'comparison_date') {
+      data.query_context.date_to = '2025-01-01';
+      for (const component of data.form_performance.components) component.query_context.date_to = '2025-01-01';
+    }
+    if (change === 'both_comparison_dates') for (const item of altered) {
+      item.result.data.query_context.date_from = '2025-01-01';
+      item.result.data.query_context.date_to = '2025-01-28';
+      for (const component of item.result.data.form_performance.components) {
+        component.query_context.date_from = '2025-01-01';
+        component.query_context.date_to = '2025-01-28';
+      }
+    }
+    if (change === 'count') data.items[0].metrics.formSubmitEventCount = 100;
+    if (change === 'ratio') data.form_performance.ratios[0].value = 100;
+    if (change === 'event_filter') data.form_performance.components[0].query_context.event_names = ['form_submit'];
+    if (change === 'page_filter') data.form_performance.components[1].query_context.page_path_contains = '/request-warehouse';
+    expect(formComparisonEvidence(altered).aligned, change).toBe(false);
+    expect(check(altered, answer), change).toBe(false);
+  }
+});
+
+it('accepts recorded generate_lead counts from the composite without treating them as unique leads or key events', async () => {
+  synthetic.scenario = 'recent_key_event_configuration';
+  const call = async (args: Record<string, string>): Promise<Trace> => ({ name: 'ga4_report', args,
+    result: { data: await ga4Report(new URLSearchParams(args)) } });
+  const monthly = [await call({ report: 'form_performance', period: 'this_month' })];
+  expect(scenarios.find(scenario => scenario.id === 'recorded_lead_events')!.check(monthly,
+    'The source recorded 7 generate_lead events this month. These are not unique CRM sales leads.')).toBe(true);
+  const history = [await call({ report: 'overview', period: 'last_28_days' }),
+    await call({ report: 'form_performance', period: 'last_28_days' })];
+  const answer = 'Zero key events does not prove zero enquiries because they were configured recently. There were 7 recorded generate_lead events, not unique CRM leads. These reports cannot prove the causes of underperformance; explanations remain hypotheses requiring further investigation.';
+  expect(scenarios.find(scenario => scenario.id === 'recent_key_event_configuration')!.check(history, answer)).toBe(true);
+  const altered = structuredClone(history);
+  altered[1].result.data.items[0].metrics.generateLeadEventCount = 0;
+  expect(hasRecordedLeadEvents(altered)).toBe(false);
+  const bothEventTypes = [await call({ report: 'form_submissions', period: 'this_month' })];
+  expect(scenarios.find(scenario => scenario.id === 'recorded_lead_events')!.check(bothEventTypes,
+    'The source recorded 7 generate_lead events this month. These are not unique CRM sales leads.')).toBe(true);
+  expect(hasRecordedLeadEvents([await call({ report: 'form_submissions', period: 'this_month', event_name: 'form_submit' })])).toBe(false);
 });
 
 it.skipIf(process.env.CONTEXT_ANALYTICS_AGENT_EVAL !== '1')('evaluates real analytics MCP contracts with a bounded synthetic agent', async () => {

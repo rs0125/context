@@ -3,7 +3,7 @@ import { HttpError } from './errors';
 import { redactCrmText } from './crm-redaction';
 
 export const ANALYTICS_PERIODS = ['today', 'yesterday', 'last_7_days', 'last_28_days', 'this_month', 'last_month'] as const;
-export const GA4_REPORT_PRESETS = ['overview', 'daily', 'acquisition', 'landing_pages', 'pages', 'devices', 'countries', 'events', 'warehouse_interest', 'lead_sources', 'first_visits', 'form_submissions'] as const;
+export const GA4_REPORT_PRESETS = ['overview', 'daily', 'acquisition', 'landing_pages', 'pages', 'devices', 'countries', 'events', 'warehouse_interest', 'lead_sources', 'first_visits', 'form_submissions', 'form_performance'] as const;
 export const SEARCH_CONSOLE_GROUPS = ['summary', 'date', 'query', 'page', 'query_page', 'country', 'device'] as const;
 const COMMON = ['period', 'date_from', 'date_to', 'limit', 'cursor', 'compare_to', 'device', 'country'] as const;
 export const GA4_QUERY_PARAMETER_NAMES = ['report', 'event_name', 'landing_page_contains', 'page_path_contains', 'channel', 'source', ...COMMON] as const;
@@ -59,6 +59,9 @@ export function validateGa4Query(query: URLSearchParams): Ga4Query {
   parameters(query, GA4_QUERY_PARAMETER_NAMES);
   const base = common(query);
   const report = enumValue(query.get('report') ?? 'overview', GA4_REPORT_PRESETS, 'report');
+  if (report === 'form_performance' && ['cursor', 'compare_to', 'page_path_contains', 'event_name'].some(name => query.has(name))) {
+    invalidAnalyticsQuery('form_performance returns one aggregate for matching session-entry filters; cursor, compare_to, page_path_contains and event_name are not supported. Its form_submit and generate_lead counts remain separate.');
+  }
   const event = query.get('event_name');
   if (event !== null && (!['events', 'warehouse_interest', 'form_submissions'].includes(report) || !/^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(event)
     || /\d{7}/.test(event))) invalidAnalyticsQuery('event_name is a literal GA event name, available only for events, warehouse_interest and form_submissions.');

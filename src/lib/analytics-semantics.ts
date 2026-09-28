@@ -45,6 +45,7 @@ export const ANALYTICS_DIMENSION_DEFINITIONS: Record<string, string> = {
 
 export function ga4EventNames(query: Ga4Query): string[] {
   if (query.report === 'first_visits') return ['first_visit'];
+  if (query.report === 'form_performance') return ['form_submit', 'generate_lead'];
   if (query.report === 'form_submissions') return query.event_name ? [query.event_name] : ['form_submit', 'generate_lead'];
   if (query.report === 'lead_sources') return ['generate_lead'];
   if (query.report === 'warehouse_interest') return [query.event_name ?? 'view_listing'];
@@ -57,22 +58,23 @@ export function analyticsInterpretation(query: Ga4Query | SearchConsoleQuery,
   const eventNames = ga ? [...new Set([...ga4EventNames(query), ...items.map(x => x.dimensions.eventName).filter((x): x is string => !!x)])] : [];
   const firstVisits = ga && (query.report === 'first_visits' || query.event_name === 'first_visit');
   const pageBasis = ga && (['pages', 'form_submissions'].includes(query.report) || query.page_path_contains)
-    ? 'recorded_event_page' as const : ga && (['landing_pages', 'first_visits'].includes(query.report) || query.landing_page_contains)
+    ? 'recorded_event_page' as const : ga && (['landing_pages', 'first_visits', 'form_performance'].includes(query.report) || query.landing_page_contains)
       ? 'session_entry' as const : 'none' as const;
   const acquisitionBasis = firstVisits ? 'first_visit_events_only' as const
-    : ga && (['acquisition', 'landing_pages'].includes(query.report) || query.landing_page_contains || query.channel || query.source)
+    : ga && (['acquisition', 'landing_pages', 'form_performance'].includes(query.report) || query.landing_page_contains || query.channel || query.source)
       ? 'session' as const : 'not_reported' as const;
   const limits = [
     'No individual user journeys or verified website-to-CRM linkage are available. Missing fields here do not prove they are absent upstream.',
     'Explanations of intent, causes or lead quality are hypotheses unless separate evidence establishes them. City/query similarity is not lead attribution.',
   ];
   if (ga) limits.push(
-    'Never divide recorded-event-page counts by session-entry counts just because the path labels match: these are different populations. For events per entry session, use the same landing_page_contains and other filters on an events report and an overview report. Keep dates and scope identical.',
+    'Never divide recorded-event-page counts by session-entry counts just because the path labels match: these are different populations. Use form_performance for server-calculated form events per 100 matching entry sessions; its component dates and session filters are identical.',
     'Event count divided by sessions is events per session, not the fraction of visitors or sessions that converted. A conversion rate needs a matching deduplicated numerator and denominator.',
     'Do not sum users across rows. Do not add form_submit and generate_lead as distinct submissions or treat their mismatch as proof of broken tracking.',
     'Zero key events does not prove zero enquiries. Key-event configuration and tracking history may differ across dates.',
   );
   if (firstVisits) limits.push('First-visit counts describe recorded acquisition only; later engagement, submissions and pipeline for that same group are not linked.');
+  if (ga && query.report === 'form_performance') limits.push('The two form event counts are separate, potentially overlapping actions during matching sessions. Events per 100 entry sessions can exceed 100 and are not a percentage of visitors or sessions that converted. Independent component reads can have different fetch/cache times; null ratios must not be reconstructed from quality-limited counts.');
   if (ga && query.landing_page_contains && query.page_path_contains) limits.push('Both page filters apply: session entry must match landing_page_contains and recorded event page must match page_path_contains.');
   return {
     aggregation: 'aggregate' as const, page_basis: pageBasis, acquisition_basis: acquisitionBasis,

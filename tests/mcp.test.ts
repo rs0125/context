@@ -10,6 +10,9 @@ import { clockContext, resolveDateQuery } from '../src/lib/query-time';
 import { WAREHOUSE_FILTER_CATALOG } from '../src/lib/warehouse-fields';
 import { getOpenApiDocument } from '../src/lib/openapi';
 import { CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS, CRM_INDUSTRIES } from '../src/lib/crm-fields';
+import { buildShortlistAssessment } from '../src/lib/shortlist-assessment';
+import { getOpportunity } from '../src/lib/data';
+import { getWarehouse } from '../src/lib/warehouse-data';
 
 const origin = 'https://context.example.test';
 const employee = { id: 7, email: 'employee@example.test', is_active: true, dashboardAccess: true, adminAccess: false, twenty_user_id: null };
@@ -100,10 +103,10 @@ describe('MCP read-only protocol', () => {
     expect((await handleMcpRequest(rpc('tools/list', {}, { headers: { 'MCP-Protocol-Version': '1999-01-01' } }), deps)).status).toBe(400);
     expect(deps.read).not.toHaveBeenCalled();
   });
-  it('lists all thirteen read tools with warehouse catalogs and business output contracts', async () => {
+  it('lists fourteen non-analytics read tools with warehouse catalogs and business output contracts', async () => {
     const response = await handleMcpRequest(rpc('tools/list'), { authenticate: async () => key() });
     const { result } = await wire(response);
-    expect(result.tools).toHaveLength(13);
+    expect(result.tools).toHaveLength(14);
     for (const tool of result.tools) {
       expect(tool.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
       expect(tool.outputSchema.required).toEqual(expect.arrayContaining(['source_path', 'status', 'data', 'meta']));
@@ -135,18 +138,59 @@ describe('MCP read-only protocol', () => {
     expect(related.inputSchema.required).toEqual(['id', 'section']);
     expect(related.inputSchema.properties.section.enum).toEqual(['notes', 'tasks', 'company', 'stage_history']);
     expect(related.inputSchema.properties.limit.maximum).toBe(10);
+    const assessment = result.tools.find((tool: { name: string }) => tool.name === 'assess_shortlist');
+    expect(assessment.inputSchema.required).toEqual(['lead_id']);
+    expect(assessment.inputSchema.additionalProperties).toBe(false);
+    expect(assessment.inputSchema.properties.warehouse_ids).toMatchObject({ type: 'array', minItems: 1, maxItems: 5 });
+    expect(assessment.description).toMatch(/checklist/i);
+    expect(assessment.outputSchema.properties.data.required).toEqual(expect.arrayContaining(['lead', 'requirements', 'candidates', 'access_scope', 'source_status', 'read_consistency']));
   });
   it('limits tool discovery to granted scopes, rejects unknown tools and does not expose writes', async () => {
     const read = vi.fn();
     const deps = { authenticate: async () => key(['knowledge:read']), read };
     const { result } = await wire(await handleMcpRequest(rpc('tools/list'), deps));
     expect(result.tools.map((tool: { name: string }) => tool.name)).toEqual(['get_context', 'search_knowledge', 'read_knowledge']);
-    for (const name of ['search_crm_leads', 'read_crm_lead_context', 'crm_summary', 'crm_filters', 'warehouse_summary', 'update_warehouse', 'fetch', 'execute_sql']) {
+    for (const name of ['search_crm_leads', 'read_crm_lead_context', 'assess_shortlist', 'crm_summary', 'crm_filters', 'warehouse_summary', 'update_warehouse', 'fetch', 'execute_sql']) {
       const body = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: {} }), deps));
       expect(body.error ?? body.result?.isError).toBeTruthy();
     }
     expect(read).not.toHaveBeenCalled();
   });
+  it.each([false, true])('routes a structured shortlist assessment and keeps criteria out of citations (properties: %s)', async withProperties => {
+    const id = richLead.id;
+    const db = (row: Record<string, unknown>) => ({ query: async () => ({ rows: [row] }) }) as unknown as PoolClient;
+    const lead = (await getOpportunity(db({ opportunity_id: id, city: 'Bengaluru', requirement_sqft: '40k', twenty_updated_at: now }),
+      { employeeId: 7, email: employee.email, keyId: 'synthetic', scopes: ['crm:read'], twentyUserId: id }, id,
+      { mode: 'related', memberId: id, ids: [id] }))!;
+    const warehouse = (await getWarehouse(db({ id: 18, city: 'Bangalore', total_space_sqft: [40000] }), 18))!;
+    const read = vi.fn(async (request: Request, path: string[]) => {
+      expect(request.method).toBe('GET');
+      expect(path).toEqual(['crm', 'opportunities', id, 'assessment']);
+      const query = new URL(request.url).searchParams;
+      expect(query.get('warehouse_ids')).toBe(withProperties ? '18,19' : null);
+      expect(query.get('docks_min')).toBe(withProperties ? '5' : null);
+      return Response.json({ data: { ...buildShortlistAssessment(lead, withProperties ? [warehouse, { ...warehouse, id: 19 }] : [],
+        withProperties ? { warehouse_ids: [18, 19], docks_min: 5 } : {}), ...crmAccess }, meta });
+    });
+    const body = await wire(await handleMcpRequest(rpc('tools/call', { name: 'assess_shortlist', arguments: {
+      lead_id: id, ...(withProperties ? { warehouse_ids: [18, 19], docks_min: 5 } : {}),
+    } }), { authenticate: async () => key(withProperties ? ['crm:read', 'warehouses:read'] : ['crm:read']), read }));
+    expect(body.result.isError).not.toBe(true);
+    expect(body.result.structuredContent.source_path).toBe(`/api/v1/crm/opportunities/${id}/assessment`);
+    expect(body.result.structuredContent.data.candidates).toHaveLength(withProperties ? 2 : 0);
+    expect(body.result.structuredContent.data.requirements).toHaveLength(9);
+    expect(JSON.parse(body.result.content[0].text)).toEqual(body.result.structuredContent);
+    expect(read).toHaveBeenCalledOnce();
+  });
+  it.each([{ warehouse_ids: [1, 2, 3, 4, 5, 6] }, { warehouse_ids: [1, 1] }, { warehouse_ids: [] },
+    { warehouse_ids: '1,2' }, { docks_min: -1 }, { city: 'call 9876543210' }, { move_in_by: '2026-02-30' }, { budget: 25 }])(
+    'rejects invalid shortlist tool input before business reads: %j', async args => {
+      const read = vi.fn();
+      const body = await wire(await handleMcpRequest(rpc('tools/call', { name: 'assess_shortlist', arguments: { lead_id: richLead.id, ...args } }),
+        { authenticate: async () => key(), read }));
+      expect(body.error ?? body.result?.isError).toBeTruthy();
+      expect(read).not.toHaveBeenCalled();
+    });
   it('invokes the REST read boundary in-process with bound identity and returns source provenance', async () => {
     const registration = key();
     const read = vi.fn(async (request: Request, path: string[], dependencies: Parameters<typeof handleApiRequest>[2]) => {
@@ -327,6 +371,12 @@ describe('MCP read-only protocol', () => {
     expect(document.components.schemas.CrmBudget.properties.kind.enum).toEqual(expect.arrayContaining(['upper_bound', 'lower_bound']));
     const related = document.paths['/crm/opportunities/{id}/context'].get.parameters;
     expect(related.find(parameter => parameter.name === 'section')).toMatchObject({ required: true, schema: { enum: ['notes', 'tasks', 'company', 'stage_history'] } });
+    const assessment = document.paths['/crm/opportunities/{id}/assessment'];
+    expect(Object.keys(assessment)).toEqual(['get']);
+    expect(assessment.get.parameters.find(parameter => parameter.name === 'warehouse_ids')).toMatchObject({
+      in: 'query', required: false, style: 'form', explode: false, schema: { type: 'array', minItems: 1, maxItems: 5 },
+    });
+    expect(assessment.get.parameters.find(parameter => parameter.name === 'id')).toMatchObject({ required: true, in: 'path', schema: { format: 'uuid' } });
     for (const route of ['/warehouses/summary', '/crm/summary'] as const) {
       const params = document.paths[route].get.parameters.map(parameter => parameter.name);
       expect(params).toContain('group_limit');

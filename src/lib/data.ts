@@ -68,7 +68,7 @@ function nonnegativeInteger(value: unknown) {
   return Number.isSafeInteger(number) && number >= 0 ? number : 0;
 }
 
-export { searchWarehouses, getWarehouse, getWarehouseFilterOptions, summarizeWarehouses } from './warehouse-data';
+export { searchWarehouses, getWarehouse, getWarehousesByIds, getWarehouseFilterOptions, summarizeWarehouses } from './warehouse-data';
 
 const OPPORTUNITY_FIELDS = [
   'opportunity_id', 'name', 'stage', 'priority', 'city', 'company_name',

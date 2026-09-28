@@ -79,7 +79,9 @@ The `/oauth/authorize` browser page obtains a short-lived, browser-bound consent
 
 REST endpoints remain available to existing authenticated HTTP clients. Use `/api/v1/context` or `/api/v1/context.md` to discover context and `/api/v1/openapi.json` for the REST schema. A client should report missing tooling, denied reads, unavailable sources, and incomplete coverage instead of inventing records.
 
-The thirteen MCP tools cover context discovery, knowledge search/read, warehouse filters/search/read/summary, and CRM filters/search/read/summary/briefing plus a bounded related-context read. Searches support India-calendar periods and explicit date bounds. CRM `view=created` means created **by** the employee; `period=this_month` filters native source creation time. Combine both when needed. `read_crm_lead_context` requires one exact lead ID and one section: `notes`, `tasks`, `company` or `stage_history`.
+Up to seventeen MCP tools cover context discovery, knowledge search/read, warehouse filters/search/read/summary, CRM filters/search/read/summary/briefing and related context, shortlist assessment, and admin-only website analytics. The discovered set depends on granted scopes. Searches support India-calendar periods and explicit date bounds. CRM `view=created` means created **by** the employee; `period=this_month` filters native source creation time. Combine both when needed. `read_crm_lead_context` requires one exact lead ID and one section: `notes`, `tasks`, `company` or `stage_history`.
+
+`assess_shortlist` combines a requirement checklist, selected-property comparisons and verification questions in one tool. Supply a lead ID alone for the checklist, or add up to five warehouse IDs to compare. Explicit requirement overrides remain separate from CRM values. See [shortlist assessment](docs/shortlist-assessment.md). The three website analytics tools are `analytics_capabilities`, `ga4_report` and `search_console_report`; see [analytics setup and report semantics](docs/analytics.md).
 
 ## Environment
 
@@ -173,7 +175,11 @@ Authorization: Bearer YOUR_EMPLOYEE_CONTEXT_KEY
 | `GET /api/v1/crm/summary` | Count the full matching pipeline by stage, city, priority, source or duration | `crm:read` |
 | `GET /api/v1/crm/opportunities/{id}` | Read an authorized opportunity | `crm:read` |
 | `GET /api/v1/crm/opportunities/{id}/context` | Read one bounded notes, tasks, company or stage-history section | `crm:read` |
+| `GET /api/v1/crm/opportunities/{id}/assessment` | Check requirements and optionally compare up to five selected warehouses | `crm:read`; also `warehouses:read` when comparing properties |
 | `GET /api/v1/crm/my-briefing` | Get permitted facts for the employee's briefing | `crm:read` |
+| `GET /api/v1/analytics/capabilities` | Discover available analytics reports and definitions | `analytics:read`, current admin role |
+| `GET /api/v1/analytics/ga4` | Read bounded GA4 reports | `analytics:read`, current admin role |
+| `GET /api/v1/analytics/search-console` | Read bounded Google Search performance reports | `analytics:read`, current admin role |
 | `GET /api/v1/openapi.json` | OpenAPI 3.1 description | Public |
 | `GET /api/health` | Process liveness; does not query source data | Public |
 
@@ -311,6 +317,8 @@ The live MCP check also exercises warehouse additions today, matching totals, CR
 
 `npm run test:tooling:agent` discovers the live MCP schemas through a temporary OAuth test grant, revokes that grant, then uses the dashboard's configured OpenAI key to evaluate thirteen ordinary employee questions against synthetic data. Credentials and business records are never supplied to the model. The run is bounded to 48 model calls and six tool calls per case. Reports stay under ignored `.local/tooling-eval/`; they contain synthetic evidence and grades, without raw model reasoning or credential values. Use `-- --origin http://localhost:3000` to target the canonical local server.
 
+That older JavaScript fixture deliberately rejects `assess_shortlist` as an unsupported simulation rather than approximating its comparison logic. Shortlist validation uses the real builder, API and MCP contracts; see [shortlist assessment](docs/shortlist-assessment.md). Analytics has its own opt-in model evaluation documented in the [analytics review](docs/analytics-mcp-review.md).
+
 With the local server running, exercise the real API and database path from a second terminal:
 
 ```sh
@@ -336,7 +344,7 @@ Deployments are not created automatically by this scaffold. Deploy application c
 
 ### MCP hardening and remaining deployment checks
 
-MCP uses thirteen focused tools. `get_context` supplies capabilities and the clock without loading company pages. `search_knowledge` accepts an optional `q`: omit it to browse, or supply it for ranked snippets. Both return a bounded page and `nextCursor`. `read_crm_lead_context` retrieves one related CRM section without making every search return all narrative history. Read full documents and related context only when relevant.
+MCP exposes up to seventeen focused tools, filtered by granted scopes. `get_context` supplies capabilities and the clock without loading company pages. `search_knowledge` accepts an optional `q`: omit it to browse, or supply it for ranked snippets; either mode returns a bounded page and `nextCursor`. `read_crm_lead_context` retrieves one related CRM section without making every search return all narrative history. `assess_shortlist` combines requirement checks and selected-property comparisons without introducing separate tools for each intermediate step. Read full documents and related context only when relevant.
 
 `search_warehouses` defaults to `response_format=concise`. It returns location, core measurements, measurements constrained by the query, source timestamps, verification flags and relevant evidence. Every recorded estimate/range that triggers verification remains present. Use `response_format=detailed` or `read_warehouse` for all permitted fields. Omitted fields are not evidence of absence. REST warehouse results retain their detailed format. MCP `warehouse_filters` returns recorded category options without repeating the catalog already present in the search schema.
 
@@ -346,4 +354,4 @@ Single-lead CRM reads verify only that requested ID against live Twenty permissi
 
 Pool limits of 1–2 sockets and local request queues apply to each Node instance. Keep Supabase transaction mode on port 6543. Before increasing employee traffic, review the project's Supabase pooler capacity and Vercel instance/concurrency settings and configure deployment-wide WAF rules. This repository does not establish a fleet-wide connection budget. [Vercel pooling guidance](https://vercel.com/kb/guide/connection-pooling-with-functions), [WAF rate limiting](https://vercel.com/docs/vercel-firewall/vercel-waf/rate-limiting).
 
-After deployment, refresh the connector's tool definitions or reconnect if the harness caches schemas. Restart any in-progress query carrying an old cursor. Employee keys and connected OAuth grants remain valid. MCP citation paths retain the endpoint and filters but omit pagination cursors; record IDs and `meta.requestId` identify the returned evidence.
+After deployment, refresh the connector's tool definitions or reconnect if the harness caches schemas. Restart any in-progress query carrying an old cursor. Employee keys and connected OAuth grants remain valid. MCP citation paths retain the endpoint and filters but omit pagination cursors; assessment citations also omit employee-supplied criteria, which remain in the structured result. Record IDs and `meta.requestId` identify the returned evidence.

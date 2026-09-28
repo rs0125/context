@@ -29,8 +29,8 @@ function answerFor(entry: ReturnType<typeof call>, summary = 'Synthetic answer w
 const scenario = (id: string) => SCENARIOS.find((item: { id: string }) => item.id === id)!;
 
 describe('natural-language evaluation with current real MCP definitions', () => {
-  it('discovers thirteen read-only tools through the SDK without business reads or OAuth state', () => {
-    expect(catalog.tools).toHaveLength(13);
+  it('discovers fourteen read-only tools through the SDK without business reads or OAuth state', () => {
+    expect(catalog.tools).toHaveLength(14);
     expect(read).not.toHaveBeenCalled();
     expect(catalog.requests).toBeLessThanOrEqual(8);
     expect(catalog.instructions).toContain('native creation');
@@ -41,6 +41,9 @@ describe('natural-language evaluation with current real MCP definitions', () => 
     expect(instructions).not.toContain('Counts require summary tools');
     expect(instructions).not.toContain('fit in one page');
     expect(EVIDENCE_LIMITATION).toContain('not production Claude task validation');
+  });
+  it('does not simulate a shortlist with the generic lead-search fixture', () => {
+    expect(() => fixtureResult('assess_shortlist', { lead_id: LEADS[0].id }, catalog.tools)).toThrow('FIXTURE_UNSUPPORTED_TOOL');
   });
   it('rejects write-like or unexpected catalog tools', () => {
     const original = catalog.tools[0];
@@ -468,7 +471,7 @@ describe('bounded model calls and private transport', () => {
   it('creates a temporary grant for metadata only and revokes it before returning definitions', async () => {
     const mock = oauthFixture();
     const live = await fetchAuthorizedCatalog({ base: new URL(origin), employeeKey: 'synthetic-employee-secret', fetchImpl: mock.fetchImpl });
-    expect(live.tools).toHaveLength(13);
+    expect(live.tools).toHaveLength(14);
     expect(live.temporary_grant_revoked).toBe(true);
     expect(mock.calls.at(-1)?.path).toBe('/oauth/revoke');
     expect(mock.calls.filter(item => item.path === '/mcp').every(item => !item.rpc || ['initialize', 'notifications/initialized', 'tools/list'].includes(item.rpc))).toBe(true);
@@ -484,7 +487,7 @@ describe('bounded model calls and private transport', () => {
     const mock = vi.fn(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(init.body as string);
       expect(body.store).toBe(false);
-      expect(body.tools).toHaveLength(13);
+      expect(body.tools).toHaveLength(14);
       expect(body.tools.every((tool: { strict: boolean }) => tool.strict === false)).toBe(true);
       expect(init.body).not.toContain('openai-synthetic-secret');
       expect(init.body).not.toContain('synthetic-key-for-catalog-only');

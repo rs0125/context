@@ -5,6 +5,7 @@ import { CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS, CRM_INDUSTRIES, CRM_OCCUPANCY_TI
 import { z } from "zod";
 import { SCOPES } from "./auth";
 import { ga4ToolInput, searchConsoleToolInput, analyticsQueryParameters, analyticsReportOutput, analyticsCapabilitiesOutput } from "./analytics-tooling";
+import { shortlistAssessmentQuerySchema, shortlistAssessmentOutput } from "./shortlist-assessment";
 
 const errorResponses = Object.fromEntries(Object.entries({
   "400": { description: "Invalid query parameters or record identifier." },
@@ -348,6 +349,11 @@ const crmAccessProperties = {
   field_semantics: { type: "string", description: "Interpretation limits for recorded categories, monetary values and activity counters." },
 };
 const crmAccessRequired = Object.keys(crmAccessProperties);
+const shortlistSchema = z.toJSONSchema(shortlistAssessmentOutput);
+const shortlistQueryParameters = Object.entries(z.toJSONSchema(shortlistAssessmentQuerySchema).properties ?? {}).map(([name, schema]) => ({
+  name, in: "query", required: false, schema,
+  ...(name === "warehouse_ids" ? { style: "form", explode: false, description: "One to five unique visible warehouse IDs, comma-separated. Omit for requirement checks only." } : {}),
+}));
 const crmContextItemCommon = { id: { type: "string", format: "uuid" }, source_created_at: nullableDate, source_updated_at: nullableDate };
 const crmNarrativeProperties = { ...crmContextItemCommon, title: { $ref: "#/components/schemas/CrmText" }, body: { $ref: "#/components/schemas/CrmText" } };
 const crmContextCommonProperties = {
@@ -430,7 +436,7 @@ export function getOpenApiDocument() {
       },
       "/analytics/ga4": {
         get: { operationId: "ga4Report", tags: ["Analytics"], summary: "Read a bounded GA4 report",
-          description: "Admin-only report presets with AND filters for entry path, device, country label and session channel/source. Traffic reports include engagement rates, engagement time per session/per active user and average session duration by default; seconds, fraction units and same-row calculations are explicit in columns. pages reports viewed paths and engagement per active user; landing_pages reports session entry paths and session timing. first_visits reports first_visit events by entry path; form_submissions separates form_submit and generate_lead by recorded event page. page_path_contains filters recorded event context on pages/events/form_submissions; it combines with landing_page_contains using AND. Interpret event definitions and scope in the returned interpretation object; never divide recorded-page event counts by entry-page sessions without matching populations. No individual journeys or CRM linkage are exposed. Dates are inclusive in the GA4 property timezone; maximum 93 days. Default is the last 28 completed days. overview supports compare_to=previous_period for adjacent equal-length aggregate comparisons. Preserve both periods' dates, source_fetched_at, cache age and quality warnings. Rows are not a frozen snapshot. Events/key events are not unique CRM leads, sequential conversion funnels or revenue. Grouped users are not additive; do not average row rates or durations for overall metrics.",
+          description: "Admin-only report presets with AND filters for entry path, device, country label and session channel/source. Traffic reports include engagement rates, engagement time per session/per active user and average session duration by default; seconds, fraction units and same-row calculations are explicit in columns. pages reports viewed paths and engagement per active user; landing_pages reports session entry paths and session timing. form_performance computes separate form-event counts and events per 100 matching entry sessions in the backend, preserving component quality and timestamps; use the same dates and segments for each compared cohort. first_visits reports first_visit events by entry path; form_submissions separates form_submit and generate_lead by recorded event page. page_path_contains filters recorded event context on pages/events/form_submissions; it combines with landing_page_contains using AND. Interpret event definitions and scope in the returned interpretation object; never divide recorded-page event counts by entry-page sessions without matching populations. No individual journeys or CRM linkage are exposed. Dates are inclusive in the GA4 property timezone; maximum 93 days. Default is the last 28 completed days. overview supports compare_to=previous_period for adjacent equal-length aggregate comparisons. Preserve both periods' dates, source_fetched_at, cache age and quality warnings. Rows are not a frozen snapshot. Events/key events are not unique CRM leads, sequential conversion funnels or revenue. Grouped users are not additive; do not average row rates or durations for overall metrics.",
           parameters: analyticsQueryParameters(ga4ToolInput),
           responses: jsonResponses("Aggregate website metrics with source dates, quality and pagination.", false, z.toJSONSchema(analyticsReportOutput)),
         },
@@ -652,6 +658,17 @@ export function getOpenApiDocument() {
           description: "Requires live creator/assignment authorization or verified Twenty Admin membership. Returns the same structured fields as search and briefing plus masked description and loss_reason, from one mirrored row. Recorded ownership and close_date do not establish authorization or actual deal closure. This request takes a new database snapshot; a previous search may have observed an older version. Inspect source_updated_at, last_polled_at, read_consistency and activity_status. Budget/recorded-value interpretations require verification. Unavailable or incomplete live verification denies CRM access.",
           parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
           responses: jsonResponses("An authorized opportunity, with access scope and mirror freshness information.", false, { $ref: "#/components/schemas/OpportunityDetail" }),
+        },
+      },
+      "/crm/opportunities/{id}/assessment": {
+        get: {
+          operationId: "assessShortlist", tags: ["CRM"], summary: "Check a lead's requirements and compare selected warehouses",
+          description: "Requires current live CRM authorization and a fresh mirror. Omit warehouse_ids for a requirement checklist; include one to five IDs for comparisons and verification questions, which additionally requires current warehouses:read permission. Optional criteria must be explicitly supplied by the employee; they do not update CRM. Lead facts, inventory and freshness metadata share one final repeatable-read transaction after live authorization. Recorded matches are not confirmation of availability, suitability or client approval. Comparisons cover only supplied IDs; this is not inventory search or a suitability ranking. If any selected property is unavailable, the request fails without returning a partial assessment.",
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }, ...shortlistQueryParameters],
+          responses: jsonResponses("Requirement evidence, selected-property checks and verification questions with source freshness.", false, {
+            ...shortlistSchema, required: [...(shortlistSchema.required ?? []), ...crmAccessRequired],
+            properties: { ...shortlistSchema.properties, ...crmAccessProperties },
+          }),
         },
       },
       "/crm/my-briefing": {

@@ -340,6 +340,20 @@ export async function getWarehouse(client: PoolClient, id: number) {
   return result.rows[0] ? warehouse(result.rows[0]) : null;
 }
 
+/** A selected shortlist, not a new inventory search. Reuses visibility and the
+ * public field projection on the caller's existing repeatable-read snapshot. */
+export async function getWarehousesByIds(client: PoolClient, ids: readonly number[]) {
+  if (!ids.length || ids.length > 5 || new Set(ids).size !== ids.length
+    || ids.some(id => !Number.isSafeInteger(id) || id <= 0 || id > MAX_ID)) {
+    invalid('Select one to five distinct warehouse identifiers.');
+  }
+  const result = await client.query<Row>(
+    `SELECT ${COLUMNS} ${FROM} WHERE w.visibility IS TRUE AND w.id = ANY($1::int[]) LIMIT 5`, [[...ids]],
+  );
+  const rows = new Map(result.rows.map(row => [row.id, warehouse(row)]));
+  return ids.flatMap(id => { const item = rows.get(id); return item ? [item] : []; });
+}
+
 export async function getWarehouseFilterOptions(client: PoolClient, query: URLSearchParams) {
   validateKeys(query, ['city', 'state']);
   const values: unknown[] = [];

@@ -39,6 +39,10 @@ const METRICS: Record<string, { unit: string; definition?: string; calculation?:
   bounceRate: { unit: 'fraction', definition: 'Proportion of sessions that were not engaged; 0.4 means 40%.', calculation: '1 - engagementRate' },
   screenPageViewsPerSession: { unit: 'views_per_session', definition: 'Recorded page and screen views per session, including repeated views.', calculation: 'screenPageViews / sessions' },
   eventsPerSession: { unit: 'events_per_session', definition: 'Recorded events per session, not unique actions or unique leads.', calculation: 'eventCount / sessions' },
+  formSubmitEventCount: { unit: 'events', definition: 'Recorded form_submit occurrences during the selected session-entry cohort, including repeats. Not unique or server-accepted enquiries.' },
+  generateLeadEventCount: { unit: 'events', definition: 'Recorded generate_lead occurrences during the selected session-entry cohort, including repeats. Not unique CRM leads.' },
+  formSubmitEventsPer100EntrySessions: { unit: 'events_per_100_sessions', definition: 'Separate form_submit occurrences per 100 sessions with matching dates and session filters. May exceed 100; not a visitor or session conversion percentage.', calculation: 'formSubmitEventCount / sessions * 100' },
+  generateLeadEventsPer100EntrySessions: { unit: 'events_per_100_sessions', definition: 'Separate generate_lead occurrences per 100 sessions with matching dates and session filters. May exceed 100; not a visitor or session conversion percentage.', calculation: 'generateLeadEventCount / sessions * 100' },
 };
 // Ten native metrics is the Data API request limit. Derived values below use
 // the same validated aggregate row and do not add Google requests or metrics.
@@ -53,6 +57,7 @@ const STATIC_PRESETS: Record<Exclude<Ga4Query['report'], 'warehouse_interest' | 
   events: { dimensions: ['eventName'], metrics: ['eventCount', 'totalUsers'] },
   first_visits: { dimensions: ['landingPage'], metrics: ['eventCount', 'totalUsers'] },
   form_submissions: { dimensions: ['eventName', 'pagePath'], metrics: ['eventCount', 'totalUsers'] },
+  form_performance: { dimensions: [], metrics: ['sessions', 'formSubmitEventCount', 'generateLeadEventCount', 'formSubmitEventsPer100EntrySessions', 'generateLeadEventsPer100EntrySessions'] },
 };
 const CUSTOM_WAREHOUSE = ['warehouse_city', 'warehouse_state', 'market_slug'];
 const CUSTOM_LEADS = ['lead_type', 'origin_placement'];
@@ -268,7 +273,7 @@ function envelope(system: 'ga4' | 'search_console', property: string, report: st
   result: { data: { items: Item[]; quality: Quality; sourceRowCount: number | null; quota: Quota; hasMore?: boolean };
     source_fetched_at: string; cache_hit: boolean }, page: ReturnType<typeof analyticsPagination>) {
   const { items, quality: q, sourceRowCount } = result.data;
-  const aggregate = report === 'overview' || report === 'summary';
+  const aggregate = report === 'overview' || report === 'summary' || report === 'form_performance';
   q.totals_included = aggregate;
   const nextOffset = page.offset + items.length;
   const sourceMore = result.data.hasMore ?? (sourceRowCount !== null && nextOffset < sourceRowCount);
@@ -305,6 +310,7 @@ export async function ga4Report(params: URLSearchParams) {
   return withinDeadline(async signal => {
     const config = await gaConfiguration(property, signal);
     const dates = resolveAnalyticsDates(query, config.timezone);
+    if (query.report === 'form_performance') return readFormPerformance(query, property, config, dates, signal);
     if (!query.compare_to) return readGa4Report(query, property, config, dates, signal);
     const previous = previousAnalyticsDates(dates);
     const [current, baseline] = await Promise.all([
@@ -319,18 +325,11 @@ async function readGa4Report(query: Ga4Query, property: string, config: Awaited<
   const selected = preset(query, config.custom);
   const page = analyticsPagination(query, dates, `${analyticsCredentials().identity}:ga4:${property}`);
   const limit = query.report === 'overview' ? 1 : page.limit;
-  const filter = (fieldName: string, value: string, matchType = 'EXACT') => ({ filter: { fieldName, stringFilter: { matchType, value, caseSensitive: true } } });
-  const eventFilter = selected.events.length === 1 ? filter('eventName', selected.events[0])
-    : selected.events.length > 1 ? { filter: { fieldName: 'eventName', inListFilter: { values: selected.events, caseSensitive: true } } } : null;
-  const filters = [eventFilter,
-    query.landing_page_contains ? filter('landingPage', query.landing_page_contains, 'CONTAINS') : null,
-    query.page_path_contains ? filter('pagePath', query.page_path_contains, 'CONTAINS') : null,
-    query.device ? filter('deviceCategory', query.device) : null, query.country ? filter('country', query.country) : null,
-    query.channel ? filter('sessionDefaultChannelGroup', query.channel) : null, query.source ? filter('sessionSource', query.source) : null].filter(x => x !== null);
+  const dimensionFilter = gaDimensionFilter(query, selected.events);
   const body = { dateRanges: [{ startDate: dates.date_from, endDate: dates.date_to }],
     dimensions: selected.dimensions.map(name => ({ name })), metrics: selected.metrics.map(name => ({ name })),
     limit: String(limit), offset: String(page.offset), returnPropertyQuota: true,
-    ...(filters.length ? { dimensionFilter: filters.length === 1 ? filters[0] : { andGroup: { expressions: filters } } } : {}),
+    ...(dimensionFilter ? { dimensionFilter } : {}),
       ...(selected.dimensions.length ? { orderBys: query.report === 'daily' ? [{ dimension: { dimensionName: 'date' } }] : [
       { metric: { metricName: ['acquisition', 'landing_pages'].includes(query.report) ? 'sessions' : selected.metrics[0] }, desc: true }, ...selected.dimensions.map(name => ({ dimension: { dimensionName: name } })),
     ] } : {}),
@@ -352,6 +351,87 @@ async function readGa4Report(query: Ga4Query, property: string, config: Awaited<
   if (query.landing_page_contains || query.channel || query.source) warn(result.data.quality, 'Landing-page and acquisition filters describe session context. They do not isolate only events that occurred on the landing path or identify the first source of a person.');
   return envelope('ga4', property, query.report, query, dates,
     [...selected.dimensions.map(name => column(name, 'dimension')), ...gaOutputMetrics(selected.metrics).map(name => column(name, 'metric'))], result, { ...page, limit });
+}
+
+function gaDimensionFilter(query: Ga4Query, events: string[]) {
+  const filter = (fieldName: string, value: string, matchType = 'EXACT') => ({ filter: { fieldName, stringFilter: { matchType, value, caseSensitive: true } } });
+  const eventFilter = events.length === 1 ? filter('eventName', events[0])
+    : events.length > 1 ? { filter: { fieldName: 'eventName', inListFilter: { values: events, caseSensitive: true } } } : null;
+  const filters = [eventFilter,
+    query.landing_page_contains ? filter('landingPage', query.landing_page_contains, 'CONTAINS') : null,
+    query.page_path_contains ? filter('pagePath', query.page_path_contains, 'CONTAINS') : null,
+    query.device ? filter('deviceCategory', query.device) : null, query.country ? filter('country', query.country) : null,
+    query.channel ? filter('sessionDefaultChannelGroup', query.channel) : null, query.source ? filter('sessionSource', query.source) : null].filter(x => x !== null);
+  return filters.length === 0 ? null : filters.length === 1 ? filters[0] : { andGroup: { expressions: filters } };
+}
+
+/** Keep event and denominator requests in one operation. All source rows are
+ * dimensionless aggregates; no top-N reconstruction or cross-page matching. */
+async function readFormPerformance(query: Ga4Query, property: string, config: Awaited<ReturnType<typeof gaConfiguration>>,
+  dates: ReturnType<typeof resolveAnalyticsDates>, signal: AbortSignal) {
+  const specs = [
+    { name: 'sessions', metric: 'sessions', event: null },
+    { name: 'form_submit', metric: 'eventCount', event: 'form_submit' },
+    { name: 'generate_lead', metric: 'eventCount', event: 'generate_lead' },
+  ] as const;
+  const page = { ...analyticsPagination(query, dates, `${analyticsCredentials().identity}:ga4:${property}`), limit: 1 };
+  const components = await Promise.all(specs.map(async spec => {
+    const dimensionFilter = gaDimensionFilter(query, spec.event ? [spec.event] : []);
+    const result = await googleAnalyticsRead({ kind: 'ga4_report', property }, {
+      dateRanges: [{ startDate: dates.date_from, endDate: dates.date_to }], dimensions: [], metrics: [{ name: spec.metric }],
+      limit: '1', offset: '0', returnPropertyQuota: true, ...(dimensionFilter ? { dimensionFilter } : {}),
+    }, raw => projectGa(raw, [], [spec.metric], 1), signal);
+    if (result.data.timezone !== config.timezone) analyticsSourceError('ANALYTICS_TIMEZONE_CHANGED');
+    if (result.data.sourceRowCount > 1) analyticsSourceError();
+    result.data.quality.provisional = dates.includes_recent_days;
+    if (dates.includes_recent_days) warn(result.data.quality, 'Recent GA4 dates are still processing and may change. Fetch time is not a data-completeness timestamp.');
+    const componentQuery: Ga4Query = { ...query, report: spec.event ? 'events' : 'overview', event_name: spec.event };
+    const report = envelope('ga4', property, 'overview', componentQuery, dates, [column(spec.metric, 'metric')], result, page);
+    return { name: spec.name, metric: spec.metric, value: report.items[0]?.metrics[spec.metric] ?? null,
+      query_context: report.query_context, source_fetched_at: report.source_fetched_at, served_at: report.served_at,
+      cache: report.cache, quality: report.quality, quota: report.quota };
+  }));
+  const [sessions, submitted, generated] = components;
+  const qualityLimited = (component: typeof sessions) => component.quality.subject_to_thresholding || component.quality.data_loss_from_other_row
+    || component.quality.data_truncated || component.quality.sampling.length > 0 || component.quality.schema_restrictions.length > 0 || component.quality.empty_reason !== null;
+  const calculate = (component: typeof sessions) => {
+    const numerator = component.value;
+    const denominator = sessions.value;
+    const status = numerator === null || denominator === null ? 'missing_data' as const
+      : qualityLimited(component) || qualityLimited(sessions) ? 'source_quality_limited' as const
+        : denominator === 0 ? 'zero_sessions' as const : 'available' as const;
+    const value = status === 'available' ? numerator! / denominator! * 100 : null;
+    if (value !== null && (!Number.isFinite(value) || value > Number.MAX_SAFE_INTEGER)) return { value: null, status: 'invalid_calculation' as const };
+    return { value, status };
+  };
+  const submittedRatio = calculate(submitted);
+  const generatedRatio = calculate(generated);
+  const q = quality();
+  q.provisional = dates.includes_recent_days;
+  for (const component of components) {
+    for (const warning of component.quality.warnings) warn(q, `${component.name}: ${warning}`);
+    q.data_loss_from_other_row ||= component.quality.data_loss_from_other_row;
+    q.subject_to_thresholding ||= component.quality.subject_to_thresholding;
+    q.data_truncated ||= component.quality.data_truncated;
+    q.sampling.push(...component.quality.sampling);
+    q.schema_restrictions.push(...component.quality.schema_restrictions);
+  }
+  warn(q, 'Three independent aggregate reads use identical dates and session-entry filters. Fetch/cache times may differ; this is not a frozen source snapshot. See form_performance.components.');
+  warn(q, 'Form events can occur anywhere during matching sessions. They are not restricted to the entry page or linked to a visitor first touch.');
+  warn(q, 'form_submit and generate_lead can represent the same enquiry or repeated attempts. Never add them together. Events per 100 entry sessions are not a visitor/session conversion percentage and may exceed 100.');
+  if (submittedRatio.value === null || generatedRatio.value === null) warn(q, 'At least one ratio is unavailable because inputs are missing, quality-limited, invalid or sessions are zero. Do not reconstruct withheld ratios or replace missing values with zero.');
+  if (components.every(component => component.value === null)) q.empty_reason = 'All component aggregates are unavailable; this does not establish zero underlying activity.';
+  const item: Item = { dimensions: {}, metrics: { sessions: sessions.value, formSubmitEventCount: submitted.value, generateLeadEventCount: generated.value,
+    formSubmitEventsPer100EntrySessions: submittedRatio.value, generateLeadEventsPer100EntrySessions: generatedRatio.value },
+    redacted: false, verification_required: submittedRatio.status !== 'available' || generatedRatio.status !== 'available' };
+  const source_fetched_at = components.map(component => component.source_fetched_at).sort()[0];
+  return { ...envelope('ga4', property, query.report, query, dates,
+    STATIC_PRESETS.form_performance.metrics.map(name => column(name, 'metric')),
+    { data: { items: [item], quality: q, sourceRowCount: null, quota: null }, source_fetched_at, cache_hit: components.every(component => component.cache.hit) }, page),
+    form_performance: { matching_cohort: true as const, read_consistency: 'independent_source_reads' as const,
+      denominator: 'matching_entry_sessions' as const, components,
+      ratios: [{ event_name: 'form_submit' as const, metric: 'formSubmitEventsPer100EntrySessions', ...submittedRatio },
+        { event_name: 'generate_lead' as const, metric: 'generateLeadEventsPer100EntrySessions', ...generatedRatio }] } };
 }
 export async function searchConsoleReport(params: URLSearchParams) {
   const query = validateSearchConsoleQuery(params);
@@ -446,7 +526,9 @@ export async function analyticsCapabilities() {
         if (!config) return { name, available: false, reason: 'GA4 report availability could not be verified.', dimensions: [], metrics: [], event_name: null, event_names: [] };
         try {
           const p = preset(validateGa4Query(new URLSearchParams({ report: name })), config.custom);
-          return { name, available: true, reason: null, dimensions: p.dimensions.map(x => x.replace('customEvent:', '')), metrics: gaOutputMetrics(p.metrics), event_name: p.events.length === 1 ? p.events[0] : null, event_names: p.events };
+          return { name, available: true, reason: null, dimensions: p.dimensions.map(x => x.replace('customEvent:', '')), metrics: gaOutputMetrics(p.metrics),
+            event_name: p.events.length === 1 ? p.events[0] : null, event_names: p.events,
+            read_strategy: name === 'form_performance' ? 'three_matched_aggregates' : 'single_report' };
         } catch { return { name, available: false, reason: 'No supported custom dimensions are registered for this report.', dimensions: [], metrics: [], event_name: null, event_names: [] }; }
       }) },
       search_console: { status: site ? 'configured_not_verified' : 'not_configured', property: site, timezone: 'America/Los_Angeles', groups: SEARCH_CONSOLE_GROUPS },
@@ -458,6 +540,7 @@ export async function analyticsCapabilities() {
         'GA4 pages reports visited paths by views; landing_pages reports session entries. Segment reports with device, country, channel, source or landing_page_contains.',
         'first_visits reports recorded first_visit events by session entry path. It does not link the first visitors to later sessions or CRM.',
         'form_submissions separates form_submit and generate_lead by recorded event page; page_path_contains filters that context on pages/events/form_submissions. Neither is a unique CRM-lead count.',
+        'form_performance uses three aggregate reads with identical dates and session-entry filters: all sessions, form_submit events, and generate_lead events. It calculates separate events per 100 matching entry sessions, not visitor/session conversion percentages. Read component quality and times; no custom dimensions are required. It rejects event_name, page_path_contains, cursor and compare_to.',
         'Event definitions are Google definitions or audited website source behavior, not verification of deployed tracking throughout the selected dates. Missing fields in this connector do not prove they are absent upstream.',
         'GA4 traffic reports include session duration, foreground engagement time, rates and per-session activity. Metric definitions and calculated formulas are exposed; undefined averages are null, never zero.',
         'Search Console query_page shows query/page pairs. Exact query_equals/page_equals and query_not_contains support focused investigation; query filters exclude anonymized searches.',

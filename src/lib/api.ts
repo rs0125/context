@@ -6,16 +6,17 @@ import { HttpError } from './errors';
 import { rateLimit } from './rate-limit';
 import { listKnowledge, readKnowledge, searchKnowledge } from './knowledge';
 import { getOpenApiDocument } from './openapi';
-import { getFreshness, getMyBriefing, getOpportunity, getCrmStageHistory, getWarehouse, getWarehouseFilterOptions, searchOpportunities, searchWarehouses, validateCrmQuery, summarizeWarehouses, summarizeOpportunities, getCrmFilterOptions } from './data';
+import { getFreshness, getMyBriefing, getOpportunity, getCrmStageHistory, getWarehouse, getWarehousesByIds, getWarehouseFilterOptions, searchOpportunities, searchWarehouses, validateCrmQuery, summarizeWarehouses, summarizeOpportunities, getCrmFilterOptions } from './data';
 import { getLiveCrmAccess, type CrmAccess, type CrmView } from './crm-live';
 import { clockContext } from './query-time';
 import { getRelatedCrmContext } from './crm-related';
 import { parseCrmContextQuery } from './crm-context-query';
 import { analyticsCapabilities, ga4Report, searchConsoleReport, validateGa4Query, validateSearchConsoleQuery } from './analytics';
+import { parseShortlistAssessmentQuery, buildShortlistAssessment } from './shortlist-assessment';
 
-const ANALYTICS_GUIDANCE = 'Admin-only aggregate website analytics: /api/v1/analytics/capabilities discovers supported reports; /api/v1/analytics/ga4 reports traffic and recorded events; /api/v1/analytics/search-console reports Google organic search. Analytics dates use the source timezone, not necessarily the India server clock. Preserve source_fetched_at, resolved dates, quality warnings and pagination. Recent data may change. Event counts are not unique CRM leads or a sequential conversion funnel; Search Console clicks are not GA sessions. Failed reads mean unavailable, never zero.';
+const ANALYTICS_GUIDANCE = 'Admin-only aggregate website analytics: /api/v1/analytics/capabilities discovers supported reports; /api/v1/analytics/ga4 reports traffic and recorded events; /api/v1/analytics/search-console reports Google organic search. Analytics dates use the source timezone, not necessarily the India server clock. Preserve source_fetched_at, resolved dates, quality warnings and pagination. For form activity per session use ga4?report=form_performance with a landing_page_contains filter; its separate event ratios use matching entry sessions. For relative comparisons resolve period on the first group and reuse the returned dates for later groups. Recent data may change. Event counts are not unique CRM leads or a sequential conversion funnel; Search Console clicks are not GA sessions. Failed reads mean unavailable, never zero.';
 
-const QUERY_GUIDANCE = `Warehouse and CRM dates use Asia/Kolkata and the server clock. For warehouses added today in Bangalore use warehouses?city=Bangalore&period=today&sort=created_desc. For leads created this month use crm/opportunities?period=this_month; add view=created only for leads created BY you. Native Twenty creation time is source_created_at; it is not the mirror insertion time. Use date_field=follow_up&period=tomorrow for tomorrow's follow-ups. A date range uses inclusive YYYY-MM-DD date_from/date_to, or period, not both. Inspect query_context for resolved start_at/end_before and has_more; only summaries give full counts. Use warehouses/summary and crm/summary with the same filters for totals and grouped counts. Use crm/filters for stages, dates, sorting and permitted cities. Missing dates do not match date filters. Unknown is not zero. Updated timestamps do not establish an edit history, newly available inventory, or historical conversion rates. Keep filters and sort unchanged when passing nextCursor; searches are not frozen snapshots across concurrent source edits.`;
+const QUERY_GUIDANCE = `Warehouse and CRM dates use Asia/Kolkata and the server clock. For warehouses added today in Bangalore use warehouses?city=Bangalore&period=today&sort=created_desc. For leads created this month use crm/opportunities?period=this_month; add view=created only for leads created BY you. Native Twenty creation time is source_created_at; it is not the mirror insertion time. Use date_field=follow_up&period=tomorrow for tomorrow's follow-ups. A date range uses inclusive YYYY-MM-DD date_from/date_to, or period, not both. Inspect query_context for resolved start_at/end_before and has_more; only summaries give full counts. Use warehouses/summary and crm/summary with the same filters for totals and grouped counts. Use crm/filters for stages, dates, sorting and permitted cities. Use crm/opportunities/{id}/assessment for a requirement checklist; add warehouse_ids as one to five comma-separated IDs for property comparisons and verification questions. Optional criteria must be supplied by the employee, not inferred; overrides never update CRM. Missing dates do not match date filters. Unknown is not zero. Updated timestamps do not establish an edit history, newly available inventory, or historical conversion rates. Keep filters and sort unchanged when passing nextCursor; searches are not frozen snapshots across concurrent source edits.`;
 
 type ApiDependencies = {
   transaction: <T>(work: (client: PoolClient) => Promise<T>) => Promise<T>;
@@ -129,7 +130,7 @@ async function dispatch(client: PoolClient, principal: Principal, path: string[]
     return { value };
   }
   if (path[0] === 'crm' && (route === 'crm/opportunities' || route === 'crm/my-briefing' || route === 'crm/summary' || route === 'crm/filters'
-      || (path.length === 3 && path[1] === 'opportunities') || (path.length === 4 && path[1] === 'opportunities' && path[3] === 'context'))) {
+      || (path.length === 3 && path[1] === 'opportunities') || (path.length === 4 && path[1] === 'opportunities' && ['context', 'assessment'].includes(path[3])))) {
     requireScope(principal, 'crm:read');
     if (!crmAccess) throw new HttpError(503, 'CRM_VERIFICATION_UNAVAILABLE', 'Current CRM access could not be verified.');
     // This checkpoint read and every lead projection below share the final
@@ -142,6 +143,18 @@ async function dispatch(client: PoolClient, principal: Principal, path: string[]
     if (route === 'crm/opportunities') return { value: { ...await searchOpportunities(client, principal, query, crmAccess), access_scope, ...freshness } };
     if (route === 'crm/summary') return { value: { ...await summarizeOpportunities(client, principal, query, crmAccess), access_scope, ...freshness } };
     if (route === 'crm/filters') return { value: { ...await getCrmFilterOptions(client, principal, query, crmAccess), access_scope, ...freshness } };
+    if (path.length === 4 && path[3] === 'assessment') {
+      const options = parseShortlistAssessmentQuery(query);
+      const ids = options.warehouse_ids ?? [];
+      if (ids.length) requireScope(principal, 'warehouses:read');
+      const lead = await getOpportunity(client, principal, path[2], crmAccess);
+      if (!lead) throw new HttpError(404, 'NOT_FOUND', 'Opportunity not found.');
+      // Lead, inventory and freshness share this final snapshot. No upstream
+      // HTTP, extra pool, or per-item transaction is introduced for the shortlist.
+      const warehouses = ids.length ? await getWarehousesByIds(client, ids) : [];
+      if (warehouses.length !== ids.length) throw new HttpError(404, 'NOT_FOUND', 'One or more selected warehouses are unavailable.');
+      return { value: { ...buildShortlistAssessment(lead, warehouses, options), access_scope, ...freshness } };
+    }
     if (path.length === 4) {
       const options = parseCrmContextQuery(query);
       const lead = await getOpportunity(client, principal, path[2], crmAccess);
@@ -224,11 +237,13 @@ export async function handleApiRequest(request: Request, path: string[], depende
     }
     if (path[0] === 'crm') {
       const route = path.join('/');
+      const assessment = path.length === 4 && path[1] === 'opportunities' && path[3] === 'assessment'
+        ? parseShortlistAssessmentQuery(new URL(request.url).searchParams) : undefined;
       let view: CrmView = 'accessible';
       if (['crm/opportunities', 'crm/summary', 'crm/filters'].includes(route)) view = validateCrmQuery(new URL(request.url).searchParams, route === 'crm/summary' ? 'summary' : route === 'crm/filters' ? 'filters' : 'search').view;
-      else if (route === 'crm/my-briefing' || (path.length === 3 && path[1] === 'opportunities') || (path.length === 4 && path[1] === 'opportunities' && path[3] === 'context')) {
-        if (path.length === 4) parseCrmContextQuery(new URL(request.url).searchParams);
-        else strictQuery(new URL(request.url).searchParams, []);
+      else if (route === 'crm/my-briefing' || (path.length === 3 && path[1] === 'opportunities') || (path.length === 4 && path[1] === 'opportunities' && ['context', 'assessment'].includes(path[3]))) {
+        if (path.length === 4 && path[3] === 'context') parseCrmContextQuery(new URL(request.url).searchParams);
+        else if (!assessment) strictQuery(new URL(request.url).searchParams, []);
         if (path.length >= 3 && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(path[2])) {
           throw new HttpError(400, 'INVALID_QUERY', 'Opportunity id must be a UUID.');
         }
@@ -238,6 +253,7 @@ export async function handleApiRequest(request: Request, path: string[], depende
         const principal = await resolvePrincipal(client, key);
         employeeId = principal.employeeId;
         requireScope(principal, 'crm:read');
+        if (assessment?.warehouse_ids?.length) requireScope(principal, 'warehouses:read');
         assertFreshCrm(await getFreshness(client));
         return principal;
       });
@@ -245,7 +261,7 @@ export async function handleApiRequest(request: Request, path: string[], depende
       crmAccess = path.length >= 3 && path[1] === 'opportunities'
         ? await deps.liveCrmAccess(verifiedPrincipal, view, path[2])
         : await deps.liveCrmAccess(verifiedPrincipal, view);
-      if (path.length === 4) {
+      if (path.length === 4 && path[3] === 'context') {
         const options = parseCrmContextQuery(new URL(request.url).searchParams);
         if (options.section !== 'stage_history') {
           relatedContext = await deps.relatedCrmContext(verifiedPrincipal, path[2], { ...options, section: options.section, access: crmAccess });
@@ -293,6 +309,7 @@ export async function handleApiRequest(request: Request, path: string[], depende
       ? route : path.length === 2 && path[0] === 'warehouses' ? 'warehouses/read'
         : path.length === 3 && path[0] === 'wiki' && path[1] === 'pages' ? 'wiki/read'
           : path.length === 4 && path[0] === 'crm' && path[1] === 'opportunities' && path[3] === 'context' ? 'crm/context'
+            : path.length === 4 && path[0] === 'crm' && path[1] === 'opportunities' && path[3] === 'assessment' ? 'crm/assessment'
             : path.length === 3 && path[0] === 'crm' && path[1] === 'opportunities' ? 'crm/read' : 'unknown';
     deps.audit({ event: 'context_read', requestId, operation, keyId, employeeId, status, ...(errorCode ? { error_code: errorCode } : {}), durationMs: Date.now() - started });
   }
