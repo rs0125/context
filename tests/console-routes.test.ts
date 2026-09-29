@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { consoleCookie, createConsoleSession, type ConsoleIdentity } from '../src/lib/console-auth';
+import { REST_PROMPT_TEMPLATE } from '../src/lib/prompt-definitions';
 import { encryptConsoleKey } from '../src/lib/console-keys';
 
 const mocks = vi.hoisted(() => ({ query: vi.fn(), read: vi.fn(), write: vi.fn() }));
@@ -27,6 +28,7 @@ beforeEach(() => {
   mocks.read.mockImplementation(async (work: (client: PoolClient) => unknown) => work(client));
   mocks.write.mockImplementation(async (work: (client: PoolClient) => unknown) => work(client));
   mocks.query.mockImplementation(async (sql: string, values: unknown[]) => {
+    if (sql.includes('to_regclass')) return { rows: [{ relation: null }] };
     if (sql.includes('VerifiedNumber')) return { rows: [roster] };
     if (sql.startsWith('INSERT')) {
       const [id, employee_id, employee_email, token_hash, encrypted_token, scopes, expires_at] = values;
@@ -49,7 +51,7 @@ describe('console HTTP boundaries', () => {
     vi.stubEnv('CONTEXT_CONSOLE_WRITES_ENABLED', 'false');
     const response = await getMe(request('/api/console/me'));
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ employee: { email: identity.email, name: identity.name, isAdmin: false, scopes: identity.scopes }, apiBaseUrl: `${origin}/api/v1`, capabilities: { writesEnabled: false } });
+    expect(await response.json()).toEqual({ employee: { email: identity.email, name: identity.name, isAdmin: false, scopes: identity.scopes }, apiBaseUrl: `${origin}/api/v1`, restPromptTemplate: REST_PROMPT_TEMPLATE, capabilities: { writesEnabled: false } });
     expect(response.headers.get('cache-control')).toContain('no-store');
     expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('employee_api_keys'))).toBe(false);
   });
@@ -58,6 +60,23 @@ describe('console HTTP boundaries', () => {
     expect((await getMe(new Request(`${origin}/api/console/me`))).status).toBe(401);
     expect((await getKey(new Request(`${origin}/api/console/key`))).status).toBe(401);
     expect(mocks.read).not.toHaveBeenCalled(); expect(mocks.write).not.toHaveBeenCalled();
+  });
+
+  it('delivers the saved REST prompt to employees without exposing the admin prompt catalog', async () => {
+    const originalQuery = mocks.query.getMockImplementation()!;
+    mocks.query.mockImplementation(async (sql: string, values: unknown[]) => {
+      if (sql.includes('to_regclass')) return { rows: [{ relation: 'context_prompts_private.prompt_overrides' }] };
+      if (sql.includes('FROM context_prompts_private.prompt_overrides')) return { rows: [
+        { id: 'rest', body: 'Connect at {{apiBaseUrl}}', revision: '00000000-0000-4000-8000-000000000001', updatedAt: '2026-09-30T12:00:00Z', updatedBy: 'admin@wareongo.com' },
+        { id: 'mcp', body: 'Custom MCP instructions', revision: '00000000-0000-4000-8000-000000000002', updatedAt: '2026-09-30T12:00:00Z', updatedBy: 'admin@wareongo.com' },
+      ] };
+      return originalQuery(sql, values);
+    });
+    const response = await getMe(request('/api/console/me'));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.restPromptTemplate).toBe('Connect at {{apiBaseUrl}}');
+    expect(JSON.stringify(body)).not.toContain('Custom MCP instructions');
   });
 
   it('keeps staged key storage disabled without touching the private table', async () => {

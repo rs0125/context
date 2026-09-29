@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { handleMcpRequest } from '../src/lib/mcp';
+vi.mock('../src/lib/prompts', () => ({ loadPromptValues: async () => ({}) }));
 import type { KeyRegistration } from '../src/lib/auth';
 const modulePath = '../scripts/tooling-eval.mjs';
 const { answerSchema, createModelClient, evaluationInstructions, fetchAuthorizedCatalog, fetchCatalog, fixtureResult, FIXTURE_NOW, gradeScenario, LEADS, LIMITS, matchesSchema, modelTools, runScenario, SCENARIOS } = await import(modulePath);

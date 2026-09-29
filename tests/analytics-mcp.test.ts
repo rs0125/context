@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { handleMcpRequest } from '../src/lib/mcp';
+vi.mock('../src/lib/prompts', () => ({ loadPromptValues: async () => ({}) }));
 import type { handleApiRequest } from '../src/lib/api';
 import type { KeyRegistration } from '../src/lib/auth';
 import { getOpenApiDocument } from '../src/lib/openapi';

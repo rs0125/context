@@ -9,6 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import type { PoolClient } from 'pg';
 import { handleMcpRequest } from '../src/lib/mcp';
+vi.mock('../src/lib/prompts', () => ({ loadPromptValues: async () => ({}) }));
 import { handleApiRequest } from '../src/lib/api';
 import { HttpError } from '../src/lib/errors';
 import { ga4Report } from '../src/lib/analytics';

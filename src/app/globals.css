@@ -227,6 +227,8 @@ summary { cursor: pointer; }
   .consent-shell { padding-inline: 24px; }
 }
 @media (max-width: 600px) {
+  .workspace-nav { gap: 16px; }
+  .workspace-nav button { gap: 6px; font-size: 12px; white-space: nowrap; }
   .login-main { grid-template-columns: 1fr; padding: 40px 0; gap: 32px; }
   .login-header { height: 68px; }
   .header-classification { display: none; }

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { KeyRegistration } from '../src/lib/auth';
 import { HttpError } from '../src/lib/errors';
 import { handleMcpRequest } from '../src/lib/mcp';
+vi.mock('../src/lib/prompts', () => ({ loadPromptValues: async () => ({}) }));
 import { handleApiRequest } from '../src/lib/api';
 import type { PoolClient } from 'pg';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';

@@ -21,7 +21,7 @@ export function AgentAccess({ session, onSessionExpired, onKeyChanged }: { sessi
   const keyRequestSequence = useRef(0);
   const copySequence = useRef(0);
   const writesEnabled = session.capabilities?.writesEnabled === true;
-  const prompt = makeSystemPrompt(session.apiBaseUrl);
+  const prompt = makeSystemPrompt(session.apiBaseUrl, session.restPromptTemplate);
   const mcpUrl = mcpServerUrl(session.apiBaseUrl);
   const effectiveScopes = key ? key.scopes.filter(scope => session.employee.scopes.includes(scope)) : session.employee.scopes;
   const missingScopes = key ? READ_SCOPE_OPTIONS.filter(scope => session.employee.scopes.includes(scope.value) && !key.scopes.includes(scope.value)) : [];

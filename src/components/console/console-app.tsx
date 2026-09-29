@@ -3,10 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AgentAccess } from './agent-access';
 import { KnowledgeWorkspace } from './knowledge-workspace';
+import { PromptsWorkspace } from './prompts-workspace';
 import { consoleAccessEnded, consoleRequest, consoleSessionKey, errorMessage, googleSignInError, loginErrorMessage } from './helpers';
 import { Icon } from './icons';
 import { Brand, ConfirmDialog, Notice, Spinner } from './ui';
 import type { ConsoleSession } from './types';
+import type { PromptDocument } from '@/lib/prompt-definitions';
 
 function SignIn({ loading, error, message, onRetry }: {
   loading: boolean; error: string; message: string; onRetry: () => void;
@@ -44,7 +46,7 @@ export function ConsoleApp() {
   const [error, setError] = useState('');
   const [callbackError, setCallbackError] = useState('');
   const [message, setMessage] = useState('');
-  const [tab, setTab] = useState<'access' | 'knowledge'>('access');
+  const [tab, setTab] = useState<'access' | 'knowledge' | 'prompts'>('access');
   const [dirty, setDirty] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [editorBusy, setEditorBusy] = useState(false);
@@ -90,6 +92,15 @@ export function ConsoleApp() {
     void work.finally(() => { if (inFlight.current === work) inFlight.current = null; });
     return work;
   }, [sessionExpired]);
+  const promptSaved = useCallback((prompt: PromptDocument) => {
+    if (prompt.id === 'rest' && sessionRef.current) {
+      const next = { ...sessionRef.current, restPromptTemplate: prompt.body };
+      sessionRef.current = next; setSession(next);
+    }
+    // An older in-flight session read must not replace a newly saved template.
+    generation.current += 1; inFlight.current = null;
+    void loadSession();
+  }, [loadSession]);
   useEffect(() => {
     const url = new URL(window.location.href);
     if (url.searchParams.has('error')) {
@@ -144,12 +155,13 @@ export function ConsoleApp() {
       <Brand /><nav className="workspace-nav" aria-label="Workspace">
         <button disabled={editorBusy} className={tab === 'access' ? 'active' : ''} aria-current={tab === 'access' ? 'page' : undefined} onClick={() => { if (tab !== 'access') guard(() => setTab('access')); }}><Icon name="key" size={16} />Connect Claude</button>
         {session.employee.isAdmin && <button disabled={editorBusy} className={tab === 'knowledge' ? 'active' : ''} aria-current={tab === 'knowledge' ? 'page' : undefined} onClick={() => { if (tab !== 'knowledge') guard(() => setTab('knowledge')); }}><Icon name="book" />Knowledge</button>}
+        {session.employee.isAdmin && <button disabled={editorBusy} className={tab === 'prompts' ? 'active' : ''} aria-current={tab === 'prompts' ? 'page' : undefined} onClick={() => { if (tab !== 'prompts') guard(() => setTab('prompts')); }}><Icon name="file" />Prompts</button>}
       </nav>
       <div className="workspace-account"><span className="avatar" aria-hidden="true">{initials}</span><div><strong>{session.employee.name || 'Team member'}</strong><span>{session.employee.email}</span></div><button className="icon-button" aria-label="Sign out" title="Sign out" disabled={logoutBusy || editorBusy} onClick={() => guard(() => void logout())}><Icon name="logout" size={17} /></button></div>
     </div></header>
     <div className="workspace-main">
-      <div className="workspace-topbar"><p className="eyebrow">Workspace <span aria-hidden="true">/</span> {tab === 'access' ? 'Connections' : 'Knowledge'}</p>{session.employee.isAdmin && <span className="admin-badge">Administrator</span>}</div>
-      <main className="workspace-content" id="main-content">{error && <Notice>{error}</Notice>}{tab === 'access' ? <AgentAccess key={`${consoleSessionKey(session)}:${keyRevision}`} session={session} onSessionExpired={sessionExpired} onKeyChanged={keyChanged} /> : <KnowledgeWorkspace key={consoleSessionKey(session)} writesEnabled={session.capabilities?.writesEnabled === true} onSessionExpired={sessionExpired} onDirtyChange={setDirty} onBusyChange={setEditorBusy} />}</main>
+      <div className="workspace-topbar"><p className="eyebrow">Workspace <span aria-hidden="true">/</span> {tab === 'access' ? 'Connections' : tab === 'knowledge' ? 'Knowledge' : 'Prompts'}</p>{session.employee.isAdmin && <span className="admin-badge">Administrator</span>}</div>
+      <main className="workspace-content" id="main-content">{error && <Notice>{error}</Notice>}{tab === 'access' ? <AgentAccess key={`${consoleSessionKey(session)}:${keyRevision}`} session={session} onSessionExpired={sessionExpired} onKeyChanged={keyChanged} /> : tab === 'knowledge' ? <KnowledgeWorkspace key={consoleSessionKey(session)} writesEnabled={session.capabilities?.writesEnabled === true} onSessionExpired={sessionExpired} onDirtyChange={setDirty} onBusyChange={setEditorBusy} /> : <PromptsWorkspace key={consoleSessionKey(session)} writesEnabled={session.capabilities?.writesEnabled === true} onSessionExpired={sessionExpired} onDirtyChange={setDirty} onBusyChange={setEditorBusy} onSaved={promptSaved} />}</main>
       <footer className="workspace-footer"><span>Wareongo Context</span><span><Icon name="shield" size={14} />Read-only access for AI tools</span></footer>
     </div>
     {pendingAction && <ConfirmDialog title="Leave without saving?" confirmLabel="Discard changes" destructive onCancel={() => setPendingAction(null)} onConfirm={() => { const action = pendingAction; setPendingAction(null); action(); }}><p>Your page has unsaved changes. Save them first if you want to keep them.</p></ConfirmDialog>}
