@@ -1,6 +1,6 @@
 # Website analytics
 
-The engine provides read-only Google Analytics 4 and Google Search Console reports through the existing REST API and MCP connection. These reports are restricted to active Wareongo admins with `analytics:read`. They do not grant access to additional CRM records; Twenty still determines CRM access.
+The engine provides read-only Google Analytics 4 and Google Search Console reports through the existing REST API and MCP connection. These reports require current Analyst access and `analytics:read` on the credential. Active roster admins inherit Analyst access; other employees receive it through the main Wareongo dashboard employee editor. Analyst access also permits all CRM leads, subject to the separate `crm:read` scope.
 
 ## Configure the sources
 
@@ -18,7 +18,9 @@ Keep the JSON's private-key newline escapes intact when storing it as an environ
 
 No analytics timezone variable is needed. The Data API supplies the GA4 property timezone. The Google Analytics Admin API is optional and not used by these reports; reporting works without enabling it. Callers cannot supply another property ID, site, API URL, or service-account credential through a report request.
 
-## Enable admin access
+## Enable Analyst access
+
+First complete the [shared roster migration and Analyst rollout](../README.md#analyst-access-rollout).
 
 For an existing deployment, a trusted operator must apply the updated credential-scope constraints before issuing a four-scope key:
 
@@ -29,12 +31,12 @@ npm run mcp:migrate -- --apply
 
 These migrations allow the new scope; they do not expand existing keys or grants. Without `--apply`, the scripts only stage their work for review.
 
-The current active employee's `VerifiedNumber.adminAccess` must be `true`, and their credential must include `analytics:read`. Authorization is checked on report requests, including cached results. Adding a scope string to a request does not grant permission.
+The current active employee's `VerifiedNumber.analystAccess` or `VerifiedNumber.adminAccess` must be `true`, and their credential must include `analytics:read`. Authorization is checked on report requests, including cached results. Adding a scope string to a request does not grant permission.
 
-Existing employee keys and OAuth grants keep their existing scopes. An eligible admin should:
+Existing employee keys and OAuth grants keep their existing scopes. An eligible Analyst should:
 
 1. Sign in to the console and replace their employee key in **Connect Claude → Key settings**. Replacing the key invalidates connections using the old key.
-2. Remove and re-add the Claude connector so it registers a new OAuth client, then approve a consent request that includes **Website analytics (admins only)** using the new employee key. An older client's registered scopes stay fixed; refreshing its token or reconnecting with that same client cannot add the permission.
+2. Remove and re-add the Claude connector so it registers a new OAuth client, then approve a consent request that includes **Website analytics (Analyst access)** using the new employee key. An older client's registered scopes stay fixed; refreshing its token or reconnecting with that same client cannot add the permission.
 3. Check **Your read access** for Website analytics, then ask the connector to run `analytics_capabilities`.
 
 For another MCP client, its requested OAuth scopes must include `analytics:read`. For a REST client, replace its stored employee bearer key securely. Never paste a key into chat. Analytics access does not create a new knowledge-page restriction: knowledge pages retain their existing three reader permissions.
@@ -167,7 +169,7 @@ Each call returns one aggregate row with `sessions`, `formSubmitEventCount`, `ge
 
 `form_performance.components` preserves each component's filters, dates, timestamps, cache state, quota and source quality. Google reads are independent, with a shared deadline; this is not a frozen snapshot. The top-level fetch timestamp is the oldest component fetch. Recently reported values remain provisional. Any failed source read fails the whole report. Missing event rows stay null; only an explicit recorded zero becomes zero. Ratios remain null when the denominator is zero, values are missing, or relevant source quality is limited by sampling, thresholding, truncation, restrictions or an empty-data reason. Read each ratio's `status` and do not reconstruct withheld calculations.
 
-This preset rejects `event_name`, `page_path_contains`, `cursor` and `compare_to`. These restrictions preserve the matching session-entry population and keep the operation bounded. It adds no MCP tool name, environment variable, consent scope or pipeline. Analytics remains restricted to current administrators.
+This preset rejects `event_name`, `page_path_contains`, `cursor` and `compare_to`. These restrictions preserve the matching session-entry population and keep the operation bounded. It adds no MCP tool name, environment variable, consent scope or pipeline. Analytics requires current Analyst access, inherited by administrators.
 
 ## Period comparisons
 

@@ -8,7 +8,7 @@ import {
   searchOpportunities, searchWarehouses, validateCrmQuery,
 } from '../src/lib/data';
 
-const principal: Principal = {
+const principal: Principal = { isAnalyst: false,
   employeeId: 12, email: 'Alex@example.test', scopes: ['warehouses:read', 'crm:read'], keyId: 'test-key',
   twentyUserId: '10000000-0000-4000-8000-000000000001',
 };
@@ -272,14 +272,14 @@ describe('employee-scoped CRM reads', () => {
     expect(query.mock.calls[0][1]).toEqual([[ID_1, ID_2], 11]);
   });
 
-  it('uses all live Twenty admin records without an employee or stale mirror assignment restriction', async () => {
+  it('uses all Analyst records without an employee or stale mirror assignment restriction', async () => {
     const listing = database([opportunityRow()]);
-    await searchOpportunities(listing.client, principal, new URLSearchParams('city=Bengaluru'), all);
+    await searchOpportunities(listing.client, { ...principal, isAnalyst: true }, new URLSearchParams('city=Bengaluru'), all);
     expect(listing.query.mock.calls[0][0]).toContain('o.deleted_at IS NULL');
     expect(listing.query.mock.calls[0][0]).not.toMatch(/ANY\(|assignee_email|owner_id/);
     expect(listing.query.mock.calls[0][1]).toEqual(['Bengaluru', 11]);
     const detail = database([opportunityRow()]);
-    await getOpportunity(detail.client, principal, ID_1, all);
+    await getOpportunity(detail.client, { ...principal, isAnalyst: true }, ID_1, all);
     expect(detail.query.mock.calls[0][0]).not.toMatch(/ANY\(|assignee_email|owner_id/);
     expect(detail.query.mock.calls[0][1]).toEqual([ID_1]);
   });
@@ -402,9 +402,9 @@ describe('briefing and freshness', () => {
     expect(sql).not.toMatch(/assignee_email|owner_id/);
   });
 
-  it('aggregates all nondeleted active leads for verified Twenty admin access', async () => {
+  it('aggregates all nondeleted active leads for Analyst access', async () => {
     const { client, query } = database();
-    await getMyBriefing(client, principal, all);
+    await getMyBriefing(client, { ...principal, isAnalyst: true }, all);
     const [sql, values] = query.mock.calls[0];
     expect(sql).toContain('WHERE o.deleted_at IS NULL AND o.stage = ANY($2::text[])');
     expect(sql).not.toContain('o.opportunity_id = ANY(');

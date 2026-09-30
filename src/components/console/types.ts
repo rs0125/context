@@ -10,7 +10,7 @@ export const READ_SCOPE_OPTIONS = [
   { value: 'analytics:read', label: 'Website analytics' },
 ] as const;
 
-export type Employee = { email: string; name: string; isAdmin: boolean; scopes: string[] };
+export type Employee = { email: string; name: string; isAdmin: boolean; isAnalyst: boolean; scopes: string[] };
 export type ConsoleSession = { employee: Employee; apiBaseUrl: string; restPromptTemplate?: string; capabilities?: { writesEnabled: boolean } };
 export type PersonalKey = { id: string; token: string; expiresAt: string; scopes: string[] };
 export type KnowledgeMetadata = {

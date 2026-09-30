@@ -5,7 +5,7 @@ import { getRelatedCrmContext, RELATED_CRM_QUERIES, RELATED_CRM_RECORD_QUERIES, 
 
 const id = (value: number) => `00000000-0000-4000-8000-${String(value).padStart(12, '0')}`;
 const leadId = id(1);
-const principal: Principal = { employeeId: 7, email: 'alex@example.test', keyId: 'synthetic', scopes: ['crm:read'], twentyUserId: id(2) };
+const principal: Principal = { isAnalyst: false, employeeId: 7, email: 'alex@example.test', keyId: 'synthetic', scopes: ['crm:read'], twentyUserId: id(2) };
 const access: CrmAccess = { mode: 'related', memberId: id(2), ids: [leadId] };
 const env = { TWENTY_CRM_BASE_URL: 'https://crm.example.test', TWENTY_CRM_API_KEY: 'synthetic-test-key' };
 const dates = { createdAt: '2026-09-20T00:00:00Z', updatedAt: '2026-09-26T08:00:00Z', deletedAt: null };
@@ -95,7 +95,7 @@ describe('bounded live CRM related context', () => {
     ]) {
       object[targetsKey] = page([target(section), { ...target(section, 11), [section === 'notes' ? 'noteId' : 'taskId']: id(110), ...changes }]);
       const { options } = harness(section, { [targetsKey]: page([item]) });
-      const result = await getRelatedCrmContext(principal, leadId, { ...options, access: { mode: 'all', memberId: id(2) } });
+      const result = await getRelatedCrmContext({ ...principal, isAnalyst: true }, leadId, { ...options, access: { mode: 'all', memberId: id(2) } });
       expect(result.items).toEqual([]);
       expect(result.coverage).toMatchObject({ scanned: 1, returned: 0, withheld: 1 });
       expect(JSON.stringify(result)).not.toContain(id(999));

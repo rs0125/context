@@ -1,6 +1,6 @@
 import type { PoolClient } from 'pg';
 import type { Principal } from './auth';
-import type { CrmAccess } from './crm-live';
+import { assertCrmAccess, type CrmAccess } from './crm-live';
 import { HttpError } from './errors';
 import { numericValue, sanitizeLabel } from './privacy';
 import { addDateConditions, resolveDateQuery, TEMPORAL_PARAMETER_NAMES, DATE_PERIODS } from './query-time';
@@ -138,23 +138,14 @@ function opportunity(row: Row) {
   };
 }
 
-function authorizationUnavailable(): never {
-  throw new HttpError(503, 'CRM_AUTHORIZATION_UNAVAILABLE', 'Current CRM access could not be verified.');
-}
-
 /** A live access result is mandatory and bound to the current roster identity.
  * Related IDs already express the verified created-or-assigned union (or the
  * requested narrower view). Stale mirror assignments must not override them.
- * Only the live Twenty authorization adapter can grant mode=all.
+ * All-leads access additionally requires the current Analyst permission.
  */
 function crmScope(principal: Principal, access: CrmAccess, bind: (value: unknown) => string): string {
-  if (!access || typeof access !== 'object'
-    || typeof principal.twentyUserId !== 'string' || !UUID.test(principal.twentyUserId)
-    || typeof access.memberId !== 'string' || !UUID.test(access.memberId)
-    || access.memberId.toLowerCase() !== principal.twentyUserId.toLowerCase()) authorizationUnavailable();
+  assertCrmAccess(principal, access);
   if (access.mode === 'all') return 'o.deleted_at IS NULL';
-  if (access.mode !== 'related' || !Array.isArray(access.ids) || access.ids.length > 1000
-    || access.ids.some((value) => typeof value !== 'string' || !UUID.test(value))) authorizationUnavailable();
   const ids = [...new Set(access.ids.map((value) => value.toLowerCase()))];
   // Empty sets intentionally produce ANY('{}'), which never grants access.
   return `o.deleted_at IS NULL AND o.opportunity_id = ANY(${bind(ids)}::text[])`;

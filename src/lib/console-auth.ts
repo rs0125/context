@@ -2,8 +2,9 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { HttpError } from './errors';
 import { rosterReadScopes, type Scope } from './auth';
+import { hasAnalystAccess, readRosterEmployees } from './employee-access';
 
-export type ConsoleIdentity = { employeeId: number; email: string; name: string; isAdmin: boolean; scopes: Scope[] };
+export type ConsoleIdentity = { employeeId: number; email: string; name: string; isAdmin: boolean; isAnalyst: boolean; scopes: Scope[] };
 type Session = { employeeId: number; email: string; sub: string; iat: number; exp: number; sid: string };
 export const CONSOLE_DOMAIN = 'wareongo.com';
 export const SESSION_SECONDS = 8 * 60 * 60;
@@ -90,16 +91,14 @@ export function readConsoleSession(request: Request, env: NodeJS.ProcessEnv = pr
 
 export async function resolveConsoleEmployee(client: PoolClient, email: string, expectedId?: number): Promise<ConsoleIdentity> {
   if (!workEmail(email)) throw new HttpError(403, 'CONSOLE_ACCESS_DENIED', 'Console access is unavailable for this account.');
-  const { rows } = await client.query<{ id: number; email: string; name: string; is_active: boolean; adminAccess: boolean; dashboardAccess: boolean; twenty_user_id: string | null }>(
-    `SELECT id, email, name, is_active, "adminAccess", "dashboardAccess", twenty_user_id
-       FROM public."VerifiedNumber" WHERE lower(email) = $1 LIMIT 2`, [email]);
+  const { rows } = await readRosterEmployees(client, email);
   const employee = rows[0];
   if (rows.length !== 1 || !employee || employee.is_active !== true || !Number.isSafeInteger(employee.id) || employee.id <= 0
     || (expectedId !== undefined && employee.id !== expectedId) || employee.email?.toLowerCase() !== email) {
     throw new HttpError(403, 'CONSOLE_ACCESS_DENIED', 'Console access is unavailable for this account.');
   }
   return { employeeId: employee.id, email, name: typeof employee.name === 'string' ? employee.name.slice(0, 200) : '',
-    isAdmin: employee.adminAccess === true, scopes: rosterReadScopes(employee) };
+    isAdmin: employee.adminAccess === true, isAnalyst: hasAnalystAccess(employee), scopes: rosterReadScopes(employee) };
 }
 
 export async function getConsoleIdentity(request: Request, client: PoolClient): Promise<ConsoleIdentity> {

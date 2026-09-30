@@ -15,7 +15,7 @@ export function consoleAccessEnded(error: unknown) {
 
 /** Permission metadata only; never contains a token. Name-only edits preserve drafts. */
 export function consoleSessionKey(session: ConsoleSession) {
-  return JSON.stringify([session.employee.email, session.employee.isAdmin,
+  return JSON.stringify([session.employee.email, session.employee.isAdmin, session.employee.isAnalyst,
     [...session.employee.scopes].sort(), session.capabilities?.writesEnabled === true]);
 }
 

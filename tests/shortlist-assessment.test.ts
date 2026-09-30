@@ -10,7 +10,7 @@ import {
 } from '../src/lib/shortlist-assessment';
 
 const leadId = '00000000-0000-4000-8000-000000000001';
-const principal: Principal = { employeeId: 1, email: 'test@example.test', keyId: 'synthetic', scopes: ['crm:read', 'warehouses:read'], twentyUserId: leadId };
+const principal: Principal = { isAnalyst: false, employeeId: 1, email: 'test@example.test', keyId: 'synthetic', scopes: ['crm:read', 'warehouses:read'], twentyUserId: leadId };
 const db = (row: Record<string, unknown>) => ({ query: async () => ({ rows: [row] }) }) as unknown as PoolClient;
 async function assessment(leadFields: Record<string, unknown> = {}, warehouseFields: Record<string, unknown> = {}, options: ShortlistAssessmentOptions = {}) {
   const lead = (await getOpportunity(db({ opportunity_id: leadId, city: 'Bengaluru', requirement_sqft: '40000',

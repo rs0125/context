@@ -7,7 +7,7 @@ import { getCrmStageHistory } from '../src/lib/data';
 
 const leadId = '00000000-0000-4000-8000-000000000001';
 const otherId = '00000000-0000-4000-8000-000000000002';
-const principal: Principal = { employeeId: 17, email: 'example@example.test', keyId: 'synthetic', scopes: ['crm:read'], twentyUserId: otherId };
+const principal: Principal = { isAnalyst: false, employeeId: 17, email: 'example@example.test', keyId: 'synthetic', scopes: ['crm:read'], twentyUserId: otherId };
 const access: CrmAccess = { mode: 'related', memberId: otherId, ids: [leadId] };
 function database(rows: Record<string, unknown>[] = []) {
   const query = vi.fn().mockResolvedValue({ rows });
@@ -46,7 +46,7 @@ describe('scoped observed CRM stage history', () => {
 
   it('allows verified admins without weakening deletion checks and binds empty scopes as empty', async () => {
     const db = database();
-    await getCrmStageHistory(db.client, principal, leadId, { mode: 'all', memberId: otherId }, 2);
+    await getCrmStageHistory(db.client, { ...principal, isAnalyst: true }, leadId, { mode: 'all', memberId: otherId }, 2);
     expect(db.query.mock.calls[0][1]).toEqual([leadId, '0', 3]);
     expect(db.query.mock.calls[0][0]).toContain('o.deleted_at IS NULL');
     expect(db.query.mock.calls[0][0]).not.toContain('ANY(');

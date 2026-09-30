@@ -9,7 +9,7 @@ import { readPrompts, savePrompt } from '../src/lib/prompts';
 import { handleMcpRequest } from '../src/lib/mcp';
 
 const origin = 'https://context.example.test';
-const identity = { employeeId: 7, email: 'admin@wareongo.com', name: 'Admin', isAdmin: true, scopes: ['knowledge:read'] as const };
+const identity = { employeeId: 7, email: 'admin@wareongo.com', name: 'Admin', isAdmin: true, isAnalyst: true, scopes: ['knowledge:read'] as const };
 type Row = { id: string; body: string | null; revision: string; updatedAt: string; updatedBy: string };
 const row = (id = 'mcp', body: string | null = 'Custom instructions.'): Row => ({ id, body, revision: randomUUID(), updatedAt: '2026-09-30T12:00:00Z', updatedBy: identity.email });
 

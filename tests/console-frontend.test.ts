@@ -11,7 +11,7 @@ describe('console lifecycle boundaries', () => {
     expect(consoleAccessEnded(new ConsoleApiError('CONSOLE_UNAVAILABLE', 'Unavailable', 503))).toBe(false);
   });
   it('ignores names and scope order, but detects identity and permission changes', () => {
-    const session = { employee: { email: 'employee@wareongo.com', name: 'Example', isAdmin: true, scopes: ['knowledge:read', 'crm:read'] }, apiBaseUrl: 'https://example.test/api/v1', capabilities: { writesEnabled: true } };
+    const session = { employee: { email: 'employee@wareongo.com', name: 'Example', isAdmin: true, isAnalyst: true, scopes: ['knowledge:read', 'crm:read'] }, apiBaseUrl: 'https://example.test/api/v1', capabilities: { writesEnabled: true } };
     const original = consoleSessionKey(session);
     expect(consoleSessionKey({ ...session, employee: { ...session.employee, name: 'Changed name', scopes: ['crm:read', 'knowledge:read'] } })).toBe(original);
     for (const change of [{ email: 'other@wareongo.com' }, { isAdmin: false }, { scopes: ['knowledge:read'] }]) expect(consoleSessionKey({ ...session, employee: { ...session.employee, ...change } })).not.toBe(original);

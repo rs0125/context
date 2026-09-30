@@ -5,7 +5,7 @@ import { resolvePrincipal } from '../src/lib/auth';
 
 const origin = 'https://context.example.test';
 const subject = 'google:107654321012345678901';
-const identity: ConsoleIdentity = { employeeId: 7, email: 'employee@wareongo.com', name: 'Test Employee', isAdmin: false, scopes: ['knowledge:read'] };
+const identity: ConsoleIdentity = { employeeId: 7, email: 'employee@wareongo.com', name: 'Test Employee', isAdmin: false, isAnalyst: false, scopes: ['knowledge:read'] };
 const roster = { id: 7, email: identity.email, name: identity.name, is_active: true, adminAccess: false, dashboardAccess: true, twenty_user_id: '11111111-1111-4111-8111-111111111111' };
 const now = Date.now();
 const env = { NODE_ENV: 'test' as const, CONTEXT_CONSOLE_ORIGIN: origin, CONTEXT_SESSION_SECRET: Buffer.alloc(32, 1).toString('base64url') };
@@ -53,11 +53,11 @@ describe('Google employee sessions and current roster authorization', () => {
   it('rechecks active unique roster identity and role on every request, without cached admin claims', async () => {
     const { client, query } = database([roster]);
     const request = cookieRequest(sessionCookie({ isAdmin: true }));
-    expect(await getConsoleIdentity(request, client)).toMatchObject({ employeeId: 7, isAdmin: false, scopes: ['knowledge:read', 'warehouses:read', 'crm:read'] });
+    expect(await getConsoleIdentity(request, client)).toMatchObject({ employeeId: 7, isAdmin: false, isAnalyst: false, scopes: ['knowledge:read', 'warehouses:read', 'crm:read'] });
     query.mockResolvedValueOnce({ rows: [{ ...roster, adminAccess: true, dashboardAccess: false, twenty_user_id: null }] });
-    expect(await getConsoleIdentity(request, client)).toMatchObject({ isAdmin: true, scopes: ['knowledge:read', 'warehouses:read', 'analytics:read'] });
+    expect(await getConsoleIdentity(request, client)).toMatchObject({ isAdmin: true, isAnalyst: true, scopes: ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read'] });
     query.mockResolvedValueOnce({ rows: [{ ...roster, dashboardAccess: false, twenty_user_id: null }] });
-    expect(await getConsoleIdentity(request, client)).toMatchObject({ isAdmin: false, scopes: ['knowledge:read'] });
+    expect(await getConsoleIdentity(request, client)).toMatchObject({ isAdmin: false, isAnalyst: false, scopes: ['knowledge:read'] });
     query.mockResolvedValueOnce({ rows: [{ ...roster, is_active: false }] });
     await expect(getConsoleIdentity(request, client)).rejects.toMatchObject({ status: 403 });
     expect(query.mock.calls[0][0]).not.toMatch(/phone_number|agent_session/);
@@ -75,7 +75,7 @@ describe('Google employee sessions and current roster authorization', () => {
     vi.stubEnv('CONTEXT_ADMIN_EMAIL', identity.email); vi.stubEnv('ADMIN_EMAILS', 'OTHER@wareongo.com, EMPLOYEE@wareongo.com');
     const email = 'other@wareongo.com';
     const { client } = database([{ ...roster, id: 8, email, dashboardAccess: false, twenty_user_id: null }]);
-    expect(await resolveConsoleEmployee(client, email)).toMatchObject({ employeeId: 8, email, isAdmin: false, scopes: ['knowledge:read'] });
+    expect(await resolveConsoleEmployee(client, email)).toMatchObject({ employeeId: 8, email, isAdmin: false, isAnalyst: false, scopes: ['knowledge:read'] });
     expect(await getConsoleIdentity(cookieRequest(sessionCookie({ employeeId: 8, email })), client)).toMatchObject({ employeeId: 8, isAdmin: false });
   });
   it.each(['', 'employee@example.com', 'employee@wareongo.com.evil.example', 'a b@wareongo.com', 'a@b@wareongo.com'])('rejects invalid or external work identity %s before DB lookup', async email => {

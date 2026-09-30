@@ -145,13 +145,13 @@ describe('live employee permissions', () => {
     const { client, query } = rosterClient([employee]);
     const principal = await resolvePrincipal(client, registration());
     const [sql, values] = query.mock.calls[0];
-    expect(sql).toContain('WHERE lower(email) = $1 LIMIT 2');
+    expect(sql).toContain('WHERE lower(r.email) = $1 LIMIT 2');
     expect(sql).not.toContain('employee@example.test');
     expect(sql).not.toMatch(/phone_number|contactNumber/);
     expect(values).toEqual(['employee@example.test']);
     expect(principal).toEqual({
       employeeId: 7, email: 'employee@example.test', scopes: allScopes, keyId: 'employee-test',
-      twentyUserId: employee.twenty_user_id,
+      twentyUserId: employee.twenty_user_id, isAnalyst: false,
     });
   });
 
@@ -182,12 +182,12 @@ describe('live employee permissions', () => {
     expect(principal.scopes).toEqual(['knowledge:read']);
   });
 
-  it('allows an explicitly granted warehouse scope for an admin without granting CRM access', async () => {
+  it('inherits Analyst CRM access for an admin without a Twenty mapping', async () => {
     const { client } = rosterClient([{
       ...employee, dashboardAccess: false, adminAccess: true, twenty_user_id: null,
     }]);
     const principal = await resolvePrincipal(client, registration());
-    expect(principal.scopes).toEqual(['knowledge:read', 'warehouses:read']);
+    expect(principal.scopes).toEqual(['knowledge:read', 'warehouses:read', 'crm:read']);
   });
   it('never grants privileges through an environment admin list or truthy source values', async () => {
     vi.stubEnv('ADMIN_EMAILS', employee.email);

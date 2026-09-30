@@ -32,8 +32,8 @@ async function screenshot(page: Page, filename: string) {
     style: 'nextjs-portal { display: none !important; }' });
 }
 
-type ConsoleControl = { signedIn: boolean; admin: boolean; email?: string; scopes?: string[] };
-async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boolean; signedIn?: boolean; conflict?: boolean; employeeScopes?: string[]; keyScopes?: string[]; entryPath?: string; control?: ConsoleControl; shared?: boolean; expiresAt?: string; additionalPages?: number } = {}) {
+type ConsoleControl = { signedIn: boolean; admin: boolean; analyst?: boolean; email?: string; scopes?: string[] };
+async function mockConsole(page: Page, options: { admin?: boolean; analyst?: boolean; enabled?: boolean; signedIn?: boolean; conflict?: boolean; employeeScopes?: string[]; keyScopes?: string[]; entryPath?: string; control?: ConsoleControl; shared?: boolean; expiresAt?: string; additionalPages?: number } = {}) {
   const { admin = false, enabled = true, signedIn = true, conflict = false, employeeScopes = scopes, keyScopes = employeeScopes, entryPath = '/' } = options;
   let authenticated = signedIn;
   const mutations: { path: string; method: string; body: Record<string, unknown> | null }[] = [];
@@ -68,7 +68,7 @@ async function mockConsole(page: Page, options: { admin?: boolean; enabled?: boo
       return route.fulfill({ contentType: 'text/html', body: navigation('/') });
     }
     if (path === '/api/console/me') return (options.control?.signedIn ?? authenticated)
-      ? reply({ employee: { name: 'Alex Example', email: options.control?.email ?? 'employee@wareongo.com', isAdmin: options.control?.admin ?? admin, scopes: options.control?.scopes ?? employeeScopes }, apiBaseUrl: 'https://context.example.test/api/v1', capabilities: { writesEnabled: enabled } })
+      ? reply({ employee: { name: 'Alex Example', email: options.control?.email ?? 'employee@wareongo.com', isAdmin: options.control?.admin ?? admin, isAnalyst: (options.control?.admin ?? admin) || (options.control?.analyst ?? options.analyst ?? false), scopes: options.control?.scopes ?? employeeScopes }, apiBaseUrl: 'https://context.example.test/api/v1', capabilities: { writesEnabled: enabled } })
       : reply({ error: { code: 'CONSOLE_UNAUTHENTICATED', message: 'Sign in.' } }, 401);
     if (path === '/api/console/key') {
       if (method === 'POST') key = { ...key, token: rotatedToken };
@@ -149,7 +149,7 @@ test('employee follows the three-step setup and copies URL and key separately', 
   await expect(page.getByLabel('REST instructions')).not.toBeVisible();
   await expect(page.getByText('This key gives access as')).toContainText('employee@wareongo.com');
   await expect(page.getByRole('list', { name: 'Your read access' })).toContainText('CRM context');
-  await expect(page.getByText('CRM records follow your permissions in Twenty.')).toBeVisible();
+  await expect(page.getByText('You can read leads you created or are assigned to in Twenty.')).toBeVisible();
   await page.getByRole('button', { name: 'Copy URL', exact: true }).click();
   expect(await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText)).toBe('https://context.example.test/mcp');
   await page.getByRole('button', { name: 'Copy key', exact: true }).click();
@@ -179,7 +179,7 @@ test('admin knowledge access does not widen the employee key read scopes', async
   await expect(page.getByRole('button', { name: 'Knowledge', exact: true })).toBeVisible();
   await expect(page.getByLabel('Employee API key')).toHaveValue(token);
   await expect(page.getByRole('list', { name: 'Your read access' })).toHaveText('Company knowledge');
-  await expect(page.getByText('CRM records follow your permissions in Twenty.')).toHaveCount(0);
+  await expect(page.getByText('Analyst access includes all CRM leads. Personal views need a linked Twenty account.')).toHaveCount(0);
   await expect(page.getByRole('status').filter({ hasText: 'but this key does not' })).toBeVisible();
   await screenshot(page, 'linear-admin-access.png');
 });
@@ -355,4 +355,14 @@ test('an expired open-page key is removed without polling the database', async (
   await expect(page.getByText('Your API key has expired.', { exact: false })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Create API key', exact: true })).toBeEnabled();
   expect(keyReads).toBe(readsBeforeExpiry);
+});
+
+
+test('Analyst connection explains broad read access without showing admin editing', async ({ page }) => {
+  await mockConsole(page, { analyst: true, employeeScopes: ['knowledge:read', 'crm:read', 'analytics:read'] });
+  await expect(page.locator('.admin-badge')).toHaveText('Analyst');
+  await expect(page.getByRole('button', { name: 'Knowledge', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Prompts', exact: true })).toHaveCount(0);
+  await expect(page.getByText('Analyst access includes all CRM leads. Personal views need a linked Twenty account.')).toBeVisible();
+  await expect(page.getByText('Website analytics is included with Analyst access.')).toBeVisible();
 });

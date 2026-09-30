@@ -32,7 +32,7 @@ function analyticsRecovery(code: unknown, status: number) {
   if (code === 'ANALYTICS_SOURCE_DENIED') return recovery(false, 'check_google_access', 'An administrator must check Google API enablement and service-account access to the configured property.');
   if (code === 'ANALYTICS_REPORT_UNAVAILABLE' || code === 'ANALYTICS_SOURCE_QUERY_UNAVAILABLE') return recovery(false, 'check_capabilities', 'Read analytics_capabilities and choose an available report or have an administrator check its custom dimensions.');
   if (code === 'INVALID_QUERY') return recovery(false, 'correct_query', 'Correct the parameters using the tool schema and error message. Use either a period or paired dates; keep cursors with the same report and filters.');
-  if (status === 401 || status === 403) return recovery(false, 'check_engine_access', 'Check active administrator status and the analytics:read scope on the employee key or OAuth connection.');
+  if (status === 401 || status === 403) return recovery(false, 'check_engine_access', 'Check active Analyst access and the analytics:read scope on the employee key or OAuth connection.');
   if (['ANALYTICS_SOURCE_TIMEOUT', 'ANALYTICS_SOURCE_UNAVAILABLE', 'ANALYTICS_BUSY', 'ANALYTICS_SOURCE_RATE_LIMITED'].includes(String(code)) || status === 429) {
     return recovery(true, 'retry_later', 'Retry after the indicated delay. If the source remains unavailable, report that limitation; failed reads are not zero activity.');
   }
@@ -41,7 +41,7 @@ function analyticsRecovery(code: unknown, status: number) {
 const empty = z.object({}).strict();
 const label = z.string().trim().min(1).max(80);
 const pageSize = z.number().int().min(1).max(25).describe('Maximum records per page; default 10, maximum 25. Follow nextCursor for more.').optional();
-const view = z.enum(['accessible', 'created', 'assigned']).describe('Default accessible: created-or-assigned for employees, all for live-verified Twenty admins. created/assigned narrow either role to this employee.').optional();
+const view = z.enum(['accessible', 'created', 'assigned']).describe('Default accessible: created-or-assigned for employees, all for Analysts (including administrators). created/assigned narrow to this employee and require a linked Twenty account.').optional();
 const date = z.string().regex(/^[1-9]\d{3}-\d{2}-\d{2}$/);
 const crmFilters = {
   q: label.describe('Case-insensitive literal substring of permitted lead/company labels, such as Acme. Labels containing contacts or unsupported characters do not participate; no note search.').optional(),

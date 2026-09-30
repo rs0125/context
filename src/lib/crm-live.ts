@@ -1,4 +1,4 @@
-import type { Principal } from './auth';
+import { requireScope, type Principal } from './auth';
 import { HttpError } from './errors';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -9,21 +9,10 @@ const DEADLINE_MS = 8_000;
 
 type Row = Record<string, unknown>;
 export type CrmView = 'accessible' | 'created' | 'assigned';
-export type CrmAccess = { mode: 'all'; memberId: string }
+export type CrmAccess = { mode: 'all'; memberId: string | null }
   | { mode: 'related'; memberId: string; ids: string[] };
 type Options = { view?: CrmView; opportunityId?: string; fetch?: typeof fetch; env?: Partial<NodeJS.ProcessEnv> };
 type Page = { rows: Row[]; hasNextPage: boolean; endCursor: string | null };
-
-// Verified against Wareongo's live metadata API, 2026-09-25. This is Twenty's
-// built-in role identity, not its renameable label or a WAG dashboard flag.
-const ADMIN_ROLE_UNIVERSAL_IDENTIFIER = '20202020-02c2-43f2-b94d-cab1f2b532eb';
-const ROLE_QUERY = `query ContextReadRoles {
-  getRoles {
-    id universalIdentifier isEditable canBeAssignedToUsers
-    canUpdateAllSettings canReadAllObjectRecords
-    workspaceMembers { id }
-  }
-}`;
 
 function unavailable(): never {
   throw new HttpError(503, 'CRM_AUTHORIZATION_UNAVAILABLE', 'Current CRM assignment access could not be verified.');
@@ -121,49 +110,49 @@ function assignmentToken(member: Row, members: Row[]) {
   return token;
 }
 
-function isTwentyAdmin(value: unknown, memberId: string): boolean {
-  if (!record(value) || (value.errors !== undefined && (!Array.isArray(value.errors) || value.errors.length > 0))
-    || !record(value.data) || !Array.isArray(value.data.getRoles) || value.data.getRoles.length > 100) unavailable();
-  const roles = value.data.getRoles;
-  for (const role of roles) {
-    if (!record(role) || typeof role.id !== 'string' || !UUID.test(role.id)
-      || (role.universalIdentifier !== null && (typeof role.universalIdentifier !== 'string' || !UUID.test(role.universalIdentifier)))
-      || typeof role.isEditable !== 'boolean' || typeof role.canBeAssignedToUsers !== 'boolean'
-      || typeof role.canUpdateAllSettings !== 'boolean' || typeof role.canReadAllObjectRecords !== 'boolean'
-      || !Array.isArray(role.workspaceMembers) || role.workspaceMembers.length > PAGE_SIZE
-      || !role.workspaceMembers.every((member) => record(member) && typeof member.id === 'string' && UUID.test(member.id))) unavailable();
+/** Validate access again at each data boundary, using the current principal.
+ * A stale all-leads result cannot outlive Analyst revocation. Personal views
+ * remain bound to the live Twenty identity and its verified record IDs. */
+export function assertCrmAccess(principal: Principal, access: CrmAccess) {
+  requireScope(principal, 'crm:read');
+  if (!access || typeof access !== 'object') unavailable();
+  if (access.mode === 'all') {
+    if (principal.isAnalyst !== true || access.memberId?.toLowerCase() !== principal.twentyUserId?.toLowerCase()) unavailable();
+    return;
   }
-  const adminRoles = roles.filter((role: Row) => role.universalIdentifier === ADMIN_ROLE_UNIVERSAL_IDENTIFIER);
-  if (adminRoles.length > 1) unavailable();
-  const admin = adminRoles[0] as Row | undefined;
-  return !!admin && admin.isEditable === false && admin.canBeAssignedToUsers === true
-    && admin.canUpdateAllSettings === true && admin.canReadAllObjectRecords === true
-    && (admin.workspaceMembers as Row[]).some((member) => (member.id as string).toLowerCase() === memberId);
+  if (access.mode !== 'related' || typeof principal.twentyUserId !== 'string' || !UUID.test(principal.twentyUserId)
+    || typeof access.memberId !== 'string' || !UUID.test(access.memberId)
+    || access.memberId.toLowerCase() !== principal.twentyUserId.toLowerCase()
+    || !Array.isArray(access.ids) || access.ids.length > 1000
+    || access.ids.some(id => typeof id !== 'string' || !UUID.test(id))) unavailable();
 }
 
-/** Live role and creator/assignment checks. No source payload escapes this boundary.
- * Call outside a database transaction; it makes at most seven bounded HTTP reads.
- * Detail reads verify only the requested ID, with at most three HTTP reads.
- * The metadata POST contains a fixed GraphQL query, never a mutation.
+/** Analyst access is verified from the current application roster. Personal
+ * creator/assignment checks use at most six bounded live HTTP reads (two for
+ * one lead). Call outside a database transaction. No source payload escapes.
  */
 export async function getLiveCrmAccess(principal: Principal, options: Options = {}): Promise<CrmAccess> {
+  requireScope(principal, 'crm:read');
   const view = options.view ?? 'accessible';
   if (!['accessible', 'created', 'assigned'].includes(view)) throw new HttpError(400, 'INVALID_QUERY', 'Unsupported CRM view.');
   if (options.opportunityId !== undefined && (typeof options.opportunityId !== 'string' || !UUID.test(options.opportunityId))) {
     throw new HttpError(400, 'INVALID_QUERY', 'A valid CRM opportunity ID is required.');
   }
   const targetId = options.opportunityId?.toLowerCase();
+  if (principal.isAnalyst === true && view === 'accessible') {
+    return { mode: 'all', memberId: principal.twentyUserId ?? null };
+  }
+  if (!principal.twentyUserId || !UUID.test(principal.twentyUserId)) identityUnavailable();
   const config = configuration(options.env ?? process.env);
   const fetcher = options.fetch ?? fetch;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DEADLINE_MS);
   const deadline = Date.now() + DEADLINE_MS;
-  async function request(url: URL, query?: string) {
+  async function request(url: URL) {
     if (controller.signal.aborted || Date.now() >= deadline) unavailable();
     const response = await fetcher(url, {
-      method: query ? 'POST' : 'GET',
-      headers: { Authorization: `Bearer ${config.key}`, Accept: 'application/json', ...(query ? { 'Content-Type': 'application/json' } : {}) },
-      ...(query ? { body: JSON.stringify({ query }) } : {}),
+      method: 'GET',
+      headers: { Authorization: `Bearer ${config.key}`, Accept: 'application/json' },
       cache: 'no-store', redirect: 'error', signal: controller.signal,
     });
     const body = await boundedJson(response);
@@ -185,9 +174,6 @@ export async function getLiveCrmAccess(principal: Principal, options: Options = 
     if (members.hasNextPage) unavailable();
     const member = employeeMember(principal, members.rows);
     const memberId = (member.id as string).toLowerCase();
-    const roles = await request(new URL('/metadata', config.origin), ROLE_QUERY);
-    const admin = isTwentyAdmin(roles, memberId);
-    if (admin && view === 'accessible') return { mode: 'all', memberId };
     // Creator-only reads are independent of first-name assignment ambiguity.
     const token = view === 'created' ? null : assignmentToken(member, members.rows);
     const creatorFilter = `createdBy.workspaceMemberId[eq]:${JSON.stringify(memberId)}`;

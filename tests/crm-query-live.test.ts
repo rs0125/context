@@ -8,7 +8,7 @@ import { CRM_DATE_FIELDS, CRM_SORTS, getCrmFilterOptions, getMyBriefing, getOppo
 import { CRM_ENUM_ARRAY_LIMIT } from '../src/lib/crm-fields';
 
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, '0')}`;
-const principal: Principal = { employeeId: 900001, email: 'synthetic@example.test', keyId: 'synthetic-query-fixture', scopes: ['crm:read'], twentyUserId: id(900001) };
+const principal: Principal = { isAnalyst: true, employeeId: 900001, email: 'synthetic@example.test', keyId: 'synthetic-query-fixture', scopes: ['crm:read'], twentyUserId: id(900001) };
 const related: CrmAccess = { mode: 'related', memberId: principal.twentyUserId!, ids: [1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12].map(id) };
 const all: CrmAccess = { mode: 'all', memberId: principal.twentyUserId! };
 const columns = {

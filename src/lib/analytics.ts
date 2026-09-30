@@ -1,4 +1,4 @@
-/** Read-only aggregate analytics. The API must recheck admin access around each
+/** Read-only aggregate analytics. The API must recheck Analyst access around each
  * call; neither source credentials nor cached data confer employee permission. */
 import { z } from 'zod';
 import { HttpError } from './errors';
@@ -534,7 +534,7 @@ export async function analyticsCapabilities() {
       search_console: { status: site ? 'configured_not_verified' : 'not_configured', property: site, timezone: 'America/Los_Angeles', groups: SEARCH_CONSOLE_GROUPS },
       periods: ANALYTICS_PERIODS, default_period: 'last_28_days', max_date_range_days: 93, max_rows_per_page: 25, max_report_rows: ANALYTICS_MAX_ROWS,
       served_at: new Date().toISOString(), guidance: [
-        'Analytics access is organization-wide and requires current administrator access on every request.',
+        'Analytics access is organization-wide and requires current Analyst access on every request.',
         'Last 7 and 28 days mean completed days. This month includes today and may be incomplete.',
         'GA4 reports use the property timezone. Search Console uses Pacific Time and finalized data by default.',
         'GA4 pages reports visited paths by views; landing_pages reports session entries. Segment reports with device, country, channel, source or landing_page_contains.',

@@ -262,6 +262,8 @@ summary { cursor: pointer; }
   .consent-footer { font-size: 11px; }
 }
 @media (max-width: 380px) {
+  .workspace-nav { gap: 12px; }
+  .workspace-nav button { gap: 4px; font-size: 11px; }
   .login-header, .login-main, .login-footer, .workspace-header-inner, .workspace-main { width: calc(100% - 32px); }
   .brand { gap: 7px; }
   .brand strong { font-size: 17px; }

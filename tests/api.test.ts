@@ -247,17 +247,28 @@ describe('REST access boundary', () => {
     expect(deps.transactionMock).toHaveBeenCalledTimes(2);
     expect(deps.query.mock.calls.every(([sql]) => !sql.includes('FROM public.opportunities'))).toBe(true);
   });
-  it('uses the verified Twenty admin result without granting WAG admins extra CRM access', async () => {
-    const admin = harness();
+  it.each([{ analystAccess: true, adminAccess: false }, { analystAccess: false, adminAccess: true }])('uses all-record access for the current Analyst or admin (%j)', async permission => {
+    const admin = harness({ roster: [{ ...active, ...permission }] });
     admin.liveCrmAccess.mockResolvedValue({ mode: 'all', memberId: active.twenty_user_id });
     const response = await handleApiRequest(request('crm/opportunities'), ['crm', 'opportunities'], admin);
     expect(response.status).toBe(200);
     expect((await response.json()).data.access_scope).toBe('all');
     expect(admin.query).toHaveBeenLastCalledWith(expect.not.stringContaining('assignee_email'), expect.any(Array));
-    const dashboardAdmin = harness({ roster: [{ ...active, adminAccess: true }] });
-    const restricted = await handleApiRequest(request('crm/opportunities'), ['crm', 'opportunities'], dashboardAdmin);
-    expect((await restricted.json()).data.access_scope).toBe('created_or_assigned');
-    expect(dashboardAdmin.query).toHaveBeenLastCalledWith(expect.stringContaining('ANY('), expect.arrayContaining([[]]));
+    const employee = harness();
+    employee.liveCrmAccess.mockResolvedValue({ mode: 'all', memberId: active.twenty_user_id });
+    expect((await handleApiRequest(request('crm/opportunities'), ['crm', 'opportunities'], employee)).status).toBe(503);
+  });
+  it.each(['opportunities', 'summary', 'filters', 'my-briefing'])('withholds CRM %s when Analyst access is revoked during authorization', async route => {
+    const row = { ...active, analystAccess: true };
+    const deps = harness({ roster: [row] });
+    deps.liveCrmAccess.mockImplementation(async () => {
+      row.analystAccess = false;
+      return { mode: 'all', memberId: active.twenty_user_id };
+    });
+    const result = await handleApiRequest(request(`crm/${route}`), ['crm', route], deps);
+    expect(result.status).toBe(403);
+    expect((await result.json()).error.code).toBe('EMPLOYEE_CHANGED');
+    expect(deps.query.mock.calls.every(([sql]) => !sql.includes('FROM public.opportunities'))).toBe(true);
   });
   it.each(['created', 'assigned'])('passes the %s filter to live authorization', async view => {
     const deps = harness();

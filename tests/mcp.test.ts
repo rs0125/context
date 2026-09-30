@@ -19,7 +19,7 @@ const origin = 'https://context.example.test';
 const employee = { id: 7, email: 'employee@example.test', is_active: true, dashboardAccess: true, adminAccess: false, twenty_user_id: null };
 const now = new Date('2026-09-25T00:00:00Z');
 const meta = { requestId: 'synthetic-mcp-test', generatedAt: now.toISOString() };
-const contextData = { constraints: { contacts: 'masked_or_excluded', narrative_context: 'redacted_lead_context', media: 'excluded', crm_scope: 'created or assigned; verified Twenty admins see all', max_page_size: 25 }, employee_id: 7, read_only: true, scopes: ['knowledge:read'], knowledge_discovery: { permitted: true, status: 'not_checked', index_path: '/api/v1/wiki/pages', search_path: '/api/v1/wiki/search' }, server_clock: clockContext(now) };
+const contextData = { constraints: { contacts: 'masked_or_excluded', narrative_context: 'redacted_lead_context', media: 'excluded', crm_scope: 'created or assigned; Analysts (including administrators) see all', max_page_size: 25 }, employee_id: 7, read_only: true, scopes: ['knowledge:read'], knowledge_discovery: { permitted: true, status: 'not_checked', index_path: '/api/v1/wiki/pages', search_path: '/api/v1/wiki/search' }, server_clock: clockContext(now) };
 const queryContext = { ...resolveDateQuery(new URLSearchParams(), ['created'], now), sort: 'id_asc', returned_count: 1, has_more: true };
 const matchingPolicy = { mode: 'permissive', include_unknown: false, range_matching: 'overlap', guidance: 'Verify uncertain candidates.' };
 const sourceStream = { source_watermark_at: now.toISOString(), last_run_at: now.toISOString(), status: 'ok' };
@@ -161,7 +161,7 @@ describe('MCP read-only protocol', () => {
     const id = richLead.id;
     const db = (row: Record<string, unknown>) => ({ query: async () => ({ rows: [row] }) }) as unknown as PoolClient;
     const lead = (await getOpportunity(db({ opportunity_id: id, city: 'Bengaluru', requirement_sqft: '40k', twenty_updated_at: now }),
-      { employeeId: 7, email: employee.email, keyId: 'synthetic', scopes: ['crm:read'], twentyUserId: id }, id,
+      { isAnalyst: false, employeeId: 7, email: employee.email, keyId: 'synthetic', scopes: ['crm:read'], twentyUserId: id }, id,
       { mode: 'related', memberId: id, ids: [id] }))!;
     const warehouse = (await getWarehouse(db({ id: 18, city: 'Bangalore', total_space_sqft: [40000] }), 18))!;
     const read = vi.fn(async (request: Request, path: string[]) => {

@@ -13,7 +13,7 @@ export async function GET(request: Request) {
       const { prompts } = await readPrompts(client);
       return { identity, restPromptTemplate: prompts.find(prompt => prompt.id === 'rest')!.body };
     });
-    return consoleJson({ employee: { email: identity.email, name: identity.name, isAdmin: identity.isAdmin, scopes: identity.scopes },
+    return consoleJson({ employee: { email: identity.email, name: identity.name, isAdmin: identity.isAdmin, isAnalyst: identity.isAnalyst, scopes: identity.scopes },
       apiBaseUrl: `${consoleOrigin()}/api/v1`, restPromptTemplate, capabilities: { writesEnabled: consoleWritesEnabled() } });
   } catch (error) { return consoleErrorResponse(error); }
 }

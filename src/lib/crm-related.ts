@@ -1,6 +1,6 @@
 import type { Principal } from './auth';
 import { requireScope } from './auth';
-import type { CrmAccess } from './crm-live';
+import { assertCrmAccess, type CrmAccess } from './crm-live';
 import { redactCrmText, type RedactedCrmText } from './crm-redaction';
 import { HttpError } from './errors';
 import { sanitizeLabel } from './privacy';
@@ -180,8 +180,7 @@ export async function getRelatedCrmContext(principal: Principal, requestedId: st
   if (!uuid(requestedId) || !['notes', 'tasks', 'company'].includes(section) || !Number.isInteger(limit) || limit < 1 || limit > 10) invalid();
   const leadId = requestedId.toLowerCase();
   const after = cursorAfter(options.cursor, leadId, section);
-  if (!access || !uuid(principal.twentyUserId) || !sameId(access.memberId, principal.twentyUserId)
-    || !['all', 'related'].includes(access.mode)) unavailable();
+  assertCrmAccess(principal, access);
   if (access.mode === 'related' && (!Array.isArray(access.ids) || !access.ids.some(id => sameId(id, leadId)))) {
     throw new HttpError(404, 'NOT_FOUND', 'Opportunity not found.');
   }

@@ -372,9 +372,9 @@ describe('MCP OAuth token lifecycle and employee isolation', () => {
     expect(db.state().grants.size).toBe(0);
   });
 
-  it('does not widen previously consented grants after key or role changes, including refresh', async () => {
+  it.each(['adminAccess', 'analystAccess'])('does not widen existing grants after %s elevation, including refresh', async field => {
     const db = database(); const auth = await authorized(db); const issued = await (await exchange(db, auth)).json();
-    db.roster.adminAccess = true;
+    db.roster[field] = true;
     vi.stubEnv('CONTEXT_API_KEYS_JSON', JSON.stringify([{ ...key, scopes: [...key.scopes, 'analytics:read'] }]));
     expect((await authenticateMcpRequest(accessRequest(issued.access_token), db.deps)).scopes).toEqual(key.scopes);
     const escalated = await refresh(db, auth.client.client_id, issued.refresh_token, { scope: 'analytics:read' });
@@ -385,18 +385,18 @@ describe('MCP OAuth token lifecycle and employee isolation', () => {
     expect([...db.state().grants.values()][0].scopes).toEqual(key.scopes);
   });
 
-  it('revokes analytics on current-role demotion and persists that narrowing on refresh', async () => {
+  it.each(['adminAccess', 'analystAccess'])('revokes analytics after %s removal and persists narrowing on refresh', async field => {
     const scopes = [...key.scopes, 'analytics:read'];
     vi.stubEnv('CONTEXT_API_KEYS_JSON', JSON.stringify([{ ...key, scopes }]));
-    const db = database(); db.roster.adminAccess = true;
+    const db = database(); db.roster[field] = true;
     const auth = await authorized(db); const issued = await (await exchange(db, auth)).json();
     expect(issued.scope).toBe(scopes.join(' '));
     expect((await authenticateMcpRequest(accessRequest(issued.access_token), db.deps)).scopes).toEqual(scopes);
-    db.roster.adminAccess = false;
+    db.roster[field] = false;
     expect((await authenticateMcpRequest(accessRequest(issued.access_token), db.deps)).scopes).toEqual(key.scopes);
     const renewed = await (await refresh(db, auth.client.client_id, issued.refresh_token)).json();
     expect(renewed.scope).toBe(key.scopes.join(' '));
-    db.roster.adminAccess = true;
+    db.roster[field] = true;
     expect((await authenticateMcpRequest(accessRequest(renewed.access_token), db.deps)).scopes).toEqual(key.scopes);
     const restored = await refresh(db, auth.client.client_id, renewed.refresh_token, { scope: 'analytics:read' });
     expect(restored.status).toBe(400);

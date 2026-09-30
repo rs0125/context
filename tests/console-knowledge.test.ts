@@ -34,7 +34,7 @@ function setup(rows: unknown[] = [stored]) {
   const client = { query } as unknown as PoolClient;
   const identity = vi.fn().mockResolvedValue({
     employeeId: 7, email: 'admin@example.invalid', name: 'Synthetic Admin',
-    isAdmin: true, scopes: ['knowledge:read'],
+    isAdmin: true, isAnalyst: true, scopes: ['knowledge:read'],
   });
   const checkOrigin = vi.fn((incoming: Request) => {
     if (incoming.headers.get('origin') !== origin) throw new HttpError(403, 'ORIGIN_NOT_ALLOWED', 'This origin is not allowed.');
@@ -97,7 +97,7 @@ describe('console knowledge access and read responses', () => {
   it.each(['GET', 'POST', 'PUT'])('blocks non-admin %s without reading or writing knowledge', async method => {
     vi.stubEnv('CONTEXT_CONSOLE_WRITES_ENABLED', 'true');
     const test = setup();
-    test.identity.mockResolvedValueOnce({ employeeId: 7, email: 'employee@example.invalid', name: 'Employee', isAdmin: false, scopes: ['knowledge:read'] });
+    test.identity.mockResolvedValueOnce({ employeeId: 7, email: 'employee@example.invalid', name: 'Employee', isAdmin: false, isAnalyst: false, scopes: ['knowledge:read'] });
     const response = await handleConsoleKnowledgeRequest(request(method, payload), method === 'PUT' ? metadata.id : undefined, test.dependencies);
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({ error: { code: 'ADMIN_REQUIRED' } });
@@ -122,7 +122,7 @@ describe('console knowledge access and read responses', () => {
     const client = { query } as unknown as PoolClient;
     const transaction = async <T>(work: (client: PoolClient) => Promise<T>) => work(client);
     const cookie = consoleCookie('session', createConsoleSession({ employeeId: 7, email: employee.email, name: employee.name,
-      isAdmin: true, scopes: ['knowledge:read'] }, 'google:107654321012345678901'), 28800).split(';')[0];
+      isAdmin: true, isAnalyst: true, scopes: ['knowledge:read'] }, 'google:107654321012345678901'), 28800).split(';')[0];
     const incoming = (method: string) => {
       const value = request(method, payload); value.headers.set('cookie', cookie); return value;
     };

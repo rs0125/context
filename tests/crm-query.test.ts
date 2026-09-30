@@ -7,7 +7,7 @@ import { CRM_INDUSTRIES, CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS } from '../src/li
 
 const id = '00000000-0000-4000-8000-000000000001';
 const id2 = '00000000-0000-4000-8000-000000000002';
-const principal: Principal = { employeeId: 1, email: 'example@example.test', keyId: 'fake', scopes: ['crm:read'], twentyUserId: id };
+const principal: Principal = { isAnalyst: false, employeeId: 1, email: 'example@example.test', keyId: 'fake', scopes: ['crm:read'], twentyUserId: id };
 const access: CrmAccess = { mode: 'related', memberId: id, ids: [id, id2] };
 const database = (rows: unknown[] = []) => {
   const query = vi.fn().mockResolvedValue({ rows });
@@ -194,7 +194,7 @@ describe('scoped CRM aggregates and discovery', () => {
   });
   it.each(['city', 'priority', 'lead_source', 'lease_duration'])('uses only referenced bindings for %s summaries', async group => {
     const db = database([{ total: 0, groups: [] }]);
-    await summarizeOpportunities(db.client, principal, new URLSearchParams({ group_by: group }), { mode: 'all', memberId: id });
+    await summarizeOpportunities(db.client, { ...principal, isAnalyst: true }, new URLSearchParams({ group_by: group }), { mode: 'all', memberId: id });
     expect(db.query.mock.calls[0][1]).toEqual([11]);
     expect(db.query.mock.calls[0][0]).toContain('LIMIT $1');
   });

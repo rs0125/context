@@ -3,10 +3,11 @@ import type { PoolClient } from 'pg';
 import { z } from 'zod';
 import { HttpError } from './errors';
 import { checkFailedCredential, noteFailedCredential } from './rate-limit';
+import { hasAnalystAccess, readRosterEmployees } from './employee-access';
 
 export const SCOPES = ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read'] as const;
 export type Scope = typeof SCOPES[number];
-export type Principal = { employeeId: number; email: string; scopes: Scope[]; keyId: string; twentyUserId?: string | null };
+export type Principal = { employeeId: number; email: string; scopes: Scope[]; keyId: string; twentyUserId?: string | null; isAnalyst: boolean };
 const registration = z.object({
   id: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
   hash: z.string().regex(/^[a-f0-9]{64}$/),
@@ -16,20 +17,18 @@ const registration = z.object({
 }).strict();
 export type KeyRegistration = z.infer<typeof registration> & { source?: 'database'; employeeId?: number };
 
-type RosterAccess = { dashboardAccess: unknown; adminAccess: unknown; twenty_user_id: unknown };
+type RosterAccess = { dashboardAccess: unknown; adminAccess: unknown; analystAccess?: unknown; twenty_user_id: unknown };
 export function rosterTwentyUserId(employee: RosterAccess): string | null {
   return typeof employee.twenty_user_id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(employee.twenty_user_id)
     ? employee.twenty_user_id : null;
 }
-/** Shared by browser sessions and agent credentials; the current DB roster is
- * authoritative. A WAG administrator does not imply a Twenty administrator. */
+/** Shared by browser sessions and agent credentials. Current roster and
+ * application permissions are authoritative; credentials can only narrow them. */
 export function rosterReadScopes(employee: RosterAccess): Scope[] {
   const scopes: Scope[] = ['knowledge:read'];
   if (employee.dashboardAccess === true || employee.adminAccess === true) scopes.push('warehouses:read');
-  if (rosterTwentyUserId(employee)) scopes.push('crm:read');
-  // This permission belongs only to the current WAG administrator role. Neither
-  // a dashboard flag nor a Twenty account/role grants organization analytics.
-  if (employee.adminAccess === true) scopes.push('analytics:read');
+  if (hasAnalystAccess(employee) || rosterTwentyUserId(employee)) scopes.push('crm:read');
+  if (hasAnalystAccess(employee)) scopes.push('analytics:read');
   return scopes;
 }
 
@@ -110,18 +109,15 @@ export async function resolvePrincipal(client: PoolClient, key: KeyRegistration)
         AND expires_at > CURRENT_TIMESTAMP LIMIT 1`, [key.id, key.hash, key.employeeId, key.employeeEmail]);
     if (current.rows.length !== 1) throw new HttpError(401, 'UNAUTHORIZED', 'A valid employee API key is required.');
   }
-  const { rows } = await client.query<{
-    id: number; email: string; is_active: boolean; dashboardAccess: boolean;
-    adminAccess: boolean; twenty_user_id: string | null;
-  }>(`SELECT id, email, is_active, "dashboardAccess", "adminAccess", twenty_user_id
-      FROM public."VerifiedNumber" WHERE lower(email) = $1 LIMIT 2`, [key.employeeEmail]);
+  const { rows } = await readRosterEmployees(client, key.employeeEmail);
   const employee = rows[0];
   if (rows.length !== 1 || !employee || employee.is_active !== true || !Number.isSafeInteger(employee.id) || employee.id <= 0
     || typeof employee.email !== 'string' || employee.email.toLowerCase() !== key.employeeEmail
     || (key.employeeId !== undefined && employee.id !== key.employeeId)) throw new HttpError(403, 'EMPLOYEE_INACTIVE', 'Employee access is unavailable.');
   const currentScopes = rosterReadScopes(employee);
   const scopes = key.scopes.filter(scope => currentScopes.includes(scope));
-  return { employeeId: employee.id, email: employee.email.toLowerCase(), scopes, keyId: key.id, twentyUserId: rosterTwentyUserId(employee) };
+  return { employeeId: employee.id, email: employee.email.toLowerCase(), scopes, keyId: key.id,
+    twentyUserId: rosterTwentyUserId(employee), isAnalyst: hasAnalystAccess(employee) };
 }
 
 export function requireScope(principal: Principal, scope: Scope) {

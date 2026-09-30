@@ -11,7 +11,7 @@ const leadId = '12345678-1234-4234-8234-123456789012';
 const memberId = '12345678-1111-4111-8111-123456789012';
 const route = `crm/opportunities/${leadId}/assessment`;
 const path = ['crm', 'opportunities', leadId, 'assessment'];
-const active = { id: 7, email: 'alex@example.test', is_active: true, dashboardAccess: true, adminAccess: false, twenty_user_id: memberId };
+const active = { id: 7, email: 'alex@example.test', is_active: true, dashboardAccess: true, adminAccess: false, analystAccess: false, twenty_user_id: memberId };
 type Row = Record<string, unknown>;
 type Roster = typeof active;
 
@@ -178,13 +178,19 @@ describe('shortlist assessment REST authorization and consistency', () => {
     expect(businessReads(h)[0]?.values).toEqual([leadId, []]);
   });
 
-  it('preserves all access only when the live Twenty authorization grants it', async () => {
-    const h = harness({ access: { mode: 'all', memberId } });
+  it('preserves all access when the current employee is an Analyst', async () => {
+    const h = harness({ initialRoster: { analystAccess: true }, access: { mode: 'all', memberId } });
     const result = await handleApiRequest(request(), path, h.deps);
     expect(result.status).toBe(200);
     expect((await result.json()).data.access_scope).toBe('all');
   });
 
+  it('withholds an in-flight Analyst assessment after permission removal', async () => {
+    const h = harness({ initialRoster: { analystAccess: true }, finalRoster: { analystAccess: false }, access: { mode: 'all', memberId } });
+    const result = await handleApiRequest(request('warehouse_ids=12'), path, h.deps);
+    expect(result.status).toBe(403);
+    expect(businessReads(h)).toHaveLength(0);
+  });
   it.each(['initial', 'final'] as const)('fails closed for a stale %s mirror snapshot', async stale => {
     const h = harness({ stale });
     const result = await handleApiRequest(request('warehouse_ids=12'), path, h.deps);

@@ -254,7 +254,7 @@ export function fixtureResult(name, args = {}, catalog = [], options = {}) {
       meta: { requestId: 'synthetic-tooling-eval', generatedAt: FIXTURE_NOW } };
   }
   let data;
-  if (name === 'get_context') data = { constraints: { contacts: 'masked_or_excluded', narrative_context: 'redacted_lead_context', media: 'excluded', crm_scope: 'created or assigned; verified Twenty admins see all', max_page_size: 25 }, employee_id: 999001, scopes: ['knowledge:read', 'warehouses:read', 'crm:read'], read_only: true, server_clock: clock,
+  if (name === 'get_context') data = { constraints: { contacts: 'masked_or_excluded', narrative_context: 'redacted_lead_context', media: 'excluded', crm_scope: 'created or assigned; Analysts (including administrators) see all', max_page_size: 25 }, employee_id: 999001, scopes: ['knowledge:read', 'warehouses:read', 'crm:read'], read_only: true, server_clock: clock,
     knowledge_discovery: { permitted: true, status: 'not_checked', index_path: '/api/v1/wiki/pages', search_path: '/api/v1/wiki/search' }, query_guidance: 'Calendar periods use Asia/Kolkata. This fixture is not business data.' };
   else if (name === 'warehouse_filters') data = { options: { city: ['Bangalore', 'Bengaluru', 'Pune'], type: ['RCC'] }, truncated: false };
   else if (name === 'crm_filters') {

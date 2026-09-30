@@ -1,5 +1,7 @@
 # Analytics MCP design review
 
+> Access policy updated 2026-09-30: current Analyst access now gates analytics; roster admins inherit it. Historical test results below describe their original version. See [current access rules](../README.md#access-and-data-handling).
+
 Reviewed 2026-09-27. Scope: the existing admin-only GA4 and Google Search Console connection, including its REST boundary, tool contracts and reporting interpretation. This review does not establish that production credentials, property configuration or recorded events are correct.
 
 ## Research used

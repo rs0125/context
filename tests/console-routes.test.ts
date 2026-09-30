@@ -12,7 +12,7 @@ import { GET as getKey, POST as rotateKey } from '../src/app/api/console/key/rou
 import { POST as logout } from '../src/app/api/auth/logout/route';
 
 const origin = 'https://context.example.test';
-const identity: ConsoleIdentity = { employeeId: 19, email: 'employee@wareongo.com', name: 'Example', isAdmin: false, scopes: ['knowledge:read', 'warehouses:read'] };
+const identity: ConsoleIdentity = { employeeId: 19, email: 'employee@wareongo.com', name: 'Example', isAdmin: false, isAnalyst: false, scopes: ['knowledge:read', 'warehouses:read'] };
 const roster = { id: 19, email: identity.email, name: identity.name, is_active: true, adminAccess: false, dashboardAccess: true, twenty_user_id: null };
 const token = `wog_ctx_${Buffer.alloc(32, 6).toString('base64url')}`;
 const id = 'console_11111111-1111-4111-8111-111111111111';
@@ -51,7 +51,7 @@ describe('console HTTP boundaries', () => {
     vi.stubEnv('CONTEXT_CONSOLE_WRITES_ENABLED', 'false');
     const response = await getMe(request('/api/console/me'));
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ employee: { email: identity.email, name: identity.name, isAdmin: false, scopes: identity.scopes }, apiBaseUrl: `${origin}/api/v1`, restPromptTemplate: REST_PROMPT_TEMPLATE, capabilities: { writesEnabled: false } });
+    expect(await response.json()).toEqual({ employee: { email: identity.email, name: identity.name, isAdmin: false, isAnalyst: false, scopes: identity.scopes }, apiBaseUrl: `${origin}/api/v1`, restPromptTemplate: REST_PROMPT_TEMPLATE, capabilities: { writesEnabled: false } });
     expect(response.headers.get('cache-control')).toContain('no-store');
     expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('employee_api_keys'))).toBe(false);
   });

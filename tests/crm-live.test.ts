@@ -1,39 +1,23 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Principal } from '../src/lib/auth';
-import { getLiveCrmAccess } from '../src/lib/crm-live';
+import { assertCrmAccess, getLiveCrmAccess } from '../src/lib/crm-live';
 
 const MEMBER_ID = '00000000-0000-4000-8000-000000000100';
 const OTHER_MEMBER_ID = '00000000-0000-4000-8000-000000000200';
 const opportunityId = (index: number) => `11111111-1111-4111-8111-${String(index).padStart(12, '0')}`;
 const principal: Principal = {
-  employeeId: 12, email: 'alex@example.test', scopes: ['crm:read'], keyId: 'test-key', twentyUserId: MEMBER_ID,
+  isAnalyst: false, employeeId: 12, email: 'alex@example.test', scopes: ['crm:read'], keyId: 'test-key', twentyUserId: MEMBER_ID,
 };
 const env = { TWENTY_CRM_BASE_URL: 'https://crm.example.test', TWENTY_CRM_API_KEY: 'test-only-api-key' };
 const member = () => ({ id: MEMBER_ID, userEmail: 'Alex@example.test', name: { firstName: 'Alex', lastName: 'Example' }, deletedAt: null });
 const opportunity = (index: number) => ({ id: opportunityId(index), assignedTo: ['ALEX'], deletedAt: null });
-const memberRole = () => ({
-  id: '22222222-2222-4222-8222-222222222222', universalIdentifier: '33333333-3333-4333-8333-333333333333',
-  label: 'Member', isEditable: true, canBeAssignedToUsers: true, canUpdateAllSettings: false,
-  canReadAllObjectRecords: true, workspaceMembers: [{ id: MEMBER_ID }],
-});
-const adminRole = () => ({ ...memberRole(), universalIdentifier: '20202020-02c2-43f2-b94d-cab1f2b532eb',
-  label: 'Admin', isEditable: false, canUpdateAllSettings: true });
-const rolesResponse = (roles: unknown[] = [memberRole()]) => Response.json({ data: { getRoles: roles } });
-
 function response(object: string, rows: unknown[], hasNextPage = false, endCursor: string | null = null) {
   return Response.json({ data: { [object]: rows }, pageInfo: { hasNextPage, endCursor } });
 }
 
 function responses(...pages: Response[]) {
-  return responsesWithRoles(rolesResponse(), ...pages);
-}
-
-function responsesWithRoles(roles: Response, ...pages: Response[]) {
   const fetcher = vi.fn<typeof fetch>();
-  pages.forEach((page, index) => {
-    fetcher.mockResolvedValueOnce(page);
-    if (index === 0) fetcher.mockResolvedValueOnce(roles);
-  });
+  pages.forEach(page => fetcher.mockResolvedValueOnce(page));
   return { fetcher, options: { fetch: fetcher, env } };
 }
 
@@ -48,24 +32,17 @@ describe('live CRM authorization', () => {
     const result = await getLiveCrmAccess(principal, options);
     expect(result).toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1)] });
     expect(JSON.stringify(result)).not.toMatch(/9876543210|Private|test-only-api-key/);
-    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher).toHaveBeenCalledTimes(2);
     for (const [url, init] of fetcher.mock.calls) {
       expect((url as URL).origin).toBe('https://crm.example.test');
-      if (init?.method === 'GET') {
-        expect((url as URL).searchParams.get('depth')).toBe('0');
-        expect((url as URL).searchParams.get('limit')).toBe('200');
-      } else {
-        expect((url as URL).pathname).toBe('/metadata');
-        expect(init?.method).toBe('POST');
-        const body = JSON.parse(init?.body as string);
-        expect(body.query.trim()).toMatch(/^query ContextReadRoles/);
-        expect(body.query).not.toMatch(/\bmutation\b/);
-      }
+      expect(init?.method).toBe('GET');
+      expect((url as URL).searchParams.get('depth')).toBe('0');
+      expect((url as URL).searchParams.get('limit')).toBe('200');
       expect((url as URL).href).not.toContain('test-only-api-key');
       expect(init).toMatchObject({ cache: 'no-store', redirect: 'error' });
       expect(init?.headers).toMatchObject({ Authorization: 'Bearer test-only-api-key' });
     }
-    expect((fetcher.mock.calls[2][0] as URL).searchParams.get('filter')).toBe(`or(createdBy.workspaceMemberId[eq]:"${MEMBER_ID}",assignedTo[containsAny]:["ALEX"]),deletedAt[is]:NULL`);
+    expect((fetcher.mock.calls[1][0] as URL).searchParams.get('filter')).toBe(`or(createdBy.workspaceMemberId[eq]:"${MEMBER_ID}",assignedTo[containsAny]:["ALEX"]),deletedAt[is]:NULL`);
   });
 
   it('includes created OR assigned deals, including created deals reassigned to others, and excludes owner-only/deleted records', async () => {
@@ -91,7 +68,7 @@ describe('live CRM authorization', () => {
       response('opportunities', [opportunity(1)]),
     );
     expect(await getLiveCrmAccess(principal, options)).toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1), opportunityId(2)] });
-    expect((fetcher.mock.calls[3][0] as URL).searchParams.get('starting_after')).toBe('opaque-cursor-1');
+    expect((fetcher.mock.calls[2][0] as URL).searchParams.get('starting_after')).toBe('opaque-cursor-1');
   });
 
   describe('exact opportunity authorization', () => {
@@ -103,8 +80,8 @@ describe('live CRM authorization', () => {
       const { fetcher, options } = responses(response('workspaceMembers', [member()]), response('opportunities', [row]));
       const result = await getLiveCrmAccess(principal, { ...options, view, opportunityId: opportunityId(1001) });
       expect(result).toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1001)] });
-      expect(fetcher).toHaveBeenCalledTimes(3);
-      const target = fetcher.mock.calls[2][0] as URL;
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      const target = fetcher.mock.calls[1][0] as URL;
       expect(target.pathname).toBe('/rest/opportunities');
       expect(target.searchParams.get('filter')).toBe(`id[eq]:"${opportunityId(1001)}",${filter},deletedAt[is]:NULL`);
       expect(target.searchParams.get('limit')).toBe('1');
@@ -118,7 +95,7 @@ describe('live CRM authorization', () => {
         response('opportunities', [{ ...opportunity(1), id: id.toUpperCase() }]));
       expect(await getLiveCrmAccess(principal, { ...options, opportunityId: id.toUpperCase() }))
         .toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [id] });
-      expect((fetcher.mock.calls[2][0] as URL).searchParams.get('filter')).toContain(`id[eq]:"${id}"`);
+      expect((fetcher.mock.calls[1][0] as URL).searchParams.get('filter')).toContain(`id[eq]:"${id}"`);
     });
 
     it.each(['', 'not-a-uuid', ` ${opportunityId(1)}`, `${opportunityId(1)},deletedAt[is]:NULL`, null, 123])(
@@ -134,7 +111,7 @@ describe('live CRM authorization', () => {
       const { fetcher, options } = responses(response('workspaceMembers', [member()]), response('opportunities', []));
       expect(await getLiveCrmAccess(principal, { ...options, opportunityId: opportunityId(1) }))
         .toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [] });
-      expect(fetcher).toHaveBeenCalledTimes(3);
+      expect(fetcher).toHaveBeenCalledTimes(2);
     });
 
     it.each([
@@ -152,7 +129,7 @@ describe('live CRM authorization', () => {
         response('opportunities', rows, more ?? false, more ? 'unexpected-more' : null));
       await expect(getLiveCrmAccess(principal, { ...options, opportunityId: opportunityId(1) }))
         .rejects.toMatchObject({ status: 503, code: 'CRM_AUTHORIZATION_UNAVAILABLE' });
-      expect(fetcher).toHaveBeenCalledTimes(3);
+      expect(fetcher).toHaveBeenCalledTimes(2);
     });
 
     it('does not let created ownership satisfy an assigned-only exact read', async () => {
@@ -171,16 +148,14 @@ describe('live CRM authorization', () => {
         .toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1)] });
     });
 
-    it('checks live roles on exact reads and loses administrator access immediately after revocation', async () => {
-      const before = responsesWithRoles(rolesResponse([adminRole()]), response('workspaceMembers', [member()]));
-      const after = responsesWithRoles(rolesResponse([memberRole()]), response('workspaceMembers', [member()]), response('opportunities', []));
-      expect(await getLiveCrmAccess(principal, { ...before.options, opportunityId: opportunityId(1) }))
+    it('loses all-lead access when the current Analyst permission is revoked', async () => {
+      const { fetcher, options } = responses(response('workspaceMembers', [member()]), response('opportunities', []));
+      expect(await getLiveCrmAccess({ ...principal, isAnalyst: true }, { ...options, opportunityId: opportunityId(1) }))
         .toEqual({ mode: 'all', memberId: MEMBER_ID });
-      expect(before.fetcher).toHaveBeenCalledTimes(2);
-      expect((before.fetcher.mock.calls[1][0] as URL).pathname).toBe('/metadata');
-      expect(await getLiveCrmAccess(principal, { ...after.options, opportunityId: opportunityId(1) }))
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(await getLiveCrmAccess(principal, { ...options, opportunityId: opportunityId(1) }))
         .toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [] });
-      expect(after.fetcher).toHaveBeenCalledTimes(3);
+      expect(fetcher).toHaveBeenCalledTimes(2);
     });
 
     it('requires the current unique employee identity before checking an exact ID', async () => {
@@ -191,42 +166,39 @@ describe('live CRM authorization', () => {
     });
   });
 
-  it('grants all-record access only for current membership in the verified built-in Twenty Admin role', async () => {
-    const { fetcher, options } = responsesWithRoles(rolesResponse([adminRole()]), response('workspaceMembers', [member()]));
-    expect(await getLiveCrmAccess(principal, options)).toEqual({ mode: 'all', memberId: MEMBER_ID });
-    expect(fetcher).toHaveBeenCalledTimes(2);
-    expect(fetcher.mock.calls.some(([url]) => (url as URL).pathname === '/rest/opportunities')).toBe(false);
+  it.each([null, MEMBER_ID])('allows Analysts to read all leads with linked member %j', async twentyUserId => {
+    const fetcher = vi.fn<typeof fetch>();
+    expect(await getLiveCrmAccess({ ...principal, isAnalyst: true, twentyUserId }, { fetch: fetcher, env: {} }))
+      .toEqual({ mode: 'all', memberId: twentyUserId });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it.each([
-    memberRole(),
-    { ...adminRole(), universalIdentifier: memberRole().universalIdentifier },
-    { ...adminRole(), isEditable: true },
-    { ...adminRole(), canUpdateAllSettings: false },
-    { ...adminRole(), canReadAllObjectRecords: false },
-    { ...adminRole(), canBeAssignedToUsers: false },
-    { ...adminRole(), workspaceMembers: [{ id: OTHER_MEMBER_ID }] },
-  ])('does not promote a member, spoofed Admin label, incomplete administrator role, or another member (%#)', async (role) => {
-    const { options } = responsesWithRoles(rolesResponse([role]),
-      response('workspaceMembers', [member()]), response('opportunities', []));
+  it('does not use Twenty roles to grant Analyst access', async () => {
+    const { fetcher, options } = responses(response('workspaceMembers', [{ ...member(), role: 'Admin', canReadAllObjectRecords: true }]), response('opportunities', []));
     expect(await getLiveCrmAccess(principal, options)).toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [] });
+    expect(fetcher.mock.calls.every(([url]) => (url as URL).pathname !== '/metadata')).toBe(true);
   });
 
-  it('checks role membership afresh so revoked administrators stop receiving all-record access', async () => {
-    const before = responsesWithRoles(rolesResponse([adminRole()]), response('workspaceMembers', [member()]));
-    const after = responsesWithRoles(rolesResponse([{ ...adminRole(), workspaceMembers: [] }, memberRole()]),
-      response('workspaceMembers', [member()]), response('opportunities', [opportunity(1)]));
-    expect((await getLiveCrmAccess(principal, before.options)).mode).toBe('all');
-    expect(await getLiveCrmAccess(principal, after.options)).toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1)] });
+  it.each(['created', 'assigned'] as const)('requires a linked account for an Analyst %s view', async view => {
+    const fetcher = vi.fn<typeof fetch>();
+    await expect(getLiveCrmAccess({ ...principal, isAnalyst: true, twentyUserId: null }, { view, fetch: fetcher, env }))
+      .rejects.toMatchObject({ status: 403, code: 'CRM_IDENTITY_UNAVAILABLE' });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it('keeps an administrator assigned-only view narrower than their default access', async () => {
-    const { fetcher, options } = responsesWithRoles(rolesResponse([adminRole()]),
-      response('workspaceMembers', [member()]), response('opportunities', [
-        opportunity(1), { ...opportunity(2), assignedTo: ['OTHER'], createdBy: { workspaceMemberId: MEMBER_ID } },
-      ]));
-    expect(await getLiveCrmAccess(principal, { ...options, view: 'assigned' })).toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1)] });
-    expect((fetcher.mock.calls[2][0] as URL).searchParams.get('filter')).toBe('assignedTo[containsAny]:["ALEX"],deletedAt[is]:NULL');
+  it('keeps an Analyst assigned-only view narrower than their default access', async () => {
+    const { fetcher, options } = responses(response('workspaceMembers', [member()]), response('opportunities', [
+      opportunity(1), { ...opportunity(2), assignedTo: ['OTHER'], createdBy: { workspaceMemberId: MEMBER_ID } },
+    ]));
+    expect(await getLiveCrmAccess({ ...principal, isAnalyst: true }, { ...options, view: 'assigned' }))
+      .toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1)] });
+    expect((fetcher.mock.calls[1][0] as URL).searchParams.get('filter')).toBe('assignedTo[containsAny]:["ALEX"],deletedAt[is]:NULL');
+  });
+
+  it('rejects a stale all-lead result and requires crm:read even for Analysts', async () => {
+    expect(() => assertCrmAccess(principal, { mode: 'all', memberId: MEMBER_ID })).toThrow();
+    expect(() => assertCrmAccess({ ...principal, isAnalyst: true }, { mode: 'all', memberId: OTHER_MEMBER_ID })).toThrow();
+    await expect(getLiveCrmAccess({ ...principal, isAnalyst: true, scopes: [] })).rejects.toMatchObject({ status: 403 });
   });
 
   it('created-only access uses workspace-member identity and works even when first-name assignment tokens are ambiguous', async () => {
@@ -242,18 +214,7 @@ describe('live CRM authorization', () => {
       ]),
     );
     expect(await getLiveCrmAccess(principal, { ...options, view: 'created' })).toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1)] });
-    expect((fetcher.mock.calls[2][0] as URL).searchParams.get('filter')).toBe(`createdBy.workspaceMemberId[eq]:"${MEMBER_ID}",deletedAt[is]:NULL`);
-  });
-
-  it.each([
-    { errors: [{ message: 'Private upstream permission error' }], data: { getRoles: [adminRole()] } },
-    { data: {} },
-    { data: { getRoles: [{ ...adminRole(), workspaceMembers: null }] } },
-    { data: { getRoles: [adminRole(), adminRole()] } },
-  ])('fails closed when role metadata is partial, malformed, unavailable, or ambiguous (%#)', async (roleBody) => {
-    const { fetcher, options } = responsesWithRoles(Response.json(roleBody), response('workspaceMembers', [member()]));
-    await expect(getLiveCrmAccess(principal, options)).rejects.toMatchObject({ status: 503, code: 'CRM_AUTHORIZATION_UNAVAILABLE' });
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect((fetcher.mock.calls[1][0] as URL).searchParams.get('filter')).toBe(`createdBy.workspaceMemberId[eq]:"${MEMBER_ID}",deletedAt[is]:NULL`);
   });
 
   it.each([
@@ -285,14 +246,14 @@ describe('live CRM authorization', () => {
     expect(result.mode).toBe('related');
     if (result.mode !== 'related') throw new Error('Expected related access');
     expect(result.ids).toHaveLength(1000);
-    expect(fetcher).toHaveBeenCalledTimes(7);
+    expect(fetcher).toHaveBeenCalledTimes(6);
   });
 
   it('rejects overflow instead of returning a partial authorized set', async () => {
     const pages = Array.from({ length: 5 }, (_, page) => response('opportunities', [opportunity(page + 1)], true, `cursor-${page}`));
     const { fetcher, options } = responses(response('workspaceMembers', [member()]), ...pages);
     await expect(getLiveCrmAccess(principal, options)).rejects.toMatchObject({ status: 503, code: 'CRM_AUTHORIZATION_UNAVAILABLE' });
-    expect(fetcher).toHaveBeenCalledTimes(7);
+    expect(fetcher).toHaveBeenCalledTimes(6);
   });
 
   it('rejects repeated cursors and duplicate records across pages', async () => {
