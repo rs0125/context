@@ -19,7 +19,7 @@ function signedSession(overrides: Record<string, unknown>) {
   return consoleCookie('session', signedConsoleValue({ employeeId: 7, email: identity.email, sub: subject,
     iat: Math.floor(now / 1000), exp: Math.floor(now / 1000) + 28800, sid: 'A'.repeat(32), ...overrides }, 'session'), 28800).split(';')[0];
 }
-function database(rows: unknown[]) { const query = vi.fn().mockResolvedValue({ rows }); return { query, client: { query } as unknown as PoolClient }; }
+function database(rows: unknown[]) { const query = vi.fn(async (sql: string, _values?: unknown[]) => ({ rows: sql.includes('session_revocations') ? [] : rows })); return { query, client: { query } as unknown as PoolClient }; }
 
 describe('Google employee sessions and current roster authorization', () => {
   it('uses signed HttpOnly host-only cookies with fixed eight-hour lifetime and a provider subject', () => {
@@ -92,7 +92,7 @@ describe('Google employee sessions and current roster authorization', () => {
   ])('derives identical current scopes for console and REST credentials', async permissions => {
     const { client } = database([{ ...roster, ...permissions }]);
     const browser = await resolveConsoleEmployee(client, identity.email);
-    const agent = await resolvePrincipal(client, { id: 'synthetic-key', hash: 'a'.repeat(64), employeeEmail: identity.email,
+    const agent = await resolvePrincipal(client, { employeeId: identity.employeeId, id: 'synthetic-key', hash: 'a'.repeat(64), employeeEmail: identity.email,
       scopes: ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read'], expiresAt: '2099-01-01T00:00:00Z' });
     expect(browser.scopes).toEqual(agent.scopes);
     expect(browser.isAdmin).toBe(permissions.adminAccess === true);

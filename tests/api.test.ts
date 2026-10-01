@@ -9,7 +9,7 @@ import type { getRelatedCrmContext } from '../src/lib/crm-related';
 
 const active = { id: 7, email: 'alex@example.test', is_active: true, dashboardAccess: true, adminAccess: false, twenty_user_id: '12345678-1111-1111-1111-123456789012' };
 function harness(options: { scopes?: KeyRegistration['scopes']; roster?: unknown[]; stale?: boolean } = {}) {
-  const key: KeyRegistration = { id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: 'alex@example.test',
+  const key: KeyRegistration = { employeeId: 7, id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: 'alex@example.test',
     scopes: options.scopes ?? ['knowledge:read', 'warehouses:read', 'crm:read'], expiresAt: '2099-01-01T00:00:00.000Z' };
   const query = vi.fn(async (text: string, _values?: unknown[]) => {
     if (text.includes('"VerifiedNumber"')) return { rows: options.roster ?? [active] };

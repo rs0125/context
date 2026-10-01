@@ -26,8 +26,10 @@ describe.skipIf(process.env.CONTEXT_LIVE_CONSOLE_TEST !== '1')('rollback-only co
     try {
       const envModule = '../scripts/env-utils.mjs';
       const migrationModule = '../scripts/migrate-knowledge.mjs';
+      const policyModule = '../scripts/runtime-policy.mjs';
       const { readEnv } = await import(envModule);
       const { migrationDatabaseOptions } = await import(migrationModule);
+      const { EXPECTED_RUNTIME_POLICY } = await import(policyModule);
       const env = await readEnv('.env.local') as Record<string, string>;
       check(env.CONTEXT_CONSOLE_WRITES_ENABLED === 'true', 'CONSOLE_LIVE_WRITES_NOT_CONFIGURED');
       for (const name of ['CONTEXT_CONSOLE_ORIGIN', 'CONTEXT_SESSION_SECRET', 'CONTEXT_CONSOLE_WRITES_ENABLED']) {
@@ -132,7 +134,7 @@ describe.skipIf(process.env.CONTEXT_LIVE_CONSOLE_TEST !== '1')('rollback-only co
 
       stage = 'PRIVATE_STORAGE';
       const privacy = (await connection.query(`SELECT c.relrowsecurity AS rls, c.relforcerowsecurity AS forced_rls,
-        (SELECT count(*)::integer FROM pg_policy WHERE polrelid = c.oid) AS policies,
+        (SELECT count(*)::integer FROM pg_policy WHERE polrelid = c.oid AND NOT COALESCE((${EXPECTED_RUNTIME_POLICY}), false)) AS policies,
         NOT EXISTS (SELECT 1 FROM LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) a WHERE a.grantee = 0) AS no_public_schema,
         NOT EXISTS (SELECT 1 FROM LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a WHERE a.grantee = 0) AS no_public_table,
         NOT EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname IN ('anon', 'authenticated', 'service_role') AND

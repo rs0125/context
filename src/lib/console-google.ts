@@ -1,3 +1,4 @@
+import { securityAudit } from './security-audit';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createRemoteJWKSet, customFetch, jwtVerify, type JWTVerifyGetKey } from 'jose';
 import {
@@ -234,6 +235,7 @@ export async function handleGoogleCallback(request: Request, dependencies: Parti
     const response = redirect(`${consoleOrigin()}/`);
     response.headers.append('Set-Cookie', consoleCookie('oauth', '', 0));
     response.headers.append('Set-Cookie', consoleCookie('session', createConsoleSession(identity, `google:${verified.sub}`, process.env, deps.now()), SESSION_SECONDS));
+    securityAudit('login', 'success', { employeeId: identity.employeeId });
     return response;
-  } catch (error) { return failureResponse(error, clearFlow); }
+  } catch (error) { securityAudit('login', 'failure', { error }); return failureResponse(error, clearFlow); }
 }

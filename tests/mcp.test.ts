@@ -39,7 +39,7 @@ const richLead = {
   last_note_at: null, last_task_at: now.toISOString(), recorded_follow_up_count: 0, field_evidence: { budget: { state: 'parsed', source: null } },
 };
 function key(scopes: KeyRegistration['scopes'] = ['knowledge:read', 'warehouses:read', 'crm:read']): KeyRegistration {
-  return { id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: employee.email, scopes, expiresAt: '2099-01-01T00:00:00Z' };
+  return { employeeId: employee.id, id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: employee.email, scopes, expiresAt: '2099-01-01T00:00:00Z' };
 }
 function rpc(method: string, params: object = {}, init: RequestInit = {}) {
   return new Request(`${origin}/mcp`, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), ...init,

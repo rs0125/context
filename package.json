@@ -29,7 +29,10 @@
     "test:mcp:live": "node scripts/verify-mcp.mjs",
     "test:tooling:agent": "node scripts/tooling-eval.mjs",
     "test:crm-query:live": "CONTEXT_LIVE_CRM_QUERY_TEST=1 vitest run tests/crm-query-live.test.ts",
-    "mcp:migrate": "node scripts/migrate-mcp-oauth.mjs"
+    "mcp:migrate": "node scripts/migrate-mcp-oauth.mjs",
+    "security:migrate": "node scripts/migrate-security.mjs",
+    "security:runtime": "node scripts/provision-runtime-role.mjs",
+    "test:security:postgres": "vitest run tests/security-storage-live.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.1.0",

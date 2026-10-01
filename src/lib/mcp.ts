@@ -15,14 +15,17 @@ import { compactWarehouseResults, compactWarehouseFilters } from './mcp-results'
 import { ga4ToolInput, searchConsoleToolInput, analyticsReportOutput, analyticsCapabilitiesOutput } from './analytics-tooling';
 import { promptText, type PromptValues } from './prompt-definitions';
 import { loadPromptValues } from './prompts';
+import type { PoolClient } from 'pg';
 import { shortlistAssessmentQuerySchema, shortlistAssessmentOutput } from './shortlist-assessment';
 
 export { MCP_INSTRUCTIONS } from './prompt-definitions';
 
-type Dependencies = {
+export type McpDependencies = {
   authenticate: (request: Request) => Promise<KeyRegistration>;
   read: typeof handleApiRequest;
   prompts: typeof loadPromptValues;
+  revalidateKey: (client: PoolClient, key: KeyRegistration) => Promise<void>;
+  authenticationChallenge: string;
 };
 const annotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const analyticsCitationFields = new Set(['report', 'group', 'period', 'date_from', 'date_to', 'limit', 'data_state', 'compare_to', 'device']);
@@ -147,13 +150,13 @@ function warehouseSchema(catalog: readonly WarehouseFilterDefinition[] = WAREHOU
 }
 
 /** Each server is request-scoped: no employee identity or result lives in a shared MCP session. */
-function registerTools(server: McpServer, key: KeyRegistration, request: Request, read: Dependencies['read'], prompts: PromptValues) {
+function registerTools(server: McpServer, key: KeyRegistration, request: Request, read: McpDependencies['read'], prompts: PromptValues, revalidateKey: McpDependencies['revalidateKey']) {
   const call = async (path: string[], args: Record<string, unknown> = {}, project?: (data: Record<string, unknown>) => Record<string, unknown>): Promise<CallToolResult> => {
     const url = new URL(`/api/v1/${path.map(encodeURIComponent).join('/')}`, consoleOrigin());
     for (const [name, value] of Object.entries(args)) if (value !== undefined) url.searchParams.set(name, String(value));
     // Invoke the existing read boundary in-process, retaining scope, live CRM
     // authorization, roster/key revalidation, sanitization and bounded transactions.
-    const response = await read(new Request(url, { signal: request.signal }), path, { authenticate: () => key, revalidateKey: revalidateMcpGrant });
+    const response = await read(new Request(url, { signal: request.signal }), path, { authenticate: () => key, revalidateKey });
     const body = await response.json() as Record<string, unknown>;
     if (response.ok && project) body.data = project(body.data as Record<string, unknown>);
     // Pagination cursors are transport state, not useful citations. Keep the
@@ -252,7 +255,7 @@ async function boundedBody(request: Request) {
   return Buffer.concat(chunks);
 }
 
-export async function handleMcpRequest(request: Request, overrides: Partial<Dependencies> = {}) {
+export async function handleMcpRequest(request: Request, overrides: Partial<McpDependencies> = {}) {
   let headers = new Headers({ 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
   try {
     headers = responseHeaders(request);
@@ -266,7 +269,7 @@ export async function handleMcpRequest(request: Request, overrides: Partial<Depe
     if (request.method === 'GET') throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Use MCP over HTTP POST.');
     const body = await boundedBody(request);
     const prompts = await (overrides.prompts ?? loadPromptValues)();
-    const handler = createMcpHandler(server => registerTools(server, key, request, overrides.read ?? handleApiRequest, prompts), {
+    const handler = createMcpHandler(server => registerTools(server, key, request, overrides.read ?? handleApiRequest, prompts, overrides.revalidateKey ?? revalidateMcpGrant), {
       serverInfo: { name: 'wareongo-context', version: '0.6.0' }, instructions: `${promptText('mcp', prompts)} ${promptText('analytics', prompts)}`,
       maxSubscriptions: 0, verboseLogs: false,
     });
@@ -275,7 +278,7 @@ export async function handleMcpRequest(request: Request, overrides: Partial<Depe
     return response;
   } catch (error) {
     const safe = error instanceof HttpError ? error : new HttpError(503, 'MCP_UNAVAILABLE', 'The context connector is temporarily unavailable.');
-    if (safe.status === 401) headers.set('WWW-Authenticate', `Bearer resource_metadata="${consoleOrigin()}/.well-known/oauth-protected-resource", scope="${SCOPES.join(' ')}"`);
+    if (safe.status === 401) headers.set('WWW-Authenticate', overrides.authenticationChallenge ?? `Bearer resource_metadata="${consoleOrigin()}/.well-known/oauth-protected-resource", scope="${SCOPES.join(' ')}"`);
     if (safe.status === 405) headers.set('Allow', 'POST, OPTIONS');
     if ([429, 503].includes(safe.status)) headers.set('Retry-After', safe.status === 429 ? '60' : '10');
     return Response.json({ error: { code: safe.code, message: safe.message } }, { status: safe.status, headers });

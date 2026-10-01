@@ -1,3 +1,4 @@
+import { EXPECTED_RUNTIME_POLICY } from './runtime-policy.mjs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -53,7 +54,7 @@ async function inspect(client) {
     WHERE a.attrelid = $1 AND a.attnum > 0 ORDER BY a.attnum`, [table.oid])).rows;
   const constraints = (await client.query(`SELECT conname AS name, contype AS type, convalidated AS validated, pg_get_constraintdef(oid, true) AS definition
     FROM pg_constraint WHERE conrelid = $1 ORDER BY conname`, [table.oid])).rows;
-  const objects = (await client.query(`SELECT (SELECT count(*)::integer FROM pg_policy WHERE polrelid = $1) AS policies,
+  const objects = (await client.query(`SELECT (SELECT count(*)::integer FROM pg_policy WHERE polrelid = $1 AND NOT COALESCE((${EXPECTED_RUNTIME_POLICY}), false)) AS policies,
     (SELECT count(*)::integer FROM pg_trigger WHERE tgrelid = $1 AND NOT tgisinternal) AS triggers,
     (SELECT count(*)::integer FROM pg_rewrite WHERE ev_class = $1) AS rules,
     (SELECT count(*)::integer FROM pg_inherits WHERE inhrelid = $1 OR inhparent = $1) AS inheritance`, [table.oid])).rows[0];

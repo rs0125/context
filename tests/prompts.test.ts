@@ -118,7 +118,7 @@ describe('browser prompt authorization', () => {
     const test = setup();
     const roster = { id: identity.employeeId, email: identity.email, name: identity.name, is_active: true, adminAccess: true, dashboardAccess: true, twenty_user_id: null };
     const originalQuery = test.query.getMockImplementation()!;
-    test.query.mockImplementation(async (sql, args) => sql.includes('VerifiedNumber') ? { rows: [roster] } : originalQuery(sql, args));
+    test.query.mockImplementation(async (sql, args) => sql.includes('session_revocations') ? { rows: [] } : sql.includes('VerifiedNumber') ? { rows: [roster] } : originalQuery(sql, args));
     const cookie = consoleCookie('session', createConsoleSession({ ...identity, scopes: [...identity.scopes] }, 'google:synthetic-admin'), 3600).split(';')[0];
     const deps = { readTransaction: test.deps.readTransaction, writeTransaction: test.deps.writeTransaction };
     const good = await handleConsolePromptsRequest(request('PUT', { id: 'mcp', body: 'Custom', revision: null }, { cookie }), deps);
@@ -127,7 +127,7 @@ describe('browser prompt authorization', () => {
     test.query.mockClear();
     expect((await handleConsolePromptsRequest(request('GET', undefined, { cookie }), deps)).status).toBe(403);
     expect((await handleConsolePromptsRequest(request('PUT', { id: 'mcp', body: 'Another', revision: (await good.json()).prompt.revision }, { cookie }), deps)).status).toBe(403);
-    expect(test.query.mock.calls.every(([sql]) => sql.includes('VerifiedNumber'))).toBe(true);
+    expect(test.query.mock.calls.every(([sql]) => sql.includes('VerifiedNumber') || sql.includes('session_revocations'))).toBe(true);
   });
   it('requires console origin and write enablement', async () => {
     const { deps, query, writeTransaction } = setup();
@@ -154,7 +154,7 @@ describe('browser prompt authorization', () => {
 });
 
 describe('MCP uses the saved prompt configuration', () => {
-  const key = { id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: identity.email, scopes: ['knowledge:read'] as const, expiresAt: '2099-01-01T00:00:00Z' };
+  const key = { employeeId: identity.employeeId, id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: identity.email, scopes: ['knowledge:read'] as const, expiresAt: '2099-01-01T00:00:00Z' };
   async function rpc(method: string, prompts: PromptValues, params: unknown = {}) {
     const response = await handleMcpRequest(new Request(`${origin}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) }), { authenticate: async () => ({ ...key, scopes: [...key.scopes] }), prompts: async () => prompts });

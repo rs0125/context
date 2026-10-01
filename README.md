@@ -16,6 +16,7 @@ node scripts/import-local-env.mjs \
 node scripts/setup-ca.mjs
 node scripts/create-key.mjs \
   --email employee@wareongo.com \
+  --employee-id 123 \
   --label local-trial \
   --days 30
 npm run dev
@@ -23,7 +24,7 @@ npm run dev
 
 Run these commands from this directory. Adjust the source environment paths to the files used by your local applications. The import script requires matching Supabase pooler credentials in the two source applications, selects transaction port `6543`, and creates `.env.local` with a one-connection pool. It also copies `TWENTY_CRM_BASE_URL` and `TWENTY_CRM_API_KEY` from CRM Automations for server-side reads. The source key needs permission to read members, opportunities and role metadata for authorization, plus notes, tasks, their target relationships and companies for related context. R2, OpenAI, and messaging credentials are not imported. It does not edit the source files or overwrite a different existing database configuration. Use `.env.example` as a reference for optional settings; do not copy its placeholder database URL over your imported configuration.
 
-The employee email must match an active employee in the dashboard's roster. Key issuance writes the hashed registration to the ignored `.env.local` file and the raw key to `.local/keys/<label>.json`, also ignored by Git. For the command above, the credential file is `.local/keys/local-trial.json`. Use that file to configure the test client's credential store. The script does not print the raw key to the terminal.
+The employee email and `--employee-id` must match the same active employee in the dashboard's roster; replace both example values. Key issuance writes the hashed registration to the ignored `.env.local` file and the raw key to `.local/keys/<label>.json`, also ignored by Git. For the command above, the credential file is `.local/keys/local-trial.json`. Use that file to configure the test client's credential store. The script does not print the raw key to the terminal.
 
 The example email is a placeholder; supply the intended employee's actual roster email privately. Initialise the private knowledge table once using the administrative import described below before testing knowledge reads. An already configured database does not need its knowledge reimported for a new checkout or deployment.
 
@@ -54,7 +55,7 @@ Admins can create pages, import `.md` text, edit metadata and required scopes, a
 
 The console follows the supplied [Linear style reference](docs/linear-style-reference.md): dark surfaces, fine borders, compact Inter type, and a single lime primary action per view. Sign-in, employee setup, the knowledge editor, and connector consent share this system. Inter is self-hosted under the [SIL Open Font License](src/app/fonts/OFL.txt); technical values use the system monospace family. Rendering requires no external font requests. Responsive layouts, keyboard focus, loading states, and long document titles are checked with synthetic browser fixtures. Desktop/mobile screenshots stay in the ignored `previews/` directory; open `previews/index.html` for the local gallery when available.
 
-For a new database, run `npm run console:migrate -- --apply`, then set `CONTEXT_CONSOLE_WRITES_ENABLED=true` and restart or redeploy. This creates and verifies the private console credential store; it does not import or overwrite organisational pages. Without `--apply`, the command only prints its plan. Setup scripts never automatically apply migrations, and writes default to disabled for new checkouts. The agent-facing `/api/v1` API remains read-only regardless of this flag.
+For a new database, run `npm run console:migrate -- --apply` and `npm run security:migrate -- --apply` before using browser sessions, then set `CONTEXT_CONSOLE_WRITES_ENABLED=true`. These create and verify the credential and session stores; they do not import or overwrite organisational pages. Without `--apply`, the commands only print their plans. Complete the [security rollout](#security-rollout) before a production deployment. Setup scripts never automatically apply migrations, and writes default to disabled for new checkouts. The agent-facing `/api/v1` API remains read-only regardless of this flag.
 
 Administrators can edit shared MCP instructions, analytics instructions, all 17 tool descriptions, and the copyable REST setup prompt in the **Prompts** tab. Run `npm run prompts:migrate` to inspect the storage plan and `npm run prompts:migrate -- --apply` to create its private `context_prompts_private.prompt_overrides` table. Saving also requires `CONTEXT_CONSOLE_WRITES_ENABLED=true`. Until the table exists, the console displays the built-in defaults and disables saving; MCP continues using the defaults. Prompt storage errors after setup are reported as unavailable rather than silently serving obsolete defaults.
 
@@ -64,7 +65,7 @@ After migration, `npm run test:prompts:live` verifies prompt reads, saves, revis
 
 Console rotation replaces only the current console-issued key. Keys registered separately through `CONTEXT_API_KEYS_JSON` remain valid until explicitly revoked from that registry.
 
-See the [employee authentication review](docs/auth-review.md) for remaining rollout work and the legacy-key retirement procedure. In particular, console logout currently clears browser cookies without server-side revocation of a copied session, and legacy environment keys must be retired or rebound before an employee email is reused.
+Logout records the signed session's hash in shared private storage before clearing cookies. A copied cookie is rejected by subsequent requests across instances. If revocation storage is unavailable, logout returns an error and preserves the cookie for a retry. This operation remains enabled when console editing is disabled. Legacy environment keys without an employee ID require a one-time immutable binding migration; they never acquire an identity automatically during a request. See the [employee authentication review](docs/auth-review.md) for evidence and remaining deployment work.
 
 ## Connect an MCP client
 
@@ -93,7 +94,8 @@ Up to seventeen MCP tools cover context discovery, knowledge search/read, wareho
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | The shared Supabase **transaction pooler** connection, on a `*.pooler.supabase.com:6543` host. Use the complete database URL, including the database name and credentials. |
+| `CONTEXT_DATABASE_URL` | Required in production: dedicated `context_engine_runtime` login through the Supabase **transaction pooler**, on a `*.pooler.supabase.com:6543` host. The app rejects elevated role attributes and role memberships. |
+| `DATABASE_URL` | Migration-owner connection, kept in a separate private operator environment. Local development may use it when `CONTEXT_DATABASE_URL` is absent. Remove the owner credential from deployed application environments. |
 | `PG_POOL_MAX` | Connections per running application instance. Default `1`; maximum `2`. |
 | `PG_SSL_CA` | PEM CA certificate for verified TLS. The setup script configures Supabase's production CA using literal `\n` separators. Configure the same value on Vercel. |
 | `TWENTY_CRM_BASE_URL` | HTTPS origin of the existing Twenty CRM service. Required for live authorization before CRM reads. |
@@ -117,6 +119,7 @@ A key registration has this shape:
   {
     "id": "employee-client-label",
     "hash": "SHA256_OF_THE_RAW_KEY",
+    "employeeId": 123,
     "employeeEmail": "employee@wareongo.com",
     "scopes": ["knowledge:read", "warehouses:read", "crm:read"],
     "expiresAt": "2026-12-31T23:59:59.000Z"
@@ -124,7 +127,7 @@ A key registration has this shape:
 ]
 ```
 
-Use the key script to generate a real key and matching registration. Keys default to all three read scopes and expire after 30 days. Set `--scopes knowledge:read,warehouses:read` for a smaller grant or `--days` for an expiry between 1 and 90 days. Create separate keys for employees and clients where practical.
+Use the key script with the immutable roster ID to generate a real key and matching registration. Keys default to the three knowledge/warehouse/CRM read scopes and expire after 30 days; analytics remains explicit opt-in. Set `--scopes knowledge:read,warehouses:read` for a smaller grant or `--days` for an expiry between 1 and 90 days. Create separate keys for employees and clients where practical.
 
 Revoke a local registration with:
 
@@ -312,6 +315,31 @@ Released pooler connections can stay warm for 30 seconds across agent-thinking g
 REST and MCP track repeated failed credentials in bounded, separate per-process maps. After five proven failures for the same credential, further identical attempts return 429 before a database lookup while the entry remains in the bounded cache for that minute; heavy credential rotation can evict entries. Invalid credentials do not consume authenticated per-key quotas, including clients sharing an egress IP. Randomly changing credentials still require bounded database lookups; configure Vercel Firewall controls for deployment-wide abuse protection. Authenticated API keys retain their normal per-key limit (30 requests per minute by default).
 
 That pool size is **per instance**, not a global connection cap. Vercel can start several instances, each with its own pool. Before a wider employee rollout, set an appropriate Supabase pool limit, configure Vercel Firewall/rate controls, and check database connection usage under the expected concurrency. Keep production and preview credentials separate; preview deployments should not silently inherit production access.
+
+## Security rollout
+
+The parallel signed endpoint is documented in [Ramesh request authentication](docs/ramesh-request-auth.md). It uses the same employee and tool permissions as the Claude connector, with no employee OAuth enrollment. Complete the security rollout below before applying its additive nonce migration and configuring its keys.
+
+Apply the security changes in this order before deploying this revision. They do not change tool names, input schemas or business-data operations.
+
+1. Prepare a private operator environment containing the migration-owner `DATABASE_URL`, verified TLS settings and the **actual deployed** `CONTEXT_API_KEYS_JSON`. A different local registry cannot bind production legacy keys. Ensure the existing console, knowledge, prompt and MCP migrations are complete; the runtime role requires all four private stores.
+2. Run `npm run security:migrate -- --env-file /PRIVATE/operator.env --apply`. It creates `context_security_private` and pins each unexpired environment key to the current unique active employee ID. Ambiguous/inactive identities or an existing binding pointing to another ID stop the migration and roll back. Review and explicitly retire obsolete registrations before retrying; do not remap an old token to a replacement employee.
+3. Run `npm run security:runtime -- --env-file /PRIVATE/operator.env --check`. This creates and checks the restricted role inside a transaction that is rolled back. It refuses unsafe inherited `PUBLIC` grants, callable security-definer functions and existing roles; it never revokes grants belonging to other applications.
+
+   Supabase's existing `PUBLIC` grants can include PostGIS metadata/functions, the `pg_net` request/response tables and the RLS event-trigger helper. For the approved application-scoped deployment, add `--allow-reviewed-platform-access` to both the check and apply commands. This option accepts only the nine enumerated objects in `scripts/runtime-platform-access.mjs`, verifies extension membership/ownership and object shape, limits PostGIS metadata to reads, and reports the actual inherited privileges with `platformIsolation: false`. It does not change shared grants. Business-table writes, excess roster columns, unrelated tables/functions and schema creation still fail provisioning, including with this option. A same-named object without the expected provenance is rejected.
+
+   This is application-table isolation, not complete isolation from Supabase internals. A stolen runtime credential can read or modify the inherited `pg_net` tables, potentially including HTTP request headers and responses. The application exposes no SQL executor or `pg_net` tool; fixed parameterized queries, read-only business transactions and current employee authorization remain mandatory. Keep the credential server-only. The platform limitation was explicitly accepted for this rollout and remains separate infrastructure hardening work. Removing it requires platform-supported changes; the optional `restrict-public-runtime-access.mjs` operator script preserves existing role access and refuses ineffective REVOKEs, but is not a deployment prerequisite in this mode.
+4. Run `npm run security:runtime -- --env-file /PRIVATE/operator.env --apply`, adding the same `--allow-reviewed-platform-access` option if it was used for the approved check. The new login credential is written only to ignored `.local/runtime-database.env`, with file mode `0600`. `--output-file` selects another private path. The file is created before provisioning for recovery and is **not proof of success**; require an `applied: true` result. Existing files and roles are never overwritten or automatically rotated. Investigate a failed run before retrying.
+5. Configure `CONTEXT_DATABASE_URL` from that file in the deployed application, preserve the existing session/key-encryption secrets and other app settings, and remove the migration-owner `DATABASE_URL` from the application environment. Keep preview environments isolated. Deploy Context Engine and the main dashboard backend authorization fixes. Production rejects a missing dedicated connection or an elevated runtime role.
+6. Verify Google sign-in, key recopy, a tool read, an admin prompt edit and logout. Replaying a logged-out cookie must fail. Existing credentials retain their scopes; these migrations do not rotate keys or grant Analyst access.
+
+Dashboard roster edits now serialize their checks and update within a bounded transaction and recheck the current actor inside it. Concurrent edits return 409 for retry. This protects the last-admin rule across backend instances; there is no backend schema migration for this guard.
+
+The runtime role has SELECT on six named source tables (only required roster columns, including the phone needed for signed identity) and explicit operations on nine private tables. Enabling Ramesh adds a tenth private table containing nonce hashes and expiry only. It has no source writes, ownership, role membership or RLS bypass. The migration owner remains separate; private migrations accept only the exact named runtime RLS policy when rerun. Pooler usernames use `context_engine_runtime.PROJECT`, following [Supabase's connection format](https://supabase.com/docs/guides/database/connecting-to-postgres).
+
+Console login/logout, key retrieval/rotation and knowledge/prompt saves emit allowlisted `context_security` events with actor ID, action, outcome and relevant resource/revision IDs. They omit keys, cookies, email addresses, bodies and raw exceptions. Configure retained application logs separately; this is not immutable document revision history.
+
+The additional database test suite is opt-in: set `CONTEXT_TEST_DATABASE_URL` to a **fresh, disposable local PostgreSQL instance**, with database name exactly `context_security_test`, then run `npm run test:security:postgres`. It creates synthetic schemas, login roles and fixtures using a local superuser. Do not use a shared development database. Tests exercise real RLS, granted/denied SQL, migrations, session revocation and legacy identity binding. Destroy the disposable instance afterward.
 
 ## Validation and deployment
 

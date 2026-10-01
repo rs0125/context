@@ -16,7 +16,7 @@ const digest = (value: string) => createHash('sha256').update(value).digest('hex
 
 function registration(overrides: Partial<KeyRegistration> = {}): KeyRegistration {
   return {
-    id: 'employee-test', hash: digest(token), employeeEmail: 'employee@example.test',
+    employeeId: 7, id: 'employee-test', hash: digest(token), employeeEmail: 'employee@example.test',
     scopes: [...allScopes], expiresAt: '2026-09-26T00:00:00.000Z', ...overrides,
   };
 }

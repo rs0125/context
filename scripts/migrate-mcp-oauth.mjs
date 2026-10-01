@@ -1,3 +1,4 @@
+import { EXPECTED_RUNTIME_POLICY } from './runtime-policy.mjs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -87,7 +88,7 @@ async function inspectTable(client, name) {
     FROM pg_constraint WHERE conrelid = $1 ORDER BY conname`, [table.oid])).rows;
   const indexes = (await client.query(`SELECT pg_get_indexdef(indexrelid) AS definition, indisvalid AS valid, indisready AS ready
     FROM pg_index WHERE indrelid = $1 ORDER BY pg_get_indexdef(indexrelid)`, [table.oid])).rows;
-  const objects = (await client.query(`SELECT (SELECT count(*)::integer FROM pg_policy WHERE polrelid = $1) AS policies,
+  const objects = (await client.query(`SELECT (SELECT count(*)::integer FROM pg_policy WHERE polrelid = $1 AND NOT COALESCE((${EXPECTED_RUNTIME_POLICY}), false)) AS policies,
     (SELECT count(*)::integer FROM pg_trigger WHERE tgrelid = $1 AND NOT tgisinternal) AS triggers,
     (SELECT count(*)::integer FROM pg_rewrite WHERE ev_class = $1) AS rules,
     (SELECT count(*)::integer FROM pg_inherits WHERE inhrelid = $1 OR inhparent = $1) AS inheritance`, [table.oid])).rows[0];

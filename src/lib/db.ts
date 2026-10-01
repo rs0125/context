@@ -5,8 +5,11 @@ import { HttpError } from './errors';
 const globalDatabase = globalThis as unknown as { contextPool?: Pool };
 
 export function databaseOptions(env: NodeJS.ProcessEnv = process.env) {
+  if (env.NODE_ENV === 'production' && !env.CONTEXT_DATABASE_URL) {
+    throw new HttpError(503, 'DATABASE_CONFIGURATION', 'A dedicated runtime database connection is required.');
+  }
   let url: URL;
-  try { url = new URL(env.DATABASE_URL ?? ''); }
+  try { url = new URL(env.CONTEXT_DATABASE_URL ?? env.DATABASE_URL ?? ''); }
   catch { throw new HttpError(503, 'DATABASE_CONFIGURATION', 'Database connection is not configured.'); }
   if (!['postgres:', 'postgresql:'].includes(url.protocol)
     || !url.hostname.endsWith('.pooler.supabase.com') || url.port !== '6543') {
@@ -62,6 +65,11 @@ export async function withConsoleWriteTransaction<T>(
   return withTransaction(operation, pool ?? getPool(), false);
 }
 
+/** Logout must remain available when console editing/key issuance is disabled. */
+export async function withSessionWriteTransaction<T>(operation: (client: PoolClient) => Promise<T>, pool: Pool = getPool()): Promise<T> {
+  return withTransaction(operation, pool, false);
+}
+
 async function withTransaction<T>(operation: (client: PoolClient) => Promise<T>, pool: Pool, readOnly: boolean): Promise<T> {
   if (pool.waitingCount >= 4) {
     throw new HttpError(503, 'DATABASE_BUSY', 'The read service is busy. Retry shortly.');
@@ -81,6 +89,15 @@ async function withTransaction<T>(operation: (client: PoolClient) => Promise<T>,
     await client.query("SET LOCAL statement_timeout = '4000ms'");
     await client.query("SET LOCAL lock_timeout = '1000ms'");
     await client.query("SET LOCAL idle_in_transaction_session_timeout = '6000ms'");
+    if (process.env.CONTEXT_DATABASE_URL) {
+      const role = (await client.query(`SELECT rolname, rolsuper, rolbypassrls, rolcreaterole, rolcreatedb, rolreplication,
+        EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) AS memberships
+        FROM pg_roles r WHERE rolname = current_user`)).rows[0];
+      if (!role || role.rolname !== 'context_engine_runtime'
+        || [role.rolsuper, role.rolbypassrls, role.rolcreaterole, role.rolcreatedb, role.rolreplication, role.memberships].some(flag => flag !== false)) {
+        throw new HttpError(503, 'DATABASE_ROLE_UNSAFE', 'The runtime database role is not configured safely.');
+      }
+    }
     const result = await operation(client);
     await client.query('COMMIT');
     return result;

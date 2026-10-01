@@ -6,19 +6,21 @@ import { readEnv, setEnvValues } from './env-utils.mjs';
 
 async function main() {
   const { values } = parseArgs({ options: {
-    email: { type: 'string' }, label: { type: 'string' },
+    email: { type: 'string' }, label: { type: 'string' }, 'employee-id': { type: 'string' },
     days: { type: 'string', default: '30' },
     scopes: { type: 'string', default: 'knowledge:read,warehouses:read,crm:read' },
   } });
   const email = values.email?.toLowerCase();
   const label = values.label;
   const days = Number(values.days);
+  const employeeId = Number(values['employee-id']);
+  if (!Number.isSafeInteger(employeeId) || employeeId <= 0) throw new Error('Provide --employee-id with the immutable employee roster ID.');
   if (!email || !/^[a-z0-9._+-]+@wareongo\.com$/.test(email)) throw new Error('Provide --email with a Wareongo employee email.');
   if (!label || !/^[a-zA-Z0-9_-]{1,64}$/.test(label)) throw new Error('Provide --label using 1–64 letters, numbers, hyphens, or underscores.');
   if (!Number.isInteger(days) || days < 1 || days > 90) throw new Error('--days must be between 1 and 90.');
   const scopes = [...new Set(values.scopes.split(','))];
   // Analytics is explicit opt-in here; the live active roster must still grant
-  // adminAccess === true on every request, regardless of this registration.
+  // Analyst access on every request, regardless of this registration.
   if (!scopes.length || scopes.some(scope => !['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read'].includes(scope))) throw new Error('Unknown read scope.');
   const file = path.resolve('.env.local');
   const env = await readEnv(file);
@@ -28,7 +30,7 @@ async function main() {
   if (keys.some(key => key.id === label)) throw new Error('This label already exists. Use a new label or revoke it first.');
   const apiKey = `wog_ctx_${randomBytes(32).toString('base64url')}`;
   const expiresAt = new Date(Date.now() + days * 86400_000).toISOString();
-  const registration = { id: label, hash: createHash('sha256').update(apiKey).digest('hex'), employeeEmail: email, scopes, expiresAt };
+  const registration = { id: label, hash: createHash('sha256').update(apiKey).digest('hex'), employeeId, employeeEmail: email, scopes, expiresAt };
   const directory = path.resolve('.local/keys');
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);

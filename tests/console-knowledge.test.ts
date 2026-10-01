@@ -118,7 +118,7 @@ describe('console knowledge access and read responses', () => {
     vi.stubEnv('CONTEXT_CONSOLE_WRITES_ENABLED', 'true');
     const employee = { id: 7, email: 'employee@wareongo.com', name: 'Employee', is_active: true,
       adminAccess: true, dashboardAccess: false, twenty_user_id: null };
-    const query = vi.fn(async (sql: string) => ({ rows: sql.includes('VerifiedNumber') ? [employee] : [metadata] }));
+    const query = vi.fn(async (sql: string) => ({ rows: sql.includes('session_revocations') ? [] : sql.includes('VerifiedNumber') ? [employee] : [metadata] }));
     const client = { query } as unknown as PoolClient;
     const transaction = async <T>(work: (client: PoolClient) => Promise<T>) => work(client);
     const cookie = consoleCookie('session', createConsoleSession({ employeeId: 7, email: employee.email, name: employee.name,
@@ -132,7 +132,7 @@ describe('console knowledge access and read responses', () => {
     for (const method of ['GET', 'POST', 'PUT']) {
       expect((await handleConsoleKnowledgeRequest(incoming(method), method === 'PUT' ? metadata.id : undefined, dependencies)).status).toBe(403);
     }
-    expect(query.mock.calls.filter(([sql]) => !sql.includes('VerifiedNumber'))).toHaveLength(1);
+    expect(query.mock.calls.filter(([sql]) => !sql.includes('VerifiedNumber') && !sql.includes('session_revocations'))).toHaveLength(1);
   });
 
   it('returns a safe 404 for missing pages and rejects traversal before a page query', async () => {

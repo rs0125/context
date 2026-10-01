@@ -12,7 +12,7 @@ afterEach(() => vi.useRealTimers());
 function harness(options: { admin?: boolean; analyst?: boolean; scopes?: KeyRegistration['scopes'] } = {}) {
   let sockets = 0;
   let roster = { ...employee, adminAccess: options.admin ?? true, analystAccess: options.analyst ?? false };
-  const key: KeyRegistration = { id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: employee.email,
+  const key: KeyRegistration = { employeeId: employee.id, id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: employee.email,
     scopes: options.scopes ?? ['analytics:read'], expiresAt: '2099-01-01T00:00:00Z' };
   const query = vi.fn(async () => ({ rows: [{ ...roster }] }));
   const client = { query } as unknown as PoolClient;

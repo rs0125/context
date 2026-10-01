@@ -11,7 +11,7 @@ const origin = 'https://context.example.test';
 const resource = `${origin}/mcp`;
 const redirect = 'https://claude.ai/api/mcp/auth_callback';
 const apiKey = `wog_ctx_${Buffer.alloc(32, 6).toString('base64url')}`;
-const key: KeyRegistration = { id: 'test_employee', hash: hashOAuth(apiKey), employeeEmail: 'person@wareongo.com', scopes: ['knowledge:read', 'warehouses:read', 'crm:read'], expiresAt: new Date(Date.now() + 86400_000).toISOString() };
+const key: KeyRegistration = { employeeId: 19, id: 'test_employee', hash: hashOAuth(apiKey), employeeEmail: 'person@wareongo.com', scopes: ['knowledge:read', 'warehouses:read', 'crm:read'], expiresAt: new Date(Date.now() + 86400_000).toISOString() };
 const verifier = 'a'.repeat(64);
 const challenge = createHash('sha256').update(verifier).digest('base64url');
 

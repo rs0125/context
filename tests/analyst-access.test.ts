@@ -37,7 +37,7 @@ describe('employee, Analyst and admin permission boundaries', () => {
     const db = database({ target: [row] });
     expect(rosterReadScopes(row)).toEqual(expected);
     const identity = await resolveConsoleEmployee(db.client, employee.email);
-    const key: KeyRegistration = { id: 'synthetic', hash: 'a'.repeat(64), employeeEmail: employee.email,
+    const key: KeyRegistration = { employeeId: employee.id, id: 'synthetic', hash: 'a'.repeat(64), employeeEmail: employee.email,
       scopes: ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read'], expiresAt: '2099-01-01T00:00:00Z' };
     const principal = await resolvePrincipal(db.client, key);
     expect(identity.scopes).toEqual(expected); expect(principal.scopes).toEqual(expected);
@@ -49,7 +49,7 @@ describe('employee, Analyst and admin permission boundaries', () => {
 
   it('does not widen an older credential after an Analyst grant', async () => {
     const db = database({ target: [{ ...employee, analystAccess: true }] });
-    const principal = await resolvePrincipal(db.client, { id: 'old-key', hash: 'a'.repeat(64), employeeEmail: employee.email,
+    const principal = await resolvePrincipal(db.client, { employeeId: employee.id, id: 'old-key', hash: 'a'.repeat(64), employeeEmail: employee.email,
       scopes: ['knowledge:read'], expiresAt: '2099-01-01T00:00:00Z' });
     expect(principal).toMatchObject({ isAnalyst: true, scopes: ['knowledge:read'] });
   });

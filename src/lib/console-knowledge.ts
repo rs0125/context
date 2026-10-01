@@ -1,3 +1,4 @@
+import { securityAudit } from './security-audit';
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
 import { getConsoleIdentity, readConsoleSession, requireConsoleOrigin } from './console-auth';
@@ -171,6 +172,7 @@ async function updatePage(client: PoolClient, id: string, value: unknown) {
 /** Browser-only administrative surface; employee agent endpoints remain read-only. */
 export async function handleConsoleKnowledgeRequest(request: Request, id?: string, dependencies: Partial<Dependencies> = {}): Promise<Response> {
   const deps = { ...defaults, ...dependencies };
+  let employeeId: number | undefined;
   const headers = { 'Cache-Control': 'private, no-store, max-age=0', Vary: 'Cookie', 'X-Content-Type-Options': 'nosniff' };
   try {
     const expectedMutation = id === undefined ? 'POST' : 'PUT';
@@ -193,6 +195,7 @@ export async function handleConsoleKnowledgeRequest(request: Request, id?: strin
     const transaction = mutation && enabled ? deps.writeTransaction : deps.readTransaction;
     const result = await transaction(async client => {
       const identity = await deps.identity(request, client);
+      employeeId = identity.employeeId;
       if (identity.isAdmin !== true) throw new HttpError(403, 'ADMIN_REQUIRED', 'Administrator access is required to edit knowledge.');
       if (mutation && !enabled) {
         throw new HttpError(503, 'CONSOLE_SETUP_REQUIRED', 'Knowledge editing is not enabled yet. An administrator must complete console setup and enable writes.');
@@ -202,8 +205,10 @@ export async function handleConsoleKnowledgeRequest(request: Request, id?: strin
       if (!mutation) return id === undefined ? listPages(client) : readPage(client, id);
       return id === undefined ? createPage(client, input) : updatePage(client, id, input);
     });
+    if (mutation && 'page' in result) securityAudit('knowledge_save', 'success', { employeeId, resourceId: result.page.id, revision: result.page.revision });
     return Response.json(result, { status: request.method === 'POST' ? 201 : 200, headers });
   } catch (error) {
+    if (['POST', 'PUT'].includes(request.method)) securityAudit('knowledge_save', 'failure', { employeeId, error });
     const safe = error instanceof HttpError ? error
       : new HttpError(503, 'KNOWLEDGE_UNAVAILABLE', 'The knowledge editor is temporarily unavailable.');
     return Response.json({ error: { code: safe.code, message: safe.message } }, { status: safe.status, headers });

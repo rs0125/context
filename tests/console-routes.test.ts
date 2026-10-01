@@ -6,7 +6,7 @@ import { REST_PROMPT_TEMPLATE } from '../src/lib/prompt-definitions';
 import { encryptConsoleKey } from '../src/lib/console-keys';
 
 const mocks = vi.hoisted(() => ({ query: vi.fn(), read: vi.fn(), write: vi.fn() }));
-vi.mock('../src/lib/db', () => ({ withReadOnlyTransaction: mocks.read, withConsoleWriteTransaction: mocks.write }));
+vi.mock('../src/lib/db', () => ({ withReadOnlyTransaction: mocks.read, withConsoleWriteTransaction: mocks.write, withSessionWriteTransaction: mocks.write }));
 import { GET as getMe } from '../src/app/api/console/me/route';
 import { GET as getKey, POST as rotateKey } from '../src/app/api/console/key/route';
 import { POST as logout } from '../src/app/api/auth/logout/route';
@@ -28,6 +28,7 @@ beforeEach(() => {
   mocks.read.mockImplementation(async (work: (client: PoolClient) => unknown) => work(client));
   mocks.write.mockImplementation(async (work: (client: PoolClient) => unknown) => work(client));
   mocks.query.mockImplementation(async (sql: string, values: unknown[]) => {
+    if (sql.includes('session_revocations')) return { rows: [] };
     if (sql.includes('to_regclass')) return { rows: [{ relation: null }] };
     if (sql.includes('VerifiedNumber')) return { rows: [roster] };
     if (sql.startsWith('INSERT')) {
@@ -94,7 +95,7 @@ describe('console HTTP boundaries', () => {
     expect(await response.json()).toMatchObject({ key: { id, token, scopes: identity.scopes } });
     expect(response.headers.get('cache-control')).toContain('no-store');
     expect(response.headers.has('access-control-allow-origin')).toBe(false);
-    expect(mocks.query.mock.calls[1][1]).toEqual([19, identity.email]);
+    expect(mocks.query.mock.calls.find(([sql]) => sql.includes('employee_api_keys'))?.[1]).toEqual([19, identity.email]);
   });
 
   it('rotates an authenticated same-origin key using current roster scopes', async () => {
@@ -151,6 +152,6 @@ describe('console HTTP boundaries', () => {
     expect(response.headers.get('set-cookie')).toContain('context_console_session=;');
     expect(response.headers.get('set-cookie')).toContain('context_console_oauth=;');
     expect(response.headers.get('set-cookie')).toContain('Max-Age=0');
-    expect(mocks.query).not.toHaveBeenCalled();
+    expect(mocks.query.mock.calls.some(([sql]) => sql.startsWith('INSERT INTO context_security_private.session_revocations'))).toBe(true);
   });
 });

@@ -30,7 +30,7 @@ function harness(options: {
   warehouses?: Row[];
   access?: CrmAccess;
 } = {}) {
-  const key: KeyRegistration = { id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: active.email,
+  const key: KeyRegistration = { employeeId: active.id, id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: active.email,
     scopes: options.scopes ?? ['crm:read', 'warehouses:read'], expiresAt: '2099-01-01T00:00:00.000Z' };
   const initialAt = new Date(Date.now() - 120_000).toISOString();
   const finalAt = new Date(Date.now() - 10_000).toISOString();

@@ -1,3 +1,4 @@
+import { securityAudit } from './security-audit';
 import type { PoolClient } from 'pg';
 import { consoleErrorResponse, consoleJson, consoleWritesEnabled, getConsoleIdentity, readConsoleSession, requireConsoleOrigin } from './console-auth';
 import { withConsoleWriteTransaction, withReadOnlyTransaction } from './db';
@@ -37,6 +38,7 @@ async function readInput(request: Request): Promise<unknown> {
 
 export async function handleConsolePromptsRequest(request: Request, dependencies: Partial<Dependencies> = {}) {
   const deps = { ...defaults, ...dependencies };
+  let employeeId: number | undefined;
   try {
     if (!['GET', 'PUT'].includes(request.method)) {
       const response = consoleJson({ error: { code: 'METHOD_NOT_ALLOWED', message: 'Use GET or PUT.' } }, 405);
@@ -53,12 +55,17 @@ export async function handleConsolePromptsRequest(request: Request, dependencies
     const transaction = mutation && enabled ? deps.writeTransaction : deps.readTransaction;
     const result = await transaction(async client => {
       const identity = await deps.identity(request, client);
+      employeeId = identity.employeeId;
       if (identity.isAdmin !== true) throw new HttpError(403, 'ADMIN_REQUIRED', 'Administrator access is required to edit prompts.');
       if (!mutation) return { ...await readPrompts(client), writesEnabled: enabled };
       if (!enabled) throw new HttpError(503, 'CONSOLE_SETUP_REQUIRED', 'Prompt editing is not enabled yet.');
       if (inputError) throw inputError;
       return savePrompt(client, input, identity.email);
     });
+    if ('prompt' in result) securityAudit('prompt_save', 'success', { employeeId, resourceId: result.prompt.id, revision: result.prompt.revision ?? undefined });
     return consoleJson(result);
-  } catch (error) { return consoleErrorResponse(error); }
+  } catch (error) {
+    if (request.method === 'PUT') securityAudit('prompt_save', 'failure', { employeeId, error });
+    return consoleErrorResponse(error);
+  }
 }

@@ -12,6 +12,7 @@ const registration = z.object({
   id: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
   hash: z.string().regex(/^[a-f0-9]{64}$/),
   employeeEmail: z.string().email().transform(v => v.toLowerCase()),
+  employeeId: z.number().int().positive().safe().optional(),
   scopes: z.array(z.enum(SCOPES)).min(1).max(SCOPES.length).refine(scopes => new Set(scopes).size === scopes.length),
   expiresAt: z.string().datetime(),
 }).strict();
@@ -109,11 +110,23 @@ export async function resolvePrincipal(client: PoolClient, key: KeyRegistration)
         AND expires_at > CURRENT_TIMESTAMP LIMIT 1`, [key.id, key.hash, key.employeeId, key.employeeEmail]);
     if (current.rows.length !== 1) throw new HttpError(401, 'UNAUTHORIZED', 'A valid employee API key is required.');
   }
+  // Old environment registrations are pinned once by the security migration.
+  // Never bind at request time: a reused email must not inherit an old token.
+  let employeeId = key.employeeId;
+  if (employeeId === undefined) {
+    const binding = await client.query<{ employee_id: number }>(`SELECT employee_id
+      FROM context_security_private.legacy_key_bindings
+      WHERE key_id = $1 AND token_hash = $2 AND employee_email = $3 LIMIT 2`, [key.id, key.hash, key.employeeEmail]);
+    if (binding.rows.length !== 1 || !Number.isSafeInteger(binding.rows[0].employee_id) || binding.rows[0].employee_id <= 0) {
+      throw new HttpError(401, 'UNAUTHORIZED', 'A valid employee API key is required.');
+    }
+    employeeId = binding.rows[0].employee_id;
+  }
   const { rows } = await readRosterEmployees(client, key.employeeEmail);
   const employee = rows[0];
   if (rows.length !== 1 || !employee || employee.is_active !== true || !Number.isSafeInteger(employee.id) || employee.id <= 0
     || typeof employee.email !== 'string' || employee.email.toLowerCase() !== key.employeeEmail
-    || (key.employeeId !== undefined && employee.id !== key.employeeId)) throw new HttpError(403, 'EMPLOYEE_INACTIVE', 'Employee access is unavailable.');
+    || employee.id !== employeeId) throw new HttpError(403, 'EMPLOYEE_INACTIVE', 'Employee access is unavailable.');
   const currentScopes = rosterReadScopes(employee);
   const scopes = key.scopes.filter(scope => currentScopes.includes(scope));
   return { employeeId: employee.id, email: employee.email.toLowerCase(), scopes, keyId: key.id,

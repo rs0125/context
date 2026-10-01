@@ -1,3 +1,4 @@
+import { EXPECTED_RUNTIME_POLICY } from './runtime-policy.mjs';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, readdir } from 'node:fs/promises';
@@ -137,7 +138,7 @@ async function inspectTable(client) {
   const constraints = (await client.query(`SELECT conname AS name, contype AS type, convalidated AS validated,
       pg_get_constraintdef(oid, true) AS definition FROM pg_constraint WHERE conrelid = $1 ORDER BY conname`, [relation.oid])).rows;
   const unsafeObjects = (await client.query(`SELECT
-      (SELECT count(*)::integer FROM pg_policy WHERE polrelid = $1) AS policies,
+      (SELECT count(*)::integer FROM pg_policy WHERE polrelid = $1 AND NOT COALESCE((${EXPECTED_RUNTIME_POLICY}), false)) AS policies,
       (SELECT count(*)::integer FROM pg_trigger WHERE tgrelid = $1 AND NOT tgisinternal) AS triggers,
       (SELECT count(*)::integer FROM pg_rewrite WHERE ev_class = $1) AS rules,
       (SELECT count(*)::integer FROM pg_inherits WHERE inhrelid = $1 OR inhparent = $1) AS inheritance`, [relation.oid])).rows[0];

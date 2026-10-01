@@ -3,6 +3,7 @@ import type { PoolClient } from 'pg';
 import { HttpError } from './errors';
 import { rosterReadScopes, type Scope } from './auth';
 import { hasAnalystAccess, readRosterEmployees } from './employee-access';
+import { requireActiveConsoleSession } from './console-sessions';
 
 export type ConsoleIdentity = { employeeId: number; email: string; name: string; isAdmin: boolean; isAnalyst: boolean; scopes: Scope[] };
 type Session = { employeeId: number; email: string; sub: string; iat: number; exp: number; sid: string };
@@ -103,7 +104,9 @@ export async function resolveConsoleEmployee(client: PoolClient, email: string, 
 
 export async function getConsoleIdentity(request: Request, client: PoolClient): Promise<ConsoleIdentity> {
   const session = readConsoleSession(request);
-  return resolveConsoleEmployee(client, session.email, session.employeeId);
+  const identity = await resolveConsoleEmployee(client, session.email, session.employeeId);
+  await requireActiveConsoleSession(client, session);
+  return identity;
 }
 
 export function requireConsoleOrigin(request: Request) {
