@@ -5,13 +5,14 @@ import { consoleCookie, createConsoleSession } from '../src/lib/console-auth';
 import { handleConsolePromptsRequest } from '../src/lib/console-prompts';
 import { HttpError } from '../src/lib/errors';
 import { MCP_INSTRUCTIONS, PROMPT_DEFINITIONS, REST_PROMPT_TEMPLATE, promptText, renderRestPrompt, type PromptValues } from '../src/lib/prompt-definitions';
-import { readPrompts, savePrompt } from '../src/lib/prompts';
+import { loadPromptValues, readPrompts, savePrompt } from '../src/lib/prompts';
+import * as database from '../src/lib/db';
 import { handleMcpRequest } from '../src/lib/mcp';
 
 const origin = 'https://context.example.test';
 const identity = { employeeId: 7, email: 'admin@wareongo.com', name: 'Admin', isAdmin: true, isAnalyst: true, scopes: ['knowledge:read'] as const };
-type Row = { id: string; body: string | null; revision: string; updatedAt: string; updatedBy: string };
-const row = (id = 'mcp', body: string | null = 'Custom instructions.'): Row => ({ id, body, revision: randomUUID(), updatedAt: '2026-09-30T12:00:00Z', updatedBy: identity.email });
+type Row = { id: string; body: string | null; platforms: string[] | null; revision: string; updatedAt: string; updatedBy: string };
+const row = (id = 'mcp', body: string | null = 'Custom instructions.'): Row => ({ id, body, platforms: null, revision: randomUUID(), updatedAt: '2026-09-30T12:00:00Z', updatedBy: identity.email });
 
 function setup(initial: Row[] = [], ready = true) {
   const records = new Map(initial.map(record => [record.id, record]));
@@ -19,10 +20,10 @@ function setup(initial: Row[] = [], ready = true) {
     if (sql.includes('to_regclass')) return { rows: [{ relation: ready ? 'context_prompts_private.prompt_overrides' : null }] };
     if (sql.startsWith('SELECT')) return { rows: [...records.values()] };
     if (sql.startsWith('INSERT') || sql.startsWith('UPDATE')) {
-      const [id, body, revision, updatedBy, expected] = args as [string, string | null, string, string, string | undefined];
+      const [id, body, revision, updatedBy, platforms, hasPlatforms, expected] = args as [string, string | null, string, string, string[] | null, boolean, string | undefined];
       const previous = records.get(id);
       if (sql.startsWith('INSERT') ? previous !== undefined : previous?.revision !== expected) return { rows: [] };
-      const saved = { id, body, revision, updatedBy, updatedAt: '2026-09-30T13:00:00Z' };
+      const saved = { id, body, revision, updatedBy, platforms: sql.startsWith('UPDATE') && !hasPlatforms ? previous!.platforms : platforms, updatedAt: '2026-09-30T13:00:00Z' };
       records.set(id, saved); return { rows: [saved] };
     }
     throw new Error('Unexpected SQL');
@@ -59,7 +60,7 @@ describe('persistent prompt editing', () => {
     const custom = row('tool.search_warehouses');
     const { client } = setup([custom]);
     const { prompts } = await readPrompts(client);
-    expect(prompts.find(prompt => prompt.id === custom.id)).toMatchObject({ ...custom, customized: true });
+    expect(prompts.find(prompt => prompt.id === custom.id)).toMatchObject({ ...custom, platforms: ['claude', 'whatsapp'], customized: true });
     expect(prompts.find(prompt => prompt.id === 'mcp')?.body).toBe(MCP_INSTRUCTIONS);
   });
   it('saves one prompt, rejects stale writes, and retains revisions after restoring defaults', async () => {
@@ -80,6 +81,10 @@ describe('persistent prompt editing', () => {
     { id: 'mcp', body: 'a'.repeat(20001), revision: null }, { id: 'tool.get_context', body: 'a'.repeat(8001), revision: null },
     { id: 'mcp', body: 'text' }, { id: 'mcp', body: 'text', revision: 'bad' },
     { id: 'mcp', body: 'text', revision: null, updatedBy: 'someone@wareongo.com' },
+    { id: 'mcp', body: 'text', revision: null, platforms: ['claude'] },
+    { id: 'tool.get_context', body: null, revision: null, platforms: ['unknown'] },
+    { id: 'tool.get_context', body: null, revision: null, platforms: ['claude', 'claude'] },
+    { id: 'tool.get_context', body: null, revision: null, platforms: 'whatsapp' },
   ])('rejects invalid input before touching storage (%#)', async input => {
     const { client, query } = setup();
     await expect(savePrompt(client, input, identity.email)).rejects.toMatchObject({ status: 422 });
@@ -97,6 +102,31 @@ describe('persistent prompt editing', () => {
     expect(renderRestPrompt(`${origin}/api/v1`)).not.toContain('{{apiBaseUrl}}');
     expect(REST_PROMPT_TEMPLATE).toContain('{{apiBaseUrl}}');
     expect(new Set(PROMPT_DEFINITIONS.map(prompt => prompt.id)).size).toBe(20);
+  });
+  it('persists platform-only edits, preserves them for older editors, and restores defaults with revision protection', async () => {
+    const { client, records } = setup();
+    const first = await savePrompt(client, { id: 'tool.search_knowledge', body: null, platforms: ['whatsapp'], revision: null }, identity.email);
+    expect(first.prompt).toMatchObject({ customized: false, platforms: ['whatsapp'] });
+    expect((await readPrompts(client)).prompts.find(prompt => prompt.id === first.prompt.id)?.platforms).toEqual(['whatsapp']);
+    const next = await savePrompt(client, { id: first.prompt.id, body: 'Updated text', revision: first.prompt.revision }, identity.email);
+    expect(next.prompt.platforms).toEqual(['whatsapp']);
+    await expect(savePrompt(client, { id: next.prompt.id, body: null, platforms: ['claude'], revision: first.prompt.revision }, identity.email)).rejects.toMatchObject({ status: 409 });
+    const disabled = await savePrompt(client, { id: next.prompt.id, body: null, platforms: [], revision: next.prompt.revision }, identity.email);
+    expect(disabled.prompt.platforms).toEqual([]);
+    const reset = await savePrompt(client, { id: next.prompt.id, body: null, platforms: null, revision: disabled.prompt.revision }, identity.email);
+    expect(reset.prompt.platforms).toEqual(['claude', 'whatsapp']);
+    expect(records.get(next.prompt.id)?.platforms).toBeNull();
+  });
+  it('loads platform restrictions even when the tool description still uses its default', async () => {
+    const { client } = setup([{ ...row('tool.search_knowledge', null), platforms: ['whatsapp'] }, { ...row('tool.read_knowledge', null), platforms: [] }]);
+    const transaction = vi.spyOn(database, 'withReadOnlyTransaction').mockImplementation(async work => work(client));
+    try {
+      expect(await loadPromptValues()).toMatchObject({ toolPlatforms: { search_knowledge: ['whatsapp'], read_knowledge: [] } });
+    } finally { transaction.mockRestore(); }
+  });
+  it.each([{ platforms: ['unknown'] }, { platforms: ['claude', 'claude'] }])('fails closed on invalid stored platform metadata $platforms', async ({ platforms }) => {
+    const { client } = setup([{ ...row('tool.search_knowledge', null), platforms }]);
+    await expect(readPrompts(client)).rejects.toMatchObject({ code: 'PROMPTS_UNAVAILABLE' });
   });
 });
 

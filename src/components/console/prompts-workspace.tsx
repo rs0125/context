@@ -1,11 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { PromptCollection, PromptDocument, PromptId } from '@/lib/prompt-definitions';
+import { TOOL_PLATFORMS, TOOL_PLATFORM_LABELS, type ToolPlatform, type PromptCollection, type PromptDocument, type PromptId } from '@/lib/prompt-definitions';
 import { ConsoleApiError, consoleAccessEnded, consoleRequest, displayDate, errorMessage } from './helpers';
 import { Icon } from './icons';
 import { ConfirmDialog, Notice, Spinner } from './ui';
 import styles from './prompts-workspace.module.css';
+
+const samePlatforms = (a: readonly ToolPlatform[] = [], b: readonly ToolPlatform[] = []) => a.length === b.length && a.every(platform => b.includes(platform));
+const customized = (prompt: PromptDocument) => prompt.customized || !samePlatforms(prompt.platforms, prompt.defaultPlatforms);
 
 export function PromptsWorkspace({ writesEnabled, onSessionExpired, onDirtyChange, onBusyChange, onSaved }: {
   writesEnabled: boolean; onSessionExpired: () => void; onDirtyChange: (dirty: boolean) => void;
@@ -14,6 +17,7 @@ export function PromptsWorkspace({ writesEnabled, onSessionExpired, onDirtyChang
   const [collection, setCollection] = useState<PromptCollection | null>(null);
   const [selected, setSelected] = useState<PromptId>('mcp');
   const [draft, setDraft] = useState('');
+  const [platforms, setPlatforms] = useState<readonly ToolPlatform[]>([]);
   const [useDefault, setUseDefault] = useState(false);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
@@ -24,7 +28,7 @@ export function PromptsWorkspace({ writesEnabled, onSessionExpired, onDirtyChang
   const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
   const sequence = useRef(0);
   const current = collection?.prompts.find(prompt => prompt.id === selected);
-  const dirty = Boolean(current && (draft !== current.body || (useDefault && current.customized)));
+  const dirty = Boolean(current && (draft !== current.body || (useDefault && current.customized) || !samePlatforms(platforms, current.platforms)));
   const busy = loading || saving;
   const canSave = writesEnabled && collection?.writesEnabled && collection.storageReady;
 
@@ -36,6 +40,7 @@ export function PromptsWorkspace({ writesEnabled, onSessionExpired, onDirtyChang
       if (signal?.aborted || request !== sequence.current) return;
       const prompt = result.prompts.find(item => item.id === id) ?? result.prompts[0];
       setCollection(result); setSelected(prompt.id); setDraft(prompt.body); setUseDefault(false); setConflict(false);
+      setPlatforms(prompt.platforms ?? []);
     } catch (cause) {
       if (signal?.aborted || request !== sequence.current) return;
       if (consoleAccessEnded(cause)) onSessionExpired(); else setError(errorMessage(cause));
@@ -59,6 +64,7 @@ export function PromptsWorkspace({ writesEnabled, onSessionExpired, onDirtyChang
   function guard(action: () => void) { if (busy) return; if (dirty) setPendingAction(() => action); else action(); }
   function select(prompt: PromptDocument) {
     setSelected(prompt.id); setDraft(prompt.body); setUseDefault(false); setConflict(false); setError(''); setSuccess('');
+    setPlatforms(prompt.platforms ?? []);
   }
   async function save() {
     if (!current || !dirty || !canSave || saving || conflict) return;
@@ -66,12 +72,14 @@ export function PromptsWorkspace({ writesEnabled, onSessionExpired, onDirtyChang
     const request = sequence.current;
     try {
       const { prompt } = await consoleRequest<{ prompt: PromptDocument }>('/api/console/prompts', { method: 'PUT',
-        body: { id: current.id, body: useDefault || draft === current.defaultBody ? null : draft, revision: current.revision } });
+        body: { id: current.id, body: useDefault || draft === current.defaultBody ? null : draft, revision: current.revision,
+          ...(current.defaultPlatforms ? { platforms: samePlatforms(platforms, current.defaultPlatforms) ? null : platforms } : {}) } });
       if (request !== sequence.current) return;
       setCollection(value => value && { ...value, prompts: value.prompts.map(item => item.id === prompt.id ? prompt : item) });
       setDraft(prompt.body); setUseDefault(false);
+      setPlatforms(prompt.platforms ?? []);
       setSuccess(prompt.id === 'rest' ? 'Saved. The updated instructions are available to copy from the connection page.'
-        : 'Saved. Reconnect existing AI connections to refresh their instructions and tool descriptions.');
+        : 'Saved. Reconnect existing AI connections to refresh their instructions and available tools.');
       onSaved(prompt);
     } catch (cause) {
       if (request !== sequence.current) return;
@@ -83,7 +91,7 @@ export function PromptsWorkspace({ writesEnabled, onSessionExpired, onDirtyChang
   const filtered = collection?.prompts.filter(prompt => `${prompt.title} ${prompt.id} ${prompt.group}`.toLowerCase().includes(query.toLowerCase())) ?? [];
   const groups = [...new Set(filtered.map(prompt => prompt.group))];
   return <div className={styles.workspace}>
-    <div className="page-heading"><div><p className="eyebrow">Agent configuration</p><h1>Prompts</h1><p>Edit the instructions your team’s AI receives. Saved changes apply across the workspace.</p></div></div>
+    <div className="page-heading"><div><p className="eyebrow">Agent configuration</p><h1>Prompts</h1><p>Edit your team’s AI instructions and choose which platforms can use each tool.</p></div></div>
     {collection && !canSave && <Notice tone="info">Prompt editing is waiting for workspace setup. You can review the current prompts here; saving becomes available when prompt storage and console writes are enabled.</Notice>}
     {error && <Notice action={<button className="text-button" disabled={busy} onClick={() => guard(() => void load(selected))}>{conflict ? 'Load latest' : 'Retry loading'}</button>}>{error}</Notice>}
     {success && <Notice tone="success">{success}</Notice>}
@@ -93,20 +101,30 @@ export function PromptsWorkspace({ writesEnabled, onSessionExpired, onDirtyChang
         <div className={`search-field ${styles.search}`}><Icon name="search" size={17} /><input aria-label="Search prompts" placeholder="Find a prompt…" value={query} onChange={event => setQuery(event.target.value)} /></div>
         <div className={styles.list}>{loading ? <div className={styles.empty}><Spinner label="Loading prompts…" /></div> : groups.length ? groups.map(group => <div key={group} className={styles.group}>
           <h3>{group}</h3>{filtered.filter(prompt => prompt.group === group).map(prompt => <button key={prompt.id} className={`${styles.item} ${selected === prompt.id ? styles.selected : ''}`} aria-current={selected === prompt.id ? 'true' : undefined} disabled={busy} onClick={() => { if (prompt.id !== selected) guard(() => select(prompt)); }}>
-            <span>{prompt.title}</span><small>{prompt.customized ? 'Custom' : 'Default'}</small>
+            <span>{prompt.title}</span><small>{customized(prompt) ? 'Custom' : 'Default'}</small>
           </button>)}
         </div>) : <p className={styles.empty}>{collection ? 'No matching prompts.' : 'Prompts could not be loaded.'}</p>}</div>
       </aside>
       <section className={`panel ${styles.editor}`} aria-label="Prompt editor" aria-busy={busy}>
         {!current ? <div className={styles.empty}>{loading ? <Spinner label="Opening editor…" /> : 'Select a prompt to edit.'}</div> : <>
-          <div className={styles.toolbar}><div><span className={styles.status}>{dirty ? 'Unsaved changes' : current.customized ? 'Custom prompt' : 'Using default'}</span><h2>{current.title}</h2></div>
+          <div className={styles.toolbar}><div><span className={styles.status}>{dirty ? 'Unsaved changes' : customized(current) ? 'Custom settings' : 'Using default'}</span><h2>{current.title}</h2></div>
             <button className="button button-primary" disabled={busy || !dirty || !canSave || conflict || !draft.trim() || draft.length > current.maxLength} onClick={() => void save()}>{saving ? <Spinner label="Saving…" /> : 'Save prompt'}</button>
           </div>
           <div className={styles.content}>
             <p className={styles.help} id="prompt-help">{current.help}</p>
+            {current.defaultPlatforms && <fieldset className={styles.platforms} disabled={busy || !canSave} aria-describedby="platform-help">
+              <legend>Available on</legend>
+              <div className={styles.platformOptions}>{TOOL_PLATFORMS.map(platform => <label key={platform}>
+                <input type="checkbox" checked={platforms.includes(platform)} onChange={event => {
+                  setPlatforms(selected => TOOL_PLATFORMS.filter(value => value === platform ? event.target.checked : selected.includes(value)));
+                  setSuccess('');
+                }} />{TOOL_PLATFORM_LABELS[platform]}
+              </label>)}</div>
+              <p id="platform-help">Only selected platforms can discover or call this tool. Employee permissions still apply. Selecting none disables it on both platforms.</p>
+            </fieldset>}
             <div className={styles.label}><label htmlFor="prompt-body">Prompt text</label><span id="prompt-size">{draft.length.toLocaleString()} / {current.maxLength.toLocaleString()} characters</span></div>
             <textarea id="prompt-body" aria-describedby="prompt-help prompt-size" value={draft} maxLength={current.maxLength} disabled={busy} spellCheck={false} onChange={event => { setDraft(event.target.value); setUseDefault(false); setSuccess(''); }} />
-            <div className={styles.actions}><button className="button button-secondary" disabled={busy || (!current.customized && draft === current.defaultBody)} onClick={() => { setDraft(current.defaultBody); setUseDefault(true); setSuccess(''); }}>Restore default</button>
+            <div className={styles.actions}><button className="button button-secondary" disabled={busy || (!current.customized && draft === current.defaultBody && samePlatforms(platforms, current.defaultPlatforms))} onClick={() => { setDraft(current.defaultBody); setPlatforms(current.defaultPlatforms ?? []); setUseDefault(true); setSuccess(''); }}>Restore default</button>
               {dirty && <button className="button button-quiet" disabled={busy} onClick={() => guard(() => select(current))}>Discard edits</button>}
               <span>{useDefault && dirty ? 'Save to apply the default.' : current.updatedAt ? `Saved ${displayDate(current.updatedAt, true)}${current.updatedBy ? ` by ${current.updatedBy}` : ''}` : 'Built-in default'}</span>
             </div>

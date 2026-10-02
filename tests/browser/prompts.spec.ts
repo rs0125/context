@@ -3,7 +3,7 @@ import { PROMPT_DEFINITIONS, type PromptDocument } from '../../src/lib/prompt-de
 
 async function mockPrompts(page: Page, options: { admin?: boolean; ready?: boolean; enabled?: boolean; conflict?: boolean } = {}) {
   const { admin = true, ready = true, enabled = true, conflict = false } = options;
-  const prompts: PromptDocument[] = PROMPT_DEFINITIONS.map(prompt => ({ ...prompt, body: prompt.defaultBody, customized: false, revision: null, updatedAt: null, updatedBy: null }));
+  const prompts: PromptDocument[] = PROMPT_DEFINITIONS.map(prompt => ({ ...prompt, body: prompt.defaultBody, platforms: prompt.defaultPlatforms, customized: false, revision: null, updatedAt: null, updatedBy: null }));
   const writes: Record<string, unknown>[] = [];
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -27,6 +27,7 @@ async function mockPrompts(page: Page, options: { admin?: boolean; ready?: boole
         return reply({ error: { code: 'REVISION_CONFLICT', message: 'Another administrator changed this prompt. Copy any edits you want to keep, then load the latest version. Your changes were not saved.' } }, 409);
       }
       Object.assign(prompt, { body: body.body ?? prompt.defaultBody, customized: body.body !== null,
+        platforms: 'platforms' in body ? body.platforms ?? prompt.defaultPlatforms : prompt.platforms,
         revision: `00000000-0000-4000-8000-${String(writes.length).padStart(12, '0')}`, updatedAt: '2026-09-30T12:00:00Z', updatedBy: 'admin@wareongo.com' });
       return reply({ prompt });
     }
@@ -115,6 +116,44 @@ test('the edited REST template is used by the connection page copy action', asyn
 test('employees have no prompt editing navigation', async ({ page }) => {
   await mockPrompts(page, { admin: false });
   await expect(page.getByRole('button', { name: 'Prompts', exact: true })).toHaveCount(0);
+});
+
+test('tool platform selection saves independently of text, protects drafts, and restores defaults', async ({ page }, testInfo) => {
+  const { writes, errors } = await mockPrompts(page);
+  await page.getByRole('button', { name: 'Prompts', exact: true }).click();
+  await expect(page.getByRole('group', { name: 'Available on' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Search company knowledge Default', exact: true }).click();
+  await expect(page.getByRole('checkbox', { name: 'Claude', exact: true })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'WhatsApp', exact: true })).toBeChecked();
+  await page.getByRole('checkbox', { name: 'Claude', exact: true }).uncheck();
+  await page.getByRole('button', { name: 'Main MCP instructions Default', exact: true }).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.getByRole('button', { name: 'Save prompt', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Save prompt', exact: true })).toBeDisabled();
+  expect(writes[0]).toEqual({ id: 'tool.search_knowledge', body: null, platforms: ['whatsapp'], revision: null });
+  await page.reload();
+  await page.getByRole('button', { name: 'Prompts', exact: true }).click();
+  await page.getByRole('button', { name: 'Search company knowledge Custom', exact: true }).click();
+  await expect(page.getByRole('checkbox', { name: 'Claude', exact: true })).not.toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'WhatsApp', exact: true })).toBeChecked();
+  await page.evaluate(() => document.fonts.ready);
+  await page.evaluate(() => { if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); window.scrollTo(0, 0); });
+  await page.screenshot({ path: testInfo.outputPath('tool-platforms-desktop.png'), fullPage: true, style: 'nextjs-portal { display: none !important; }' });
+  await page.setViewportSize({ width: 360, height: 800 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('tool-platforms-mobile.png'), fullPage: true, style: 'nextjs-portal { display: none !important; }' });
+  await page.getByRole('checkbox', { name: 'WhatsApp', exact: true }).uncheck();
+  await page.getByRole('button', { name: 'Save prompt', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Save prompt', exact: true })).toBeDisabled();
+  expect(writes[1].platforms).toEqual([]);
+  await page.getByRole('button', { name: 'Restore default', exact: true }).click();
+  await expect(page.getByRole('checkbox', { name: 'Claude', exact: true })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'WhatsApp', exact: true })).toBeChecked();
+  await page.getByRole('button', { name: 'Save prompt', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Save prompt', exact: true })).toBeDisabled();
+  expect(writes[2].platforms).toBeNull();
+  expect(errors).toEqual([]);
 });
 
 test('prompt setup state is clear and the editor fits a phone', async ({ page }, testInfo) => {

@@ -44,11 +44,21 @@ describe.skipIf(process.env.CONTEXT_LIVE_PROMPTS_TEST !== '1')('prompt storage o
       stage = 'RESTORE';
       const restored = await savePrompt(client, { id: 'mcp', body: null, revision: saved.prompt.revision }, 'verification@wareongo.com');
       check(!restored.prompt.customized && restored.prompt.body === original.defaultBody && restored.prompt.revision !== saved.prompt.revision, stage);
+      stage = 'PLATFORMS';
+      const tool = initial.prompts.find(prompt => prompt.id === 'tool.search_knowledge')!;
+      const selected = await savePrompt(client, { id: tool.id, body: tool.customized ? tool.body : null, platforms: ['whatsapp'], revision: tool.revision }, 'verification@wareongo.com');
+      check(JSON.stringify(selected.prompt.platforms) === '["whatsapp"]', stage);
+      check(JSON.stringify((await readPrompts(client)).prompts.find(prompt => prompt.id === tool.id)?.platforms) === '["whatsapp"]', stage);
+      const disabled = await savePrompt(client, { id: tool.id, body: null, platforms: [], revision: selected.prompt.revision }, 'verification@wareongo.com');
+      check(disabled.prompt.platforms?.length === 0, stage);
+      const defaultPlatforms = await savePrompt(client, { id: tool.id, body: null, platforms: null, revision: disabled.prompt.revision }, 'verification@wareongo.com');
+      check(JSON.stringify(defaultPlatforms.prompt.platforms) === JSON.stringify(tool.defaultPlatforms), stage);
       stage = 'ROLLBACK';
       await client.query('ROLLBACK'); transaction = false;
       const after = await readPrompts(client);
       check(after.prompts.every(prompt => prompt.body !== marker), stage);
-      console.log(JSON.stringify({ promptStorageVerified: true, prompts: after.prompts.length, fixtureWritesRolledBack: true }));
+      check(JSON.stringify(after.prompts.find(prompt => prompt.id === tool.id)) === JSON.stringify(tool), stage);
+      console.log(JSON.stringify({ promptStorageVerified: true, platformSelectionsVerified: true, prompts: after.prompts.length, fixtureWritesRolledBack: true }));
     } catch { throw new Error(`PROMPTS_LIVE_${stage}`); }
     finally {
       if (transaction && client) await client.query('ROLLBACK').catch(() => undefined);

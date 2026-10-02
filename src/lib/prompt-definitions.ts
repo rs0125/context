@@ -50,10 +50,35 @@ export const TOOL_PROMPTS = {
 } as const;
 
 export type ToolPromptName = keyof typeof TOOL_PROMPTS;
+export const TOOL_PLATFORMS = ['claude', 'whatsapp'] as const;
+export type ToolPlatform = typeof TOOL_PLATFORMS[number];
+export const TOOL_PLATFORM_LABELS: Record<ToolPlatform, string> = { claude: 'Claude', whatsapp: 'WhatsApp' };
+
+// Every new tool must choose its platforms explicitly. Adding a platform to the
+// enum must not silently publish existing tools to a new harness.
+export const TOOL_DEFAULT_PLATFORMS: Record<ToolPromptName, readonly ToolPlatform[]> = {
+  get_context: ['claude', 'whatsapp'],
+  analytics_capabilities: ['claude', 'whatsapp'],
+  ga4_report: ['claude', 'whatsapp'],
+  search_console_report: ['claude', 'whatsapp'],
+  search_knowledge: ['claude', 'whatsapp'],
+  read_knowledge: ['claude', 'whatsapp'],
+  warehouse_filters: ['claude', 'whatsapp'],
+  search_warehouses: ['claude', 'whatsapp'],
+  warehouse_summary: ['claude', 'whatsapp'],
+  read_warehouse: ['claude', 'whatsapp'],
+  assess_shortlist: ['claude', 'whatsapp'],
+  crm_filters: ['claude', 'whatsapp'],
+  search_crm_leads: ['claude', 'whatsapp'],
+  crm_summary: ['claude', 'whatsapp'],
+  read_crm_lead: ['claude', 'whatsapp'],
+  read_crm_lead_context: ['claude', 'whatsapp'],
+  crm_briefing: ['claude', 'whatsapp'],
+};
 export type PromptId = 'mcp' | 'analytics' | 'rest' | `tool.${ToolPromptName}`;
-export type PromptValues = Partial<Record<PromptId, string>>;
-export type PromptDefinition = { id: PromptId; title: string; group: string; help: string; defaultBody: string; maxLength: number };
-export type PromptDocument = PromptDefinition & { body: string; customized: boolean; revision: string | null; updatedAt: string | null; updatedBy: string | null };
+export type PromptValues = Partial<Record<PromptId, string>> & { toolPlatforms?: Partial<Record<ToolPromptName, readonly ToolPlatform[]>> };
+export type PromptDefinition = { id: PromptId; title: string; group: string; help: string; defaultBody: string; maxLength: number; defaultPlatforms?: readonly ToolPlatform[] };
+export type PromptDocument = PromptDefinition & { body: string; customized: boolean; platforms?: readonly ToolPlatform[]; revision: string | null; updatedAt: string | null; updatedBy: string | null };
 export type PromptCollection = { prompts: PromptDocument[]; storageReady: boolean; writesEnabled: boolean };
 
 export const PROMPT_DEFINITIONS: PromptDefinition[] = [
@@ -61,13 +86,16 @@ export const PROMPT_DEFINITIONS: PromptDefinition[] = [
   { id: 'analytics', title: 'Analytics instructions', group: 'Shared instructions', help: 'Analytics guidance included with the main MCP instructions.', defaultBody: ANALYTICS_INSTRUCTIONS, maxLength: 20000 },
   { id: 'rest', title: 'REST setup prompt', group: 'Shared instructions', help: 'Instructions copied from Connect Claude → Other AI tools & API details. Use {{apiBaseUrl}} for the API address.', defaultBody: REST_PROMPT_TEMPLATE, maxLength: 20000 },
   ...(Object.entries(TOOL_PROMPTS) as [ToolPromptName, typeof TOOL_PROMPTS[ToolPromptName]][]).map(([name, tool]): PromptDefinition => ({
-    id: `tool.${name}`, title: tool.title, group: tool.group, help: `Description shown to the AI for ${name}.`, defaultBody: tool.description, maxLength: 8000,
+    id: `tool.${name}`, title: tool.title, group: tool.group, help: `Description shown to the AI for ${name}.`, defaultBody: tool.description, maxLength: 8000, defaultPlatforms: TOOL_DEFAULT_PLATFORMS[name],
   })),
 ];
 
 export function promptDefinition(id: string) { return PROMPT_DEFINITIONS.find(prompt => prompt.id === id); }
 export function promptText(id: PromptId, values: PromptValues = {}) {
   return values[id] ?? promptDefinition(id)!.defaultBody;
+}
+export function toolPlatforms(name: ToolPromptName, values: PromptValues = {}) {
+  return values.toolPlatforms?.[name] ?? TOOL_DEFAULT_PLATFORMS[name];
 }
 export function renderRestPrompt(apiBaseUrl: string, template = REST_PROMPT_TEMPLATE) {
   return template.replaceAll('{{apiBaseUrl}}', () => apiBaseUrl.replace(/\/+$/, ''));

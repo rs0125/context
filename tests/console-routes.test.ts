@@ -68,8 +68,8 @@ describe('console HTTP boundaries', () => {
     mocks.query.mockImplementation(async (sql: string, values: unknown[]) => {
       if (sql.includes('to_regclass')) return { rows: [{ relation: 'context_prompts_private.prompt_overrides' }] };
       if (sql.includes('FROM context_prompts_private.prompt_overrides')) return { rows: [
-        { id: 'rest', body: 'Connect at {{apiBaseUrl}}', revision: '00000000-0000-4000-8000-000000000001', updatedAt: '2026-09-30T12:00:00Z', updatedBy: 'admin@wareongo.com' },
-        { id: 'mcp', body: 'Custom MCP instructions', revision: '00000000-0000-4000-8000-000000000002', updatedAt: '2026-09-30T12:00:00Z', updatedBy: 'admin@wareongo.com' },
+        { id: 'rest', body: 'Connect at {{apiBaseUrl}}', platforms: null, revision: '00000000-0000-4000-8000-000000000001', updatedAt: '2026-09-30T12:00:00Z', updatedBy: 'admin@wareongo.com' },
+        { id: 'mcp', body: 'Custom MCP instructions', platforms: null, revision: '00000000-0000-4000-8000-000000000002', updatedAt: '2026-09-30T12:00:00Z', updatedBy: 'admin@wareongo.com' },
       ] };
       return originalQuery(sql, values);
     });

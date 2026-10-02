@@ -11,30 +11,41 @@ import { migrationDatabaseOptions } from './migrate-knowledge.mjs';
 // Prompt overrides live in their own private schema; no source records change.
 const SCHEMA = 'context_prompts_private';
 const MARKER = 'context-prompts-schema-v1';
-const TABLE_MARKER = 'context-prompt-overrides-v1:';
+const LEGACY_TABLE_MARKER = 'context-prompt-overrides-v1:';
+const TABLE_MARKER = 'context-prompt-overrides-v2:';
 const COLUMNS = [['id', 'text'], ['body', 'text'], ['revision', 'uuid'],
-  ['updated_at', 'timestamp with time zone'], ['updated_by', 'text']];
+  ['updated_at', 'timestamp with time zone'], ['updated_by', 'text'], ['platforms', 'text[]']];
 const BLOCKED_ROLES = ['anon', 'authenticated', 'service_role'];
-const CONSTRAINT_NAMES = ['prompt_overrides_pkey', 'prompt_overrides_id_check', 'prompt_overrides_body_check', 'prompt_overrides_editor_check'];
+const CONSTRAINT_NAMES = ['prompt_overrides_pkey', 'prompt_overrides_id_check', 'prompt_overrides_body_check', 'prompt_overrides_editor_check', 'prompt_overrides_platforms_check'];
+// An empty selection disables the tool on all MCP platforms; NULL follows its
+// explicit code default. Keep this enum in sync with TOOL_PLATFORMS.
+const PLATFORM_CONSTRAINT = `CHECK (platforms IS NULL OR (id ~ '^tool[.]' AND (
+  platforms = '{}'::text[] OR platforms = ARRAY['claude'] OR platforms = ARRAY['whatsapp']
+  OR platforms = ARRAY['claude', 'whatsapp'] OR platforms = ARRAY['whatsapp', 'claude'])))`;
 const CREATE_TABLE = `CREATE TABLE context_prompts_private.prompt_overrides (
   id text PRIMARY KEY,
   body text,
   revision uuid NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_by text NOT NULL,
+  platforms text[],
   CONSTRAINT prompt_overrides_id_check CHECK (id IN ('mcp', 'analytics', 'rest') OR id ~ '^tool[.][a-z][a-z0-9_]{0,79}$'),
   CONSTRAINT prompt_overrides_body_check CHECK (body IS NULL OR (char_length(body) BETWEEN 1 AND 20000 AND char_length(btrim(body)) > 0)),
-  CONSTRAINT prompt_overrides_editor_check CHECK (updated_by = lower(updated_by) AND char_length(updated_by) <= 254 AND updated_by ~ '^[^[:space:]@]+@wareongo[.]com$')
+  CONSTRAINT prompt_overrides_editor_check CHECK (updated_by = lower(updated_by) AND char_length(updated_by) <= 254 AND updated_by ~ '^[^[:space:]@]+@wareongo[.]com$'),
+  CONSTRAINT prompt_overrides_platforms_check ${PLATFORM_CONSTRAINT}
 )`;
 
 class MigrationError extends Error { constructor(code) { super(code); this.code = code; } }
 function fail(code) { throw new MigrationError(code); }
 
-async function inspect(client) {
+async function inspect(client, version) {
   const table = (await client.query(`SELECT c.oid, c.relkind, c.relpersistence, c.relispartition, c.relrowsecurity, c.relforcerowsecurity,
     c.relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) AS owned, obj_description(c.oid, 'pg_class') AS marker
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = 'prompt_overrides'`, [SCHEMA])).rows[0];
   if (!table || !table.owned || table.relkind !== 'r' || table.relpersistence !== 'p' || table.relispartition || !table.relrowsecurity || !table.relforcerowsecurity) fail('PROMPTS_RELATION_INCOMPATIBLE');
+  const legacy = version === undefined && table.marker?.startsWith(LEGACY_TABLE_MARKER);
+  const expectedColumns = legacy ? COLUMNS.slice(0, -1) : COLUMNS;
+  const expectedConstraints = legacy ? CONSTRAINT_NAMES.slice(0, -1) : CONSTRAINT_NAMES;
   const columns = (await client.query(`SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, a.attnotnull AS not_null,
     a.attidentity AS identity, a.attgenerated AS generated, a.attisdropped AS dropped, pg_get_expr(d.adbin, d.adrelid) AS default_expression
     FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
@@ -45,13 +56,17 @@ async function inspect(client) {
     (SELECT count(*)::integer FROM pg_trigger WHERE tgrelid = $1 AND NOT tgisinternal) AS triggers,
     (SELECT count(*)::integer FROM pg_rewrite WHERE ev_class = $1) AS rules,
     (SELECT count(*)::integer FROM pg_inherits WHERE inhrelid = $1 OR inhparent = $1) AS inheritance`, [table.oid])).rows[0];
-  if (columns.length !== COLUMNS.length || columns.some((column, index) => column.name !== COLUMNS[index][0] || column.type !== COLUMNS[index][1]
-    || column.not_null !== (column.name !== 'body') || column.identity || column.generated || column.dropped
+  if (columns.length !== expectedColumns.length || columns.some((column, index) => column.name !== expectedColumns[index][0] || column.type !== expectedColumns[index][1]
+    || column.not_null !== !['body', 'platforms'].includes(column.name) || column.identity || column.generated || column.dropped
     || column.default_expression !== (column.name === 'updated_at' ? 'CURRENT_TIMESTAMP' : null))
-    || constraints.length !== CONSTRAINT_NAMES.length || constraints.some(constraint => !constraint.validated || !CONSTRAINT_NAMES.includes(constraint.name)
+    || constraints.length !== expectedConstraints.length || constraints.some(constraint => !constraint.validated || !expectedConstraints.includes(constraint.name)
       || constraint.type !== (constraint.name.endsWith('_pkey') ? 'p' : constraint.name.endsWith('_key') ? 'u' : 'c'))
     || !objects || Object.values(objects).some(count => count !== 0)) fail('PROMPTS_RELATION_INCOMPATIBLE');
-  return { ...table, constraints, signature: createHash('sha256').update(JSON.stringify({ columns, constraints })).digest('hex') };
+  return { ...table, legacy, constraints, signature: createHash('sha256').update(JSON.stringify({ columns, constraints })).digest('hex') };
+}
+
+function verifyMarker(table) {
+  if (table.marker !== `${table.legacy ? LEGACY_TABLE_MARKER : TABLE_MARKER}${table.signature}`) fail('PROMPTS_RELATION_COLLISION');
 }
 
 export async function migratePromptStorage(client) {
@@ -75,10 +90,16 @@ export async function migratePromptStorage(client) {
         (SELECT count(*)::integer FROM pg_proc WHERE pronamespace = $1) AS routines`, [schema.oid])).rows[0];
       if (!collisions || Object.values(collisions).some(count => count !== 0)) fail('PROMPTS_SCHEMA_COLLISION');
       table = await inspect(client);
-      if (table.marker !== `${TABLE_MARKER}${table.signature}`) fail('PROMPTS_RELATION_COLLISION');
+      verifyMarker(table);
       await client.query('LOCK TABLE context_prompts_private.prompt_overrides IN SHARE ROW EXCLUSIVE MODE');
       table = await inspect(client);
-      if (table.marker !== `${TABLE_MARKER}${table.signature}`) fail('PROMPTS_RELATION_COLLISION');
+      verifyMarker(table);
+      if (table.legacy) {
+        await client.query('ALTER TABLE context_prompts_private.prompt_overrides ADD COLUMN platforms text[]');
+        await client.query(`ALTER TABLE context_prompts_private.prompt_overrides ADD CONSTRAINT prompt_overrides_platforms_check ${PLATFORM_CONSTRAINT}`);
+        table = await inspect(client, 2);
+        await client.query(`COMMENT ON TABLE context_prompts_private.prompt_overrides IS '${TABLE_MARKER}${table.signature}'`);
+      }
     } else {
       await client.query('CREATE SCHEMA context_prompts_private');
       await client.query(`COMMENT ON SCHEMA context_prompts_private IS '${MARKER}'`);

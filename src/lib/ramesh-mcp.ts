@@ -14,6 +14,7 @@ export async function handleRameshMcpRequest(request: Request, overrides: {
   const requestId = randomUUID(); let employeeId: number | undefined, keyId: string | undefined;
   const response = await handleMcpRequest(request, {
     ...overrides,
+    platform: 'whatsapp',
     authenticationChallenge: 'Ramesh realm="wareongo-context"',
     authenticate: async original => {
       if (original.headers.has('origin')) throw new HttpError(403, 'ORIGIN_NOT_ALLOWED', 'This endpoint accepts server requests only.');

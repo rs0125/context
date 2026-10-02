@@ -21,6 +21,12 @@
 .status { font-size: 11px; color: var(--muted); }
 .content { padding: 24px; }
 .help { margin-bottom: 22px; font-size: 13px; line-height: 1.7; color: var(--text-secondary); overflow-wrap: anywhere; }
+.platforms { margin: 0 0 24px; padding: 16px; border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
+.platforms legend { padding: 0 6px; font-size: 12px; }
+.platformOptions { display: flex; flex-wrap: wrap; gap: 12px 24px; }
+.platformOptions label { display: flex; align-items: center; gap: 8px; min-height: 32px; font-size: 13px; cursor: pointer; }
+.platformOptions input { width: 16px; height: 16px; accent-color: var(--accent); }
+.platforms p { margin-top: 10px; font-size: 12px; line-height: 1.6; color: var(--muted); }
 .label { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-bottom: 10px; font-size: 12px; }
 .label span { color: var(--muted); }
 .content textarea { display: block; resize: vertical; width: 100%; min-height: 420px; padding: 18px; border: 1px solid var(--control-border); border-radius: 6px; background: var(--surface-raised); color: var(--text); font-family: var(--font-mono); font-size: 12px; line-height: 1.85; }
