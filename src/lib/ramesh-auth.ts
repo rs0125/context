@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { importJWK, jwtVerify } from 'jose';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
-import { type KeyRegistration, resolvePrincipal } from './auth';
+import { type KeyRegistration, resolvePrincipal, SCOPES } from './auth';
 import { consoleOrigin } from './console-auth';
 import { withReadOnlyTransaction } from './db';
 import { HttpError } from './errors';
@@ -11,11 +11,13 @@ import { consumeRameshNonce } from './ramesh-replay';
 
 export const RAMESH_ISSUER = 'wareongo:ramesh';
 export const RAMESH_TYPE = 'ramesh-request+jwt';
-export const RAMESH_SCOPES = ['knowledge:read', 'warehouses:read', 'crm:read'] as const;
+// Use the same capability vocabulary as every other Context Engine client.
+// Current employee permissions remain the authority; Ramesh adds no domain restriction.
+export const RAMESH_SCOPES = SCOPES;
 export const rameshResource = () => `${consoleOrigin()}/mcp/ramesh`;
 const digest = (value: Uint8Array | string) => createHash('sha256').update(value).digest('base64url');
 const identifier = z.string().regex(/^[A-Za-z0-9_-]{1,48}$/);
-const scopes = z.array(z.enum(RAMESH_SCOPES)).min(1).max(3).refine(v => new Set(v).size === v.length);
+const scopes = z.array(z.enum(RAMESH_SCOPES)).min(1).max(RAMESH_SCOPES.length).refine(v => new Set(v).size === v.length);
 const publicKey = z.object({ kty: z.literal('OKP'), crv: z.literal('Ed25519'), x: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict();
 const registration = z.object({ kid: identifier, publicKey, scopes, expiresAt: z.string().datetime() }).strict();
 const registry = z.array(registration).min(1).max(3).refine(v => new Set(v.map(k => k.kid)).size === v.length);

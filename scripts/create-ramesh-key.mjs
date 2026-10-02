@@ -9,7 +9,7 @@ if (!values.directory || !values.kid || !/^[A-Za-z0-9_-]{1,48}$/.test(values.kid
 const directory = path.resolve(values.directory);
 await mkdir(directory, { mode: 0o700 }); // A new directory prevents accidentally replacing installed secrets.
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-const scopes = ['knowledge:read', 'warehouses:read', 'crm:read'];
+const scopes = ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read'];
 const signing = { kid: values.kid, privateKey: privateKey.export({ format: 'jwk' }), scopes };
 const verifying = [{ kid: values.kid, publicKey: publicKey.export({ format: 'jwk' }), scopes,
   expiresAt: new Date(Date.now() + 90 * 86400_000).toISOString() }];

@@ -57,7 +57,7 @@ describe('Ramesh signed request authentication', () => {
   it.each([
     ['issuer', { iss: 'attacker' }], ['audience', { aud: `${origin}/mcp` }], ['target', { htu: `${origin}/mcp` }],
     ['method', { htm: 'DELETE' }], ['group', { chat_type: 'group' }], ['other employee', { sub: '24' }],
-    ['unknown number', { phone: '+919999999999' }], ['analytics scope', { scopes: ['analytics:read'] }],
+    ['unknown number', { phone: '+919999999999' }], ['unregistered analytics scope', { scopes: ['analytics:read'] }],
     ['duplicate scope', { scopes: ['crm:read', 'crm:read'] }], ['unknown claim', { admin: true }],
     ['long expiry', { exp: Math.floor(Date.now() / 1000) + 900 }],
     ['expired', { iat: Math.floor(Date.now() / 1000) - 80, exp: Math.floor(Date.now() / 1000) - 20 }],
@@ -120,6 +120,33 @@ describe('Ramesh signed request authentication', () => {
 });
 
 describe('parallel MCP entry points', () => {
+  it('exposes the full analytics catalogue for a registered admin and removes it after demotion', async () => {
+    registration.scopes.push('analytics:read');
+    vi.stubEnv('CONTEXT_RAMESH_PUBLIC_KEYS_JSON', JSON.stringify([registration]));
+    rows[0].adminAccess = true;
+    const audit = vi.fn();
+    const read: typeof handleApiRequest = (request, path, overrides) => handleApiRequest(request, path, {
+      ...overrides, transaction: async work => work(db), audit,
+    });
+    const transport = new StreamableHTTPClientTransport(new URL(endpoint), { fetch: async (input, init) => {
+      const request = new Request(input, init);
+      return handleRameshMcpRequest(request.method === 'POST'
+        ? await signed({ content: await request.text(), claims: { scopes: registration.scopes } }) : request,
+        { auth: deps, read, prompts: async () => ({}), audit });
+    } });
+    const client = new Client({ name: 'full-catalogue-test', version: '1' });
+    try {
+      await client.connect(transport);
+      const names = (await client.listTools()).tools.map(t => t.name);
+      expect(names).toEqual(expect.arrayContaining(['analytics_capabilities', 'ga4_report', 'search_console_report', 'search_crm_leads', 'search_warehouses']));
+      rows[0].adminAccess = false;
+      const reduced = (await client.listTools()).tools.map(t => t.name);
+      expect(reduced).not.toContain('ga4_report');
+      await expect(client.callTool({ name: 'ga4_report', arguments: {} })).rejects.toThrow('not found');
+      rows[0].analystAccess = true;
+      expect((await client.listTools()).tools.map(t => t.name)).toContain('ga4_report');
+    } finally { await client.close(); }
+  });
   it('works through the real MCP SDK and API permission boundary with a distinct signature per HTTP request', async () => {
     const audit = vi.fn();
     const read: typeof handleApiRequest = (request, path, overrides) => handleApiRequest(request, path, { ...overrides,

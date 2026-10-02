@@ -28,9 +28,9 @@ An attacker knowing a phone number cannot sign requests. A stolen signature cann
 | `body_sha256` | Base64url SHA-256 of the exact transmitted body bytes |
 | `iat`, `exp` | Unix seconds, positive lifetime at most 60 seconds; up to 5 seconds of verification skew |
 | `jti` | New UUID per HTTP request, including initialization and notifications |
-| `scopes` | Unique subset of `knowledge:read`, `warehouses:read`, `crm:read` |
+| `scopes` | Unique subset of `knowledge:read`, `warehouses:read`, `crm:read`, `analytics:read` |
 
-The server also caps scopes by key registration and employee permissions. Analytics and writes are excluded. Group reads are rejected. Requests must use JSON, have no `Origin`, query or alternate URL, and remain within 32 KiB. The SDK's background GET receives 405. No sessions or redirects are used.
+The server also caps scopes by key registration and current employee permissions. Analytics requires the registered service scope and the employee's current Analyst access (including roster administrators). Writes and group reads are excluded. Requests must use JSON, have no `Origin`, query or alternate URL, and remain within 32 KiB. The SDK's background GET receives 405. No sessions or redirects are used.
 
 `context_ramesh_private.request_nonces` in Supabase stores only a hashed issuer/key/nonce and expiry. A primary key and atomic insert reject simultaneous replays across instances. Expired rows are removed in bounded batches during later authenticated requests. The runtime has SELECT/INSERT/DELETE, not UPDATE; anonymous, authenticated and service-role API access is revoked. A storage failure denies access. This limited shared state is necessary for one-use replay protection; there is no per-user credential state.
 
@@ -59,7 +59,7 @@ The first migration invocation validates and rolls back. The second commits. It 
 | Ramesh | `CONTEXT_MCP_URL` | Canonical HTTPS origin plus `/mcp/ramesh` |
 | Ramesh | `CONTEXT_RAMESH_SIGNING_KEY_JSON` | Contents of `worker-signing.json`, stored only in the protected worker environment/secret store |
 
-The public registry is a strict array of `{kid, publicKey: {kty: "OKP", crv: "Ed25519", x}, scopes, expiresAt}`. Worker configuration contains `{kid, privateKey: {kty: "OKP", crv: "Ed25519", x, d}, scopes}`. Keep these settings out of prompts, chat, source control and client bundles. The worker factory remains disconnected from the current conversational graph; setting these values does not activate business tools.
+The public registry is a strict array of `{kid, publicKey: {kty: "OKP", crv: "Ed25519", x}, scopes, expiresAt}`. Worker configuration contains `{kid, privateKey: {kty: "OKP", crv: "Ed25519", x, d}, scopes}`. Keep these settings out of prompts, chat, source control and client bundles. Ramesh composes this adapter into its conversational graph when `BUSINESS_READS_ENABLED=true`. Discovery and each read resolve live employee authorization; adding a service scope does not grant that permission to every employee.
 
 For rotation, deploy the new public key alongside the old one, switch the worker's private key, verify signed reads, then remove the old registration and redeploy Context Engine. Disabling `CONTEXT_RAMESH_AUTH_ENABLED` or removing a key denies subsequent requests **on deployments using that configuration**. Vercel environment edits require deployment; old deployment URLs must also be protected or retired. Employee deactivation uses the live roster and does not need a deployment. Keep machines' clocks synchronized.
 
@@ -70,3 +70,38 @@ Keep credentials and backing databases isolated for previews. Signature validati
 `tests/ramesh-auth.test.ts` exercises the real MCP SDK and shared API authorization with synthetic keys/employees, including forged signatures, algorithm confusion, tampering, endpoint/scope restrictions, expiry, replay, offboarding and parallel OAuth rejection. The opt-in `test:security:postgres` suite uses a fresh local PostgreSQL instance to verify restricted role access, logout revocation, legacy key binding, replay races across connections, cleanup and migration drift. It must never target Supabase production.
 
 The corresponding worker tests verify actual request signatures, original sender/LID mapping, live roster rechecks, cancellation, endpoint restrictions and absence of OAuth writes. Neither suite opens a WhatsApp connection. Deployment checks should verify unauthenticated rejection, unchanged Claude OAuth metadata/challenge, and a bounded authenticated context read. Google sign-in/logout and consent UI require a real browser session for final acceptance.
+
+## Full employee-authorized catalogue
+
+Ramesh uses the same scope vocabulary as the OAuth/REST clients: knowledge, warehouses, CRM and analytics. New service keys register all four read scopes; existing registrations must explicitly include `analytics:read` on both the server public registration and worker signer before Google tools appear. The engine intersects them with the current active roster permissions on every request. Admins inherit Analyst access; an ordinary employee does not gain analytics from Ramesh, and demotion removes the tools. Claude's OAuth path is unchanged.
+
+Local capture tests use the real engine with Supabase and Google connections, without any WhatsApp transport. Production verification uses the model-free capability probe against the actual worker credentials; it does not send WhatsApp messages.
+
+## Dynamic read-tool contract
+
+Context Engine owns each tool's discovery metadata, description, input/output
+schemas and guidance. The request-scoped catalogue reflects current employee
+permissions and the tool's configured platform visibility. Ramesh reads that
+catalogue and the authenticated `get_context` response at runtime; it must not
+treat a previous employee's catalogue or a saved role as current authorization.
+
+Every read tool advertises `readOnlyHint: true` and
+`_meta["wareongo/context-read-v1"] = { requiredScopes, sourceFamily }`.
+`requiredScopes` states the minimum needed for discovery. Individual arguments
+may need additional permissions: a CRM-only shortlist checklist is allowed,
+while reading selected warehouses also needs warehouse access. The source API
+still authorizes every read against current permissions.
+
+Successful results retain the existing `source_path`, `status`, `data` and `meta`
+envelope. `meta.toolName` and `meta.argumentsSha256` bind the result to the actual
+MCP request. The hash is SHA-256 over JSON with object keys recursively sorted
+in ordinal order and arrays unchanged, captured before schema trimming or
+defaults. These fields are owned by the connector, not source data or the model.
+They describe a request binding over authenticated transport, not a standalone
+signature or authorization grant.
+
+New read tools that follow this contract can be added on the engine without
+extending a Ramesh tool-name list. New permission domains still require deliberate
+service-scope configuration; writes require a separate execution and approval
+contract. Existing Claude OAuth behavior and employee permissions remain the
+same.
