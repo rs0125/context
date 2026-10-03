@@ -6,7 +6,7 @@ import {
 import { verifyGoogleIdToken } from './console-google';
 import { withGmailWriteTransaction, withReadOnlyTransaction, withSessionWriteTransaction } from './db';
 import { GMAIL_COMPOSE_SCOPE } from './gmail-client';
-import { completeGmailDisconnect, decryptGmailSecret, disconnectGmailConnection, getGmailConnection, saveGmailConnection, type GmailConnection } from './gmail-storage';
+import { disconnectGmailConnection, getGmailConnection, saveGmailConnection, type GmailConnection } from './gmail-storage';
 import { HttpError } from './errors';
 import { anonymousRequestLimit } from './rate-limit';
 
@@ -15,7 +15,6 @@ const FLOW_SECONDS = 600;
 const RANDOM = /^[A-Za-z0-9_-]{43}$/;
 const TOKEN = /^[\x21-\x7e]{1,8192}$/;
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
-const REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
 const ALLOWED_SCOPES = new Set(['openid', 'email', 'https://www.googleapis.com/auth/userinfo.email', GMAIL_COMPOSE_SCOPE]);
 type Flow = {
   kind: 'gmail-connect'; state: string; nonce: string; verifier: string; clientId: string;
@@ -87,8 +86,8 @@ function failure(error: unknown, clear = false) {
 }
 function owner(identity: { employeeId: number; email: string }) { return { employeeId: identity.employeeId, employeeEmail: identity.email }; }
 function summary(connection: GmailConnection | null) {
-  return connection ? { connected: connection.status === 'active', status: connection.status, accountEmail: connection.accountEmail, updatedAt: connection.updatedAt }
-    : { connected: false, status: 'disconnected' as const, accountEmail: null, updatedAt: null };
+  return connection ? { connected: connection.status === 'active', accountEmail: connection.accountEmail, updatedAt: connection.updatedAt }
+    : { connected: false, accountEmail: null, updatedAt: null };
 }
 function sameConnection(connection: GmailConnection | null, flow: Flow) {
   if ((connection?.id ?? null) !== flow.connectionId || (connection?.version ?? null) !== flow.connectionVersion) throw changed();
@@ -96,12 +95,12 @@ function sameConnection(connection: GmailConnection | null, flow: Flow) {
 
 /** Fixed Google OAuth endpoints; never return provider descriptions.
  * The deadline also covers a body stream that ignores fetch cancellation. */
-async function googlePost(parameters: URLSearchParams, requestFetch: typeof fetch, signal?: AbortSignal, operation: 'token' | 'revoke' = 'token'): Promise<Record<string, unknown>> {
+async function googlePost(parameters: URLSearchParams, requestFetch: typeof fetch, signal?: AbortSignal): Promise<Record<string, unknown>> {
   if (signal?.aborted) throw new HttpError(499, 'GMAIL_ABORTED', 'Gmail connection was cancelled.');
   const controller = new AbortController();
   const cancel = () => controller.abort();
   signal?.addEventListener('abort', cancel, { once: true });
-  const timer = setTimeout(cancel, operation === 'revoke' ? 2_000 : 5_000);
+  const timer = setTimeout(cancel, 5_000);
   let rejectAbort: (() => void) | undefined;
   const aborted = new Promise<never>((_resolve, reject) => {
     rejectAbort = () => reject(unavailable());
@@ -109,14 +108,11 @@ async function googlePost(parameters: URLSearchParams, requestFetch: typeof fetc
   });
   let response: Response | undefined, reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
-    response = await Promise.race([requestFetch(operation === 'revoke' ? REVOKE_URL : TOKEN_URL, {
+    response = await Promise.race([requestFetch(TOKEN_URL, {
       method: 'POST', redirect: 'error', cache: 'no-store', signal: controller.signal,
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }, body: parameters,
     }), aborted]);
-    if (response.redirected) throw unavailable();
-    // Google documents an empty 200 response for successful revocation.
-    if (operation === 'revoke' && response.status === 200) return {};
-    if ((response.ok && response.status !== 200)
+    if (response.redirected || (response.ok && response.status !== 200)
       || !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') ?? '')) throw unavailable();
     const declared = response.headers.get('content-length');
     if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > 32_768)) throw unavailable();
@@ -134,8 +130,6 @@ async function googlePost(parameters: URLSearchParams, requestFetch: typeof fetc
     const data: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
     if (!data || typeof data !== 'object' || Array.isArray(data)) throw unavailable();
     if (!response.ok) {
-      // Retrying after a lost success response may encounter an already invalid token.
-      if (operation === 'revoke' && response.status === 400 && 'error' in data && data.error === 'invalid_token') return {};
       if ('error' in data && data.error === 'invalid_grant') throw new HttpError(401, 'GMAIL_RECONNECT_REQUIRED', 'Reconnect your Gmail account to continue.');
       throw unavailable();
     }
@@ -150,15 +144,6 @@ async function googlePost(parameters: URLSearchParams, requestFetch: typeof fetc
     else if (response?.body) void response.body.cancel().catch(() => {});
     controller.abort();
   }
-}
-async function revokeGmailRefreshToken(connection: GmailConnection, requestFetch: typeof fetch, signal?: AbortSignal) {
-  if (!connection.encryptedRefreshToken) throw unavailable();
-  const token = decryptGmailSecret(connection.encryptedRefreshToken, {
-    purpose: 'refresh_token', employeeId: connection.employeeId, id: connection.id,
-  });
-  if (!TOKEN.test(token)) throw unavailable();
-  // Revocation deliberately works even if drafting or OAuth client config is disabled.
-  await googlePost(new URLSearchParams({ token }), requestFetch, signal, 'revoke');
 }
 function grantedScopes(value: unknown): string[] {
   if (typeof value !== 'string' || value.length > 4096) throw scopeRequired();
@@ -190,7 +175,6 @@ export async function handleGmailConnect(request: Request, dependencies: Partial
       const identity = await getConsoleIdentity(request, client);
       return { identity, connection: await getGmailConnection(client, owner(identity)) };
     });
-    if (connection?.status === 'revoking') throw new HttpError(409, 'GMAIL_DISCONNECT_PENDING', 'Finish disconnecting Gmail before reconnecting.');
     const iat = Math.floor(deps.now() / 1000);
     const flow: Flow = {
       kind: 'gmail-connect', state: randomBytes(32).toString('base64url'), nonce: randomBytes(32).toString('base64url'),
@@ -300,26 +284,14 @@ export async function handleGmailDisconnect(request: Request, dependencies: Part
     requireConsoleOrigin(request);
     readConsoleSession(request);
     deps.limit(request, 'gmail:disconnect', 20);
-    const connection = await deps.disconnectTransaction(async client => {
+    await deps.disconnectTransaction(async client => {
       const identity = await getConsoleIdentity(request, client), employee = owner(identity);
-      return disconnectGmailConnection(client, employee);
+      await disconnectGmailConnection(client, employee);
     });
-    let googleGrantRevoked = false, revocationPending = false;
-    if (connection.status === 'revoking') {
-      try {
-        await deps.disconnectTransaction(async client => {
-          const identity = await getConsoleIdentity(request, client);
-          // A deliberately bounded exception to ordinary no-I/O transactions:
-          // the owner lock serializes Google's project-wide revocation with
-          // reconnect. Local access was durably disabled in the earlier commit.
-          await completeGmailDisconnect(client, owner(identity), async current => {
-            await revokeGmailRefreshToken(current, deps.fetch, request.signal);
-            googleGrantRevoked = true;
-          });
-        });
-      } catch { googleGrantRevoked = false; revocationPending = true; }
-    }
-    const response = consoleJson({ disconnected: true, googleGrantRevoked, revocationPending }, revocationPending ? 202 : 200);
+    // Do not revoke at Google after releasing the lock: grant-wide revocation
+    // could disable a concurrent reconnect's new token. This removes our local
+    // credential; the employee can separately remove the Google account grant.
+    const response = consoleJson({ disconnected: true, googleGrantRevoked: false });
     response.headers.append('Set-Cookie', flowCookie('', 0));
     return response;
   } catch (error) { return consoleErrorResponse(error); }
