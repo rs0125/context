@@ -37,7 +37,7 @@ Raw text is bounded at 3,000 characters; Ramesh additionally limits the complete
 }
 ```
 
-The explicit permission is `crm.rfq:write`. Read credentials, console key rotation, OAuth defaults, Analyst/admin status and warehouse access do not grant it. The employee must be active and linked to exactly one live Twenty member by email and member ID. The grant and roster are rechecked before dispatch and before releasing the result. No general `crm:write` permission is introduced.
+The explicit permission is `crm.rfq:write`. Read credentials, console key rotation, OAuth defaults, Analyst/admin status and warehouse access do not grant it. The employee must be active and linked to a live Twenty member. A bounded lookup of the roster-pinned member ID must return exactly that undeleted member, a matching employee email and a nonblank name. Unrelated members and the size of the workspace directory do not affect attribution. The grant and roster are rechecked before dispatch and before releasing the result. No general `crm:write` permission is introduced.
 
 The closed MCP contract declares `sourceFamily: crm`, `effect: create`, `idempotencyArgument: operation_id`, and `sourceTextArgument: raw_text`. Platform controls and descriptions use the existing prompt console. REST `/api/v1` stays read-only. Arguments cannot supply stage, IDs to update, assignments, URLs, headers, arbitrary fields, notes or an upsert flag.
 

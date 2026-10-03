@@ -55,15 +55,21 @@ export class CrmRfqClient {
     });
   }
   async creator(principal: Principal, signal: AbortSignal): Promise<CrmCreator> {
-    if (!principal.twentyUserId) throw new HttpError(403, 'CRM_IDENTITY_UNAVAILABLE', 'A current linked CRM member is required.');
+    const linked = z.string().uuid().safeParse(principal.twentyUserId);
+    if (!linked.success) throw new HttpError(403, 'CRM_IDENTITY_UNAVAILABLE', 'A current linked CRM member is required.');
+    const memberId = linked.data.toLowerCase();
     try {
-      const response = await this.request('/rest/workspaceMembers?limit=200&depth=0&filter=deletedAt[is]:NULL', 'GET', signal);
+      // The roster pins an exact member. Unrelated members and workspace size
+      // must not affect attribution or force a scan of the entire directory.
+      const query = new URLSearchParams({ limit: '1', depth: '0', filter: `id[eq]:"${memberId}",deletedAt[is]:NULL` });
+      const response = await this.request(`/rest/workspaceMembers?${query}`, 'GET', signal);
       if (!response.ok) { await response.body?.cancel(); throw new Error(); }
-      const page = z.object({ data: z.object({ workspaceMembers: z.array(member).max(200) }), pageInfo: z.object({ hasNextPage: z.literal(false) }) }).parse(await json(response, 512_000));
-      const matches = page.data.workspaceMembers.filter(row => row.userEmail.toLowerCase() === principal.email.toLowerCase());
-      if (matches.length !== 1 || matches[0].id.toLowerCase() !== principal.twentyUserId.toLowerCase()
-        || page.data.workspaceMembers.filter(row => row.id.toLowerCase() === principal.twentyUserId!.toLowerCase()).length !== 1) throw new Error();
-      return { id: matches[0].id, name: `${matches[0].name.firstName} ${matches[0].name.lastName}`.trim() };
+      const page = z.object({ data: z.object({ workspaceMembers: z.array(member).length(1) }), pageInfo: z.object({ hasNextPage: z.literal(false) }) }).parse(await json(response, 64_000));
+      const current = page.data.workspaceMembers[0];
+      if (current.id.toLowerCase() !== memberId || current.userEmail.toLowerCase() !== principal.email.toLowerCase()) throw new Error();
+      const name = `${current.name.firstName} ${current.name.lastName}`.trim();
+      if (!name) throw new Error();
+      return { id: memberId, name };
     } catch {
       throw new HttpError(403, 'CRM_IDENTITY_UNAVAILABLE', 'The employee could not be uniquely verified as a current CRM member.');
     }

@@ -134,6 +134,48 @@ describe('RFQ dispatch and recovery boundary', () => {
     expect(await f.call(args, new AbortController().signal, async () => { if (++n === 2) throw new HttpError(403, 'FORBIDDEN', 'Grant revoked.'); })).toMatchObject({ outcome: 'not_dispatched' });
     expect(f.deps.claim).not.toHaveBeenCalled(); expect(f.crm.create).not.toHaveBeenCalled();
   });
+  it('blocks a CRM identity change during the live member lookup before reserving or sending', async () => {
+    const f = fixture();
+    f.crm.creator.mockImplementation(async () => {
+      f.actor.twentyUserId = id;
+      return { id: principal.twentyUserId!, name: 'Synthetic' };
+    });
+    expect(await f.call()).toMatchObject({ outcome: 'not_dispatched', code: 'CRM_ACCESS_CHANGED' });
+    expect(f.deps.claim).not.toHaveBeenCalled();
+    expect(f.crm.create).not.toHaveBeenCalled();
+  });
+  it('keeps a cancelled reservation uncertain without sending a request on recovery', async () => {
+    const f = fixture();
+    const abort = new AbortController();
+    const transaction = f.deps.writeTransaction;
+    f.deps.writeTransaction = async work => {
+      const result = await transaction(work);
+      abort.abort();
+      return result;
+    };
+    expect(await f.call(args, abort.signal)).toMatchObject({ outcome: 'outcome_unknown' });
+    expect(f.stored()).toMatchObject({ state: 'dispatching' });
+    expect(await f.call()).toMatchObject({ outcome: 'outcome_unknown' });
+    expect(f.crm.create).not.toHaveBeenCalled();
+    expect(f.crm.creator).toHaveBeenCalledOnce();
+  });
+  it('persists a verified result after cancellation so recovery can return it without a second POST', async () => {
+    const f = fixture();
+    const abort = new AbortController();
+    f.crm.create.mockImplementation(async () => { abort.abort(); return { outcome: 'created', id }; });
+    expect(await f.call(args, abort.signal)).toMatchObject({ outcome: 'outcome_unknown' });
+    expect(f.stored()).toMatchObject({ state: 'created', resource_id: id });
+    expect(await f.call()).toMatchObject({ outcome: 'replayed', data: { id } });
+    expect(f.crm.create).toHaveBeenCalledOnce();
+  });
+  it('withholds a completed result after a linked-member change and preserves its original attribution', async () => {
+    const f = fixture();
+    f.crm.create.mockImplementation(async () => { f.actor.twentyUserId = id; return { outcome: 'created', id }; });
+    expect(await f.call()).toMatchObject({ outcome: 'outcome_unknown' });
+    expect(f.stored()).toMatchObject({ state: 'created', member_id: principal.twentyUserId, resource_id: id });
+    expect(await f.call()).toMatchObject({ outcome: 'not_dispatched', code: 'CRM_OPERATION_CONFLICT' });
+    expect(f.crm.create).toHaveBeenCalledOnce();
+  });
   it('never dispatches if receipt storage or cancellation blocks the claim', async () => {
     const f = fixture(); f.deps.claim = vi.fn(async () => { throw new Error('DB unavailable'); });
     expect(await f.call()).toMatchObject({ outcome: 'not_dispatched' });

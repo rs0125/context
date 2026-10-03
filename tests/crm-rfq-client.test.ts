@@ -38,17 +38,45 @@ describe('fixed-purpose CRM HTTP adapter', () => {
     };
     expect(await new CrmRfqClient(env, fetcher).create(payload, signal())).toEqual({ outcome: 'outcome_unknown' });
   });
-  it('verifies membership by both unique email and roster-pinned ID, without an Analyst bypass', async () => {
+  it('looks up only the roster-pinned member and verifies email, without an Analyst bypass', async () => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json({ data: { workspaceMembers: [member] }, pageInfo: { hasNextPage: false } }));
     const crm = new CrmRfqClient(env, fetcher);
     expect(await crm.creator(actor, signal())).toEqual({ id: member.id, name: 'Synthetic Employee' });
-    expect(String(fetcher.mock.calls[0][0])).toContain('/rest/workspaceMembers?');
+    const url = new URL(String(fetcher.mock.calls[0][0]));
+    expect(url.pathname).toBe('/rest/workspaceMembers');
+    expect(url.searchParams.get('limit')).toBe('1');
+    expect(url.searchParams.get('filter')).toBe(`id[eq]:"${member.id}",deletedAt[is]:NULL`);
+    expect(fetcher.mock.calls[0][1]?.method).toBe('GET');
     await expect(crm.creator({ ...actor, twentyUserId: id, isAnalyst: true }, signal())).rejects.toMatchObject({ code: 'CRM_IDENTITY_UNAVAILABLE' });
   });
-  it.each(['duplicate', 'deleted', 'incomplete', 'wrong-email'])('refuses %s membership results', async mode => {
-    const members = mode === 'duplicate' ? [member, { ...member, id }] : [{ ...member, ...(mode === 'deleted' ? { deletedAt: '2026-01-01T00:00:00Z' } : {}), ...(mode === 'wrong-email' ? { userEmail: 'someone-else@wareongo.com' } : {}) }];
+  it.each(['duplicate', 'deleted', 'incomplete', 'wrong-email', 'wrong-id', 'missing', 'nameless'])('refuses %s membership results', async mode => {
+    const members = mode === 'missing' ? [] : mode === 'duplicate' ? [member, { ...member, id }] : [{ ...member, ...(mode === 'deleted' ? { deletedAt: '2026-01-01T00:00:00Z' } : {}), ...(mode === 'wrong-email' ? { userEmail: 'someone-else@wareongo.com' } : {}), ...(mode === 'wrong-id' ? { id } : {}), ...(mode === 'nameless' ? { name: { firstName: ' ', lastName: '' } } : {}) }];
     const crm = new CrmRfqClient(env, async () => Response.json({ data: { workspaceMembers: members }, pageInfo: { hasNextPage: mode === 'incomplete' } }));
     await expect(crm.creator(actor, signal())).rejects.toMatchObject({ code: 'CRM_IDENTITY_UNAVAILABLE' });
+  });
+  it('normalizes UUID casing before the targeted lookup and attribution', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ data: { workspaceMembers: [{ ...member, id: member.id.toUpperCase(), userEmail: member.userEmail.toUpperCase() }] }, pageInfo: { hasNextPage: false } }));
+    expect(await new CrmRfqClient(env, fetcher).creator({ ...actor, twentyUserId: member.id.toUpperCase() }, signal())).toEqual({ id: member.id, name: 'Synthetic Employee' });
+    expect(new URL(String(fetcher.mock.calls[0][0])).searchParams.get('filter')).toBe(`id[eq]:"${member.id}",deletedAt[is]:NULL`);
+  });
+  it('rejects invalid linked IDs before making a CRM request', async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    await expect(new CrmRfqClient(env, fetcher).creator({ ...actor, twentyUserId: 'bad-id' }, signal())).rejects.toMatchObject({ code: 'CRM_IDENTITY_UNAVAILABLE' });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it.each(['wrong-member', 'wrong-owner', 'missing-fields', 'wrong-status', 'invalid-utf8', 'redirected'])('never reports creation for a %s response', async mode => {
+    const data = created();
+    const record = data.data.createOpportunity as Record<string, unknown>;
+    if (mode === 'wrong-member') record.createdBy = { source: 'MANUAL', workspaceMemberId: id, name: 'Synthetic Employee' };
+    if (mode === 'wrong-owner') record.ownerId = id;
+    if (mode === 'missing-fields') delete record.description;
+    const response = mode === 'invalid-utf8'
+      ? new Response(new Uint8Array([0xff, 0xfe]), { status: 201 })
+      : Response.json(data, { status: mode === 'wrong-status' ? 200 : 201 });
+    if (mode === 'redirected') Object.defineProperty(response, 'redirected', { value: true });
+    const fetcher = vi.fn<typeof fetch>(async () => response);
+    expect(await new CrmRfqClient(env, fetcher).create(payload, signal())).toEqual({ outcome: 'outcome_unknown' });
+    expect(fetcher).toHaveBeenCalledOnce();
   });
   it.each(['http://crm.example.test', 'https://key@crm.example.test', 'https://crm.example.test/evil', 'https://crm.example.test?key=x'])('refuses unsafe configured origin %s', url => {
     expect(crmWriteAvailability({ ...env, TWENTY_CRM_BASE_URL: url }).available).toBe(false);
