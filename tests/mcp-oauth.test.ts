@@ -3,7 +3,7 @@ import type { PoolClient } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { authenticateMcpRequest, handleMcpOAuthRequest, revalidateMcpGrant, type McpOAuthDependencies } from '../src/lib/mcp-oauth';
 import { authorizationServerMetadata, createConsent, hashOAuth, oauthScopes, parseAuthorization, protectedResourceMetadata, readConsent, validateRedirect } from '../src/lib/mcp-oauth-protocol';
-import type { KeyRegistration } from '../src/lib/auth';
+import { resolvePrincipal, type KeyRegistration } from '../src/lib/auth';
 import { createAnonymousLimiter } from '../src/lib/rate-limit';
 import { HttpError } from '../src/lib/errors';
 
@@ -35,9 +35,9 @@ function database() {
     if (sql.includes('pg_try_advisory_xact_lock')) return { rows: [{ locked: true }] };
     if (sql.includes('FROM public."VerifiedNumber"')) return { rows: values[0] === roster.email ? [{ ...roster }] : [] };
     if (sql.includes('context_auth_private.employee_api_keys')) {
-      if (sql.startsWith('SELECT id FROM')) {
+      if (sql.startsWith('SELECT id, scopes FROM')) {
         const row = dbKeys.get(values[1]);
-        return { rows: row && row.id === values[0] && row.employee_id === values[2] && row.employee_email === values[3] ? [{ id: row.id }] : [] };
+        return { rows: row && row.id === values[0] && row.employee_id === values[2] && row.employee_email === values[3] ? [{ id: row.id, scopes: row.scopes }] : [] };
       }
       return { rows: dbKeys.has(values[0]) ? [dbKeys.get(values[0])] : [] };
     }
@@ -124,21 +124,21 @@ function jsonRequest(path: string, body: unknown, headers: Record<string, string
 function tokenRequest(values: Record<string, string>) {
   return new Request(`${origin}/oauth/token`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(values) });
 }
-async function registered(db: ReturnType<typeof database>) {
-  const response = await handleMcpOAuthRequest(jsonRequest('/oauth/register', { client_name: 'Synthetic Claude', redirect_uris: [redirect], ignored_metadata: 'ignored', logo_uri: 'http://127.0.0.1/private' }), 'register', db.deps);
+async function registered(db: ReturnType<typeof database>, scope?: string) {
+  const response = await handleMcpOAuthRequest(jsonRequest('/oauth/register', { client_name: 'Synthetic Claude', redirect_uris: [redirect], ...(scope !== undefined ? { scope } : {}), ignored_metadata: 'ignored', logo_uri: 'http://127.0.0.1/private' }), 'register', db.deps);
   expect(response.status).toBe(201);
   return await response.json();
 }
-async function consent(db: ReturnType<typeof database>, scope?: string) {
-  const client = await registered(db);
+async function consent(db: ReturnType<typeof database>, scope?: string, registrationScope?: string) {
+  const client = await registered(db, registrationScope);
   const params = new URLSearchParams({ response_type: 'code', client_id: client.client_id, redirect_uri: redirect, resource, code_challenge: challenge, code_challenge_method: 'S256', state: 'client-secret-state' });
   if (scope !== undefined) params.set('scope', scope);
   const response = await handleMcpOAuthRequest(new Request(`${origin}/api/oauth/authorize?${params}`), 'authorize', db.deps);
   expect(response.status).toBe(200);
   return { client, params, preview: await response.json(), cookie: response.headers.get('set-cookie')!.split(';')[0] };
 }
-async function authorized(db: ReturnType<typeof database>) {
-  const start = await consent(db);
+async function authorized(db: ReturnType<typeof database>, scope?: string, registrationScope?: string) {
+  const start = await consent(db, scope, registrationScope);
   const request = jsonRequest('/api/oauth/authorize', { requestHandle: start.preview.requestHandle, approve: true, apiKey }, { Cookie: start.cookie });
   const response = await handleMcpOAuthRequest(request, 'authorize', db.deps);
   expect(response.status).toBe(200);
@@ -327,8 +327,54 @@ describe('MCP OAuth protocol and consent boundaries', () => {
 });
 
 describe('MCP OAuth token lifecycle and employee isolation', () => {
-  it('advertises and parses four supported read scopes while rejecting duplicate or unknown permissions', () => {
-    const scopes = [...key.scopes, 'analytics:read'];
+  it('new default registrations and existing grants do not acquire GIS write access', async () => {
+    const db = database();
+    const initial = await registered(db);
+    expect(initial.scope.split(' ')).not.toContain('gis:write');
+    const auth = await authorized(db); const issued = await (await exchange(db, auth)).json();
+    vi.stubEnv('CONTEXT_API_KEYS_JSON', JSON.stringify([{ ...key, scopes: [...key.scopes, 'gis:write'] }]));
+    expect((await authenticateMcpRequest(accessRequest(issued.access_token), db.deps)).scopes).toEqual(key.scopes);
+    const escalation = await refresh(db, auth.client.client_id, issued.refresh_token, { scope: 'gis:write' });
+    expect(escalation.status).toBe(400);
+    const renewed = await (await refresh(db, auth.client.client_id, issued.refresh_token)).json();
+    expect(renewed.scope).toBe(key.scopes.join(' '));
+  });
+
+  it('preserves explicitly consented GIS access on refresh, then persists revocation without later regrowth', async () => {
+    vi.stubEnv('CONTEXT_API_KEYS_JSON', JSON.stringify([{ ...key, scopes: ['knowledge:read', 'gis:write'] }]));
+    const db = database();
+    const auth = await authorized(db, 'knowledge:read gis:write', 'knowledge:read gis:write');
+    const issued = await (await exchange(db, auth)).json();
+    expect(issued.scope).toBe('knowledge:read gis:write');
+    const renewed = await (await refresh(db, auth.client.client_id, issued.refresh_token)).json();
+    expect(renewed.scope).toBe('knowledge:read gis:write');
+    expect((await authenticateMcpRequest(accessRequest(renewed.access_token), db.deps)).scopes).toEqual(['knowledge:read', 'gis:write']);
+    db.roster.dashboardAccess = false;
+    expect((await authenticateMcpRequest(accessRequest(renewed.access_token), db.deps)).scopes).toEqual(['knowledge:read']);
+    const narrowed = await (await refresh(db, auth.client.client_id, renewed.refresh_token)).json();
+    expect(narrowed.scope).toBe('knowledge:read');
+    db.roster.dashboardAccess = true;
+    expect((await authenticateMcpRequest(accessRequest(narrowed.access_token), db.deps)).scopes).toEqual(['knowledge:read']);
+    expect((await refresh(db, auth.client.client_id, narrowed.refresh_token, { scope: 'gis:write' })).status).toBe(400);
+  });
+
+  it('refuses GIS-only consent without either an explicit key grant or current dashboard eligibility', async () => {
+    for (const eligible of [false, true]) {
+      const db = database(); db.roster.dashboardAccess = eligible;
+      vi.stubEnv('CONTEXT_API_KEYS_JSON', JSON.stringify([{ ...key, scopes: eligible ? ['knowledge:read'] : ['knowledge:read', 'gis:write'] }]));
+      const start = await consent(db, 'gis:write', 'gis:write');
+      const response = await handleMcpOAuthRequest(jsonRequest('/api/oauth/authorize', {
+        requestHandle: start.preview.requestHandle, approve: true, apiKey,
+      }, { Cookie: start.cookie }), 'authorize', db.deps);
+      expect(response.status).toBe(403);
+      expect(db.state().grants.size).toBe(0);
+    }
+  });
+
+  it('advertises supported reads and explicit GIS writes while defaulting to reads', () => {
+    const scopes = [...key.scopes, 'analytics:read', 'gis:write'];
+    expect(oauthScopes(undefined)).toEqual([...key.scopes, 'analytics:read']);
+    expect(oauthScopes(null)).not.toContain('gis:write');
     expect(authorizationServerMetadata().scopes_supported).toEqual(scopes);
     expect(protectedResourceMetadata().scopes_supported).toEqual(scopes);
     expect(oauthScopes(scopes.join(' '))).toEqual(scopes);
@@ -470,6 +516,21 @@ describe('MCP OAuth token lifecycle and employee isolation', () => {
     db.dbKeys.delete(key.hash);
     await expect(authenticateMcpRequest(accessRequest(tokens.access_token), db.deps)).rejects.toMatchObject({ status: 401 });
     expect((await (await refresh(db, auth.client.client_id, tokens.refresh_token)).json()).error).toBe('invalid_grant');
+  });
+  it('narrows an authenticated OAuth request when its stored credential loses GIS before execution', async () => {
+    const db = database(); vi.stubEnv('CONTEXT_API_KEYS_JSON', '[]');
+    const stored = { id: 'console_11111111-1111-4111-8111-111111111111', employee_id: 19,
+      employee_email: key.employeeEmail, token_hash: key.hash, scopes: ['knowledge:read', 'gis:write'], expires_at: new Date(key.expiresAt) };
+    db.dbKeys.set(key.hash, stored);
+    const auth = await authorized(db, 'knowledge:read gis:write', 'knowledge:read gis:write');
+    const tokens = await (await exchange(db, auth)).json();
+    const heldKey = await authenticateMcpRequest(accessRequest(tokens.access_token), db.deps);
+    expect(heldKey.scopes).toContain('gis:write');
+    stored.scopes = ['knowledge:read', 'warehouses:read'];
+    // The OAuth grant still exists: source credential narrowing must be checked separately.
+    await revalidateMcpGrant(db.client, heldKey);
+    expect((await resolvePrincipal(db.client, heldKey)).scopes).toEqual(['knowledge:read']);
+    expect(heldKey.scopes).toEqual(['knowledge:read', 'gis:write']);
   });
   it('revokes only the matching public client family and rechecks grant state during later business transactions', async () => {
     const db = database(); const auth = await authorized(db); const tokens = await (await exchange(db, auth)).json();

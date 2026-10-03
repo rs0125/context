@@ -66,7 +66,7 @@ async function currentGrantKey(client: PoolClient, grant: Grant): Promise<KeyReg
   });
   if (principal.employeeId !== grant.employee_id || principal.email !== grant.employee_email) oauthFail('invalid_grant', 'Reconnect this connector.');
   const scopes = grant.scopes.filter(scope => current.scopes.includes(scope) && principal.scopes.includes(scope));
-  if (!scopes.length) oauthFail('invalid_grant', 'Employee read access is unavailable.');
+  if (!scopes.length) oauthFail('invalid_grant', 'Employee access is unavailable.');
   return { ...current, employeeId: principal.employeeId, scopes };
 }
 
@@ -197,7 +197,7 @@ async function approve(request: Request, deps: McpOAuthDependencies) {
     const key = await authenticateRequestKey(keyRequest, hash => findDatabaseKey(client, hash));
     const principal = await resolvePrincipal(client, key);
     const scopes = authorization.scopes.filter(scope => key.scopes.includes(scope) && principal.scopes.includes(scope));
-    if (!scopes.length) oauthFail('invalid_scope', 'This employee has none of the requested read permissions.', 403);
+    if (!scopes.length) oauthFail('invalid_scope', 'This employee has none of the requested permissions.', 403);
     deps.limit(`authorize:${key.id}`, 20);
     const lock = (await client.query('SELECT pg_try_advisory_xact_lock(1784056941, 1802406256) AS locked')).rows[0];
     if (!lock?.locked) oauthFail('temporarily_unavailable', 'Retry connector authorization shortly.', 503);
@@ -286,7 +286,7 @@ async function token(request: Request, deps: McpOAuthDependencies) {
     deps.limit(`token:${key.id}`, 120);
     if (values.scope !== undefined) {
       const requested = oauthScopes(values.scope);
-      if (requested.some(scope => !key.scopes.includes(scope))) oauthFail('invalid_scope', 'Refresh cannot increase read permissions.');
+      if (requested.some(scope => !key.scopes.includes(scope))) oauthFail('invalid_scope', 'Refresh cannot increase permissions.');
       key.scopes = requested;
     }
     await client.query('UPDATE context_mcp_private.oauth_tokens SET used_at = CURRENT_TIMESTAMP WHERE hash = $1', [hashOAuth(values.refresh_token)]);

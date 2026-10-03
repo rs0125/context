@@ -22,14 +22,16 @@ type CatalogTable = {
   indexes: { definition: string; valid: boolean; ready: boolean }[];
 };
 
-function existingCatalog(kind: 'console' | 'mcp', options: { wrongSignature?: boolean; privacy?: boolean } = {}) {
+function existingCatalog(kind: 'console' | 'mcp', options: { wrongSignature?: boolean; privacy?: boolean; analytics?: boolean } = {}) {
   const schema = kind === 'console' ? 'context_auth_private' : 'context_mcp_private';
   const schemaMarker = kind === 'console' ? 'context-console-auth-schema-v1' : 'context-mcp-oauth-schema-v1';
   const tableMarker = kind === 'console' ? 'context-console-employee-keys-v1:' : 'context-mcp-oauth-table-v1:';
   const signature = (table: CatalogTable) => createHash('sha256').update(JSON.stringify({
     columns: table.columns, constraints: table.constraints, ...(kind === 'mcp' ? { indexes: table.indexes } : {}),
   })).digest('hex');
-  const oldScopeCheck = "CHECK (cardinality(scopes) BETWEEN 1 AND 3 AND scopes <@ ARRAY['knowledge:read', 'warehouses:read', 'crm:read']::text[])";
+  const oldScopeCheck = options.analytics
+    ? "CHECK (cardinality(scopes) BETWEEN 1 AND 4 AND scopes <@ ARRAY['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read']::text[])"
+    : "CHECK (cardinality(scopes) BETWEEN 1 AND 3 AND scopes <@ ARRAY['knowledge:read', 'warehouses:read', 'crm:read']::text[])";
   const catalog = Object.entries(columns).filter(([name]) => kind === 'console' ? name === 'employee_api_keys' : name.startsWith('oauth_')).map(([name, fields], index) => {
     const suffixes = kind === 'console'
       ? ['pkey', 'employee_id_key', 'token_hash_key', 'id_check', 'employee_check', 'email_check', 'hash_check', 'cipher_check', 'expiry_check', 'scopes_check']
@@ -79,15 +81,16 @@ describe.each([
   { kind: 'console' as const, migrate: migrateConsoleStorage, upgraded: ['employee_api_keys'] },
   { kind: 'mcp' as const, migrate: migrateMcpOAuthStorage, upgraded: ['oauth_clients', 'oauth_grants'] },
 ])('$kind credential scope migration', ({ kind, migrate, upgraded }) => {
-  it('upgrades only verified locked scope constraints, preserves rows, and is idempotent', async () => {
-    const { client, queries, catalog } = existingCatalog(kind);
+  it.each([false, true])('upgrades only verified locked constraints, preserving rows and idempotency (analytics already present: %s)', async analytics => {
+    const { client, queries, catalog } = existingCatalog(kind, { analytics });
     await migrate(client);
     const statements = queries.mock.calls.map(([sql]) => sql);
     const alterations = statements.filter(sql => sql.startsWith('ALTER TABLE'));
     expect(alterations).toHaveLength(upgraded.length);
     for (const name of upgraded) {
       const alteration = alterations.find(sql => sql.includes(`.${name}`))!;
-      expect(alteration).toContain('BETWEEN 1 AND 4');
+      expect(alteration).toContain('BETWEEN 1 AND 5');
+      expect(alteration).toContain("'gis:write'");
       expect(alteration).toContain("'analytics:read'");
       expect(statements.findIndex(sql => sql.startsWith('LOCK TABLE'))).toBeLessThan(statements.indexOf(alteration));
       expect(catalog.find(table => table.name === name)!.constraints.find(constraint => constraint.name === `${name}_scopes_check`)!.definition).toContain('array_position(scopes, NULL) IS NULL');

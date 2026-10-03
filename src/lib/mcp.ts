@@ -2,7 +2,7 @@ import { createMcpHandler } from 'mcp-handler';
 import type { CallToolResult, McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { handleApiRequest } from './api';
-import { SCOPES, type KeyRegistration, type Scope } from './auth';
+import { READ_SCOPES, type KeyRegistration, type Scope } from './auth';
 import { consoleOrigin } from './console-auth';
 import { HttpError } from './errors';
 import { authenticateMcpRequest, revalidateMcpGrant } from './mcp-oauth';
@@ -17,7 +17,8 @@ import { promptText, toolPlatforms, type PromptValues, type ToolPlatform, type T
 import { loadPromptValues } from './prompts';
 import type { PoolClient } from 'pg';
 import { shortlistAssessmentQuerySchema, shortlistAssessmentOutput } from './shortlist-assessment';
-import { MCP_READ_CONTRACTS, readToolMetadata, requestReadBinding, type McpRequestBinding } from './mcp-read-contract';
+import { MCP_READ_CONTRACTS, readToolMetadata, requestReadBinding, type McpRequestBinding, type ReadToolName } from './mcp-read-contract';
+import { executeGisWrite, gisWriteAvailability, gisWriteInputSchema, gisWriteOutputSchema } from './gis-write';
 
 export { MCP_INSTRUCTIONS } from './prompt-definitions';
 
@@ -29,6 +30,7 @@ export type McpDependencies = {
   authenticationChallenge: string;
   // Set by the authenticated server entry point, never by request metadata.
   platform: ToolPlatform;
+  gisWrite: typeof executeGisWrite;
 };
 const annotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const analyticsCitationFields = new Set(['report', 'group', 'period', 'date_from', 'date_to', 'limit', 'data_state', 'compare_to', 'device']);
@@ -153,7 +155,7 @@ function warehouseSchema(catalog: readonly WarehouseFilterDefinition[] = WAREHOU
 }
 
 /** Each server is request-scoped: no employee identity or result lives in a shared MCP session. */
-function registerTools(server: McpServer, key: KeyRegistration, request: Request, read: McpDependencies['read'], prompts: PromptValues, revalidateKey: McpDependencies['revalidateKey'], platform: ToolPlatform, binding?: McpRequestBinding) {
+function registerTools(server: McpServer, key: KeyRegistration, request: Request, read: McpDependencies['read'], prompts: PromptValues, revalidateKey: McpDependencies['revalidateKey'], platform: ToolPlatform, gisWrite: McpDependencies['gisWrite'], binding?: McpRequestBinding) {
   const call = async (toolName: ToolPromptName, path: string[], args: Record<string, unknown> = {}, project?: (data: Record<string, unknown>) => Record<string, unknown>): Promise<CallToolResult> => {
     if (!binding || binding.toolName !== toolName) throw new HttpError(400, 'INVALID_REQUEST', 'MCP tool request binding is missing.');
     const url = new URL(`/api/v1/${path.map(encodeURIComponent).join('/')}`, consoleOrigin());
@@ -194,10 +196,22 @@ function registerTools(server: McpServer, key: KeyRegistration, request: Request
     return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result, ...(!response.ok ? { isError: true } : {}) };
   };
   const allowed = (scope: Scope) => key.scopes.includes(scope);
-  const registerTool = (name: ToolPromptName, register: (name: ToolPromptName) => void) => {
+  const registerTool = (name: ReadToolName, register: (name: ReadToolName) => void) => {
     if (MCP_READ_CONTRACTS[name].requiredScopes.every(allowed) && toolPlatforms(name, prompts).includes(platform)) register(name);
   };
-  registerTool('get_context', name => server.registerTool(name, { title: 'Available Wareongo context', description: promptText('tool.get_context', prompts), inputSchema: empty, outputSchema: output(z.object({ employee_id: z.number().int(), scopes: z.array(z.string()), read_only: z.literal(true), knowledge_discovery: z.object({ permitted: z.boolean(), status: z.enum(['not_checked', 'not_permitted']), index_path: z.string(), search_path: z.string() }), server_clock: clock }).passthrough()), annotations, _meta: readToolMetadata(name) }, () => call(name, ['context'])));
+  const gisAvailable = allowed('gis:write') && gisWriteAvailability().available && toolPlatforms('create_gis_poi', prompts).includes(platform);
+  registerTool('get_context', name => server.registerTool(name, { title: 'Available Wareongo context', description: promptText('tool.get_context', prompts), inputSchema: empty, outputSchema: output(z.object({ employee_id: z.number().int(), scopes: z.array(z.string()), read_only: z.boolean(), knowledge_discovery: z.object({ permitted: z.boolean(), status: z.enum(['not_checked', 'not_permitted']), index_path: z.string(), search_path: z.string() }), server_clock: clock }).passthrough()), annotations, _meta: readToolMetadata(name) }, () => call(name, ['context'], {}, data => ({ ...data, read_only: !(gisAvailable && Array.isArray(data.scopes) && data.scopes.includes('gis:write')), write_capabilities: gisAvailable && Array.isArray(data.scopes) && data.scopes.includes('gis:write') ? ['create_gis_poi'] : [] }))));
+  if (gisAvailable) server.registerTool('create_gis_poi', {
+    title: 'Create a GIS point of interest', description: promptText('tool.create_gis_poi', prompts),
+    inputSchema: gisWriteInputSchema, outputSchema: gisWriteOutputSchema,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    _meta: { 'wareongo/context-write-v1': { requiredScopes: ['gis:write'], sourceFamily: 'gis', effect: 'create', idempotencyArgument: 'operation_id' } },
+  }, async args => {
+    if (binding?.toolName !== 'create_gis_poi') throw new HttpError(400, 'INVALID_REQUEST', 'MCP tool request binding is missing.');
+    const result = await gisWrite(args, key, request.signal, revalidateKey);
+    const success = result.outcome === 'created' || result.outcome === 'replayed';
+    return { content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result, ...(!success ? { isError: true } : {}) };
+  });
   if (allowed('analytics:read')) {
     registerTool('analytics_capabilities', name => server.registerTool(name, { title: 'Discover website analytics', description: promptText('tool.analytics_capabilities', prompts),
       inputSchema: empty, outputSchema: output(analyticsCapabilitiesOutput), annotations, _meta: readToolMetadata(name) }, () => call(name, ['analytics', 'capabilities'])));
@@ -282,8 +296,8 @@ export async function handleMcpRequest(request: Request, overrides: Partial<McpD
     const body = await boundedBody(request);
     const binding = requestReadBinding(body);
     const prompts = await (overrides.prompts ?? loadPromptValues)();
-    const handler = createMcpHandler(server => registerTools(server, key, request, overrides.read ?? handleApiRequest, prompts, overrides.revalidateKey ?? revalidateMcpGrant, overrides.platform ?? 'claude', binding), {
-      serverInfo: { name: 'wareongo-context', version: '0.6.0' }, instructions: `${promptText('mcp', prompts)} ${promptText('analytics', prompts)}`,
+    const handler = createMcpHandler(server => registerTools(server, key, request, overrides.read ?? handleApiRequest, prompts, overrides.revalidateKey ?? revalidateMcpGrant, overrides.platform ?? 'claude', overrides.gisWrite ?? executeGisWrite, binding), {
+      serverInfo: { name: 'wareongo-context', version: '0.7.0' }, instructions: `${promptText('mcp', prompts)} ${promptText('analytics', prompts)} Capability boundary: only the currently advertised tools are available. If create_gis_poi is advertised, it is a separately authorized write, not a read. Use it only for an explicit save request. Retain its operation_id and unchanged arguments for any recovery; outcome_unknown never means that no point was created. Read verification must never invoke a write.`,
       maxSubscriptions: 0, verboseLogs: false,
     });
     const response = await handler(new Request(request.url, { method: 'POST', headers: request.headers, body, signal: request.signal }));
@@ -291,7 +305,7 @@ export async function handleMcpRequest(request: Request, overrides: Partial<McpD
     return response;
   } catch (error) {
     const safe = error instanceof HttpError ? error : new HttpError(503, 'MCP_UNAVAILABLE', 'The context connector is temporarily unavailable.');
-    if (safe.status === 401) headers.set('WWW-Authenticate', overrides.authenticationChallenge ?? `Bearer resource_metadata="${consoleOrigin()}/.well-known/oauth-protected-resource", scope="${SCOPES.join(' ')}"`);
+    if (safe.status === 401) headers.set('WWW-Authenticate', overrides.authenticationChallenge ?? `Bearer resource_metadata="${consoleOrigin()}/.well-known/oauth-protected-resource", scope="${READ_SCOPES.join(' ')}"`);
     if (safe.status === 405) headers.set('Allow', 'POST, OPTIONS');
     if ([429, 503].includes(safe.status)) headers.set('Retry-After', safe.status === 429 ? '60' : '10');
     return Response.json({ error: { code: safe.code, message: safe.message } }, { status: safe.status, headers });

@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { HttpError } from './errors';
-import { SCOPES, type Scope } from './auth';
+import { READ_SCOPES, SCOPES, type Scope } from './auth';
 import { consoleSecret, requireConsoleWrites, type ConsoleIdentity } from './console-auth';
 
 export type ConsoleKey = { id: string; token: string; expiresAt: string; scopes: Scope[] };
@@ -63,13 +63,16 @@ export async function rotateOwnConsoleKey(client: PoolClient, identity: ConsoleI
   const hash = createHash('sha256').update(token).digest('hex');
   const encrypted = encryptConsoleKey(token, id, identity);
   const expiresAt = new Date(now + KEY_LIFETIME_MS).toISOString();
+  // Rotation creates a new credential. This console flow grants reads only;
+  // adding an eligible write scope must never make default issuance destructive.
+  const scopes = identity.scopes.filter(scope => (READ_SCOPES as readonly Scope[]).includes(scope));
   const { rows } = await client.query<StoredKey>(`INSERT INTO context_auth_private.employee_api_keys
     (id, employee_id, employee_email, token_hash, encrypted_token, scopes, expires_at)
     VALUES ($1, $2, $3, $4, $5, $6::text[], $7::timestamptz)
     ON CONFLICT (employee_id) DO UPDATE SET id = EXCLUDED.id, employee_email = EXCLUDED.employee_email,
       token_hash = EXCLUDED.token_hash, encrypted_token = EXCLUDED.encrypted_token,
       scopes = EXCLUDED.scopes, expires_at = EXCLUDED.expires_at, created_at = CURRENT_TIMESTAMP
-    RETURNING ${FIELDS}`, [id, identity.employeeId, identity.email, hash, encrypted, identity.scopes, expiresAt]);
+    RETURNING ${FIELDS}`, [id, identity.employeeId, identity.email, hash, encrypted, scopes, expiresAt]);
   if (rows.length !== 1) throw new HttpError(503, 'CONSOLE_KEY_INVALID', 'The saved key could not be verified.');
   const result = keyResponse(rows[0], identity, now);
   if (!result || result.token !== token) throw new HttpError(503, 'CONSOLE_KEY_INVALID', 'The saved key could not be verified.');

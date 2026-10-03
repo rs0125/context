@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { SCOPES, type Scope } from './auth';
+import { READ_SCOPES, SCOPES, type Scope } from './auth';
 import { consoleOrigin, consoleSecret } from './console-auth';
 import { HttpError } from './errors';
 
@@ -25,12 +25,12 @@ export class OAuthError extends Error {
 export function oauthFail(error = 'invalid_request', description = 'The authorization request is invalid.', status = 400): never {
   throw new OAuthError(error, description, status);
 }
-export function oauthScopes(value: unknown, fallback: readonly Scope[] = SCOPES): Scope[] {
+export function oauthScopes(value: unknown, fallback: readonly Scope[] = READ_SCOPES): Scope[] {
   if (value === undefined || value === null) return [...fallback];
-  if (typeof value !== 'string' || value.length > 100) oauthFail('invalid_scope', 'Only supported read scopes are available.');
+  if (typeof value !== 'string' || value.length > 100) oauthFail('invalid_scope', 'Only supported scopes are available.');
   const scopes = value.split(' ');
   if (!scopes.length || scopes.length > SCOPES.length || new Set(scopes).size !== scopes.length || scopes.some(scope => !SCOPES.includes(scope as Scope))) {
-    oauthFail('invalid_scope', 'Only supported read scopes are available.');
+    oauthFail('invalid_scope', 'Only supported scopes are available.');
   }
   return scopes as Scope[];
 }
@@ -166,5 +166,5 @@ export function authorizationServerMetadata() {
     token_endpoint_auth_methods_supported: ['none'], revocation_endpoint_auth_methods_supported: ['none'], code_challenge_methods_supported: ['S256'], scopes_supported: [...SCOPES] };
 }
 export function protectedResourceMetadata() {
-  return { resource: mcpResource(), resource_name: 'Wareongo read-only context', authorization_servers: [consoleOrigin()], scopes_supported: [...SCOPES], bearer_methods_supported: ['header'] };
+  return { resource: mcpResource(), resource_name: 'Wareongo context and authorized actions', authorization_servers: [consoleOrigin()], scopes_supported: [...SCOPES], bearer_methods_supported: ['header'] };
 }

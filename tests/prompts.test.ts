@@ -52,7 +52,7 @@ describe('persistent prompt editing', () => {
     const { client, query } = setup([], false);
     const result = await readPrompts(client);
     expect(result.storageReady).toBe(false);
-    expect(result.prompts).toHaveLength(20);
+    expect(result.prompts).toHaveLength(21);
     expect(result.prompts.every(prompt => prompt.body === prompt.defaultBody && prompt.revision === null && !prompt.customized)).toBe(true);
     expect(query).toHaveBeenCalledOnce();
   });
@@ -101,7 +101,7 @@ describe('persistent prompt editing', () => {
     expect(renderRestPrompt(`${origin}/api/v1/`, '{{apiBaseUrl}}/context {{apiBaseUrl}}/openapi.json ${secret}')).toBe(`${origin}/api/v1/context ${origin}/api/v1/openapi.json ${'${secret}'}`);
     expect(renderRestPrompt(`${origin}/api/v1`)).not.toContain('{{apiBaseUrl}}');
     expect(REST_PROMPT_TEMPLATE).toContain('{{apiBaseUrl}}');
-    expect(new Set(PROMPT_DEFINITIONS.map(prompt => prompt.id)).size).toBe(20);
+    expect(new Set(PROMPT_DEFINITIONS.map(prompt => prompt.id)).size).toBe(21);
   });
   it('persists platform-only edits, preserves them for older editors, and restores defaults with revision protection', async () => {
     const { client, records } = setup();
@@ -195,7 +195,8 @@ describe('MCP uses the saved prompt configuration', () => {
   it('sends edited main and analytics instructions on initialization', async () => {
     const { result } = await rpc('initialize', { mcp: 'Workspace instructions.', analytics: 'Analytics instructions.' },
       { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'prompt-test', version: '1.0' } });
-    expect(result.instructions).toBe('Workspace instructions. Analytics instructions.');
+    expect(result.instructions).toContain('Workspace instructions. Analytics instructions.');
+    expect(result.instructions).toContain('Read verification must never invoke a write.');
   });
   it('refreshes edited tool descriptions and keeps scopes, schemas and read-only annotations', async () => {
     const { result } = await rpc('tools/list', { 'tool.search_knowledge': 'Updated guidance search.', 'tool.ga4_report': 'Hidden analytics.' });

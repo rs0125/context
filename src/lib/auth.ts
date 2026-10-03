@@ -5,7 +5,9 @@ import { HttpError } from './errors';
 import { checkFailedCredential, noteFailedCredential } from './rate-limit';
 import { hasAnalystAccess, readRosterEmployees } from './employee-access';
 
-export const SCOPES = ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read'] as const;
+export const READ_SCOPES = ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read'] as const;
+/** Supported permissions are not defaults: writes always need an explicit credential grant. */
+export const SCOPES = [...READ_SCOPES, 'gis:write'] as const;
 export type Scope = typeof SCOPES[number];
 export type Principal = { employeeId: number; email: string; scopes: Scope[]; keyId: string; twentyUserId?: string | null; isAnalyst: boolean };
 const registration = z.object({
@@ -30,6 +32,13 @@ export function rosterReadScopes(employee: RosterAccess): Scope[] {
   if (employee.dashboardAccess === true || employee.adminAccess === true) scopes.push('warehouses:read');
   if (hasAnalystAccess(employee) || rosterTwentyUserId(employee)) scopes.push('crm:read');
   if (hasAnalystAccess(employee)) scopes.push('analytics:read');
+  return scopes;
+}
+
+/** Current application eligibility; intersect with the credential's explicit scopes before use. */
+export function rosterScopes(employee: RosterAccess): Scope[] {
+  const scopes = rosterReadScopes(employee);
+  if (employee.dashboardAccess === true || employee.adminAccess === true) scopes.push('gis:write');
   return scopes;
 }
 
@@ -101,14 +110,18 @@ export async function resolvePrincipal(client: PoolClient, key: KeyRegistration)
   // Environment credentials have no database expiry predicate to enforce this.
   const expiresAt = Date.parse(key.expiresAt);
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new HttpError(401, 'UNAUTHORIZED', 'A valid employee API key is required.');
+  let credentialScopes = key.scopes;
   if (key.source === 'database') {
     if (process.env.CONTEXT_CONSOLE_WRITES_ENABLED !== 'true' || !key.employeeId) throw new HttpError(401, 'UNAUTHORIZED', 'A valid employee API key is required.');
-    // Recheck inside each business-read transaction, including after a live CRM
-    // authorization request, so rotation during that gap revokes the old key.
-    const current = await client.query(`SELECT id FROM context_auth_private.employee_api_keys
+    // Recheck inside each source transaction: rotation invalidates the key,
+    // while an in-place scope removal narrows this already authenticated request.
+    const current = await client.query<{ id: string; scopes: unknown }>(`SELECT id, scopes FROM context_auth_private.employee_api_keys
       WHERE id = $1 AND token_hash = $2 AND employee_id = $3 AND employee_email = $4
         AND expires_at > CURRENT_TIMESTAMP LIMIT 1`, [key.id, key.hash, key.employeeId, key.employeeEmail]);
     if (current.rows.length !== 1) throw new HttpError(401, 'UNAUTHORIZED', 'A valid employee API key is required.');
+    const storedScopes = registration.shape.scopes.safeParse(current.rows[0].scopes);
+    if (!storedScopes.success) throw new HttpError(401, 'UNAUTHORIZED', 'A valid employee API key is required.');
+    credentialScopes = key.scopes.filter(scope => storedScopes.data.includes(scope));
   }
   // Old environment registrations are pinned once by the security migration.
   // Never bind at request time: a reused email must not inherit an old token.
@@ -127,8 +140,8 @@ export async function resolvePrincipal(client: PoolClient, key: KeyRegistration)
   if (rows.length !== 1 || !employee || employee.is_active !== true || !Number.isSafeInteger(employee.id) || employee.id <= 0
     || typeof employee.email !== 'string' || employee.email.toLowerCase() !== key.employeeEmail
     || employee.id !== employeeId) throw new HttpError(403, 'EMPLOYEE_INACTIVE', 'Employee access is unavailable.');
-  const currentScopes = rosterReadScopes(employee);
-  const scopes = key.scopes.filter(scope => currentScopes.includes(scope));
+  const currentScopes = rosterScopes(employee);
+  const scopes = credentialScopes.filter(scope => currentScopes.includes(scope));
   return { employeeId: employee.id, email: employee.email.toLowerCase(), scopes, keyId: key.id,
     twentyUserId: rosterTwentyUserId(employee), isAnalyst: hasAnalystAccess(employee) };
 }

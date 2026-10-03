@@ -10,6 +10,12 @@ export const READ_SCOPE_OPTIONS = [
   { value: 'analytics:read', label: 'Website analytics' },
 ] as const;
 
+/** Explicit OAuth consent vocabulary; console key issuance still defaults to reads only. */
+export const AGENT_SCOPE_OPTIONS = [
+  ...READ_SCOPE_OPTIONS,
+  { value: 'gis:write', label: 'Create GIS points' },
+] as const;
+
 export type Employee = { email: string; name: string; isAdmin: boolean; isAnalyst: boolean; scopes: string[] };
 export type ConsoleSession = { employee: Employee; apiBaseUrl: string; restPromptTemplate?: string; capabilities?: { writesEnabled: boolean } };
 export type PersonalKey = { id: string; token: string; expiresAt: string; scopes: string[] };

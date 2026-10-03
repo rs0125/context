@@ -1,5 +1,5 @@
 import { ConsoleApiError } from '@/components/console/helpers';
-import { READ_SCOPE_OPTIONS } from '@/components/console/types';
+import { AGENT_SCOPE_OPTIONS } from '@/components/console/types';
 import type { ConsentDetails } from './consent-view';
 
 export type AuthorizationPreview = ConsentDetails & { requestHandle: string };
@@ -31,7 +31,7 @@ export function readAuthorizationPreview(value: unknown, currentOrigin: string):
   if (!value || typeof value !== 'object') throw new Error('Invalid authorization response');
   const data = value as Record<string, unknown>;
   if (typeof data.requestHandle !== 'string' || !data.requestHandle || typeof data.clientName !== 'string' || !data.clientName.trim()
-    || !Array.isArray(data.requestedScopes) || !data.requestedScopes.length || data.requestedScopes.some(scope => !READ_SCOPE_OPTIONS.some(option => option.value === scope))) {
+    || !Array.isArray(data.requestedScopes) || !data.requestedScopes.length || data.requestedScopes.some(scope => !AGENT_SCOPE_OPTIONS.some(option => option.value === scope))) {
     throw new Error('Invalid authorization response');
   }
   const clientOrigin = safeUrl(data.clientOrigin).origin;

@@ -20,6 +20,17 @@ beforeEach(() => { vi.stubEnv('CONTEXT_KEY_ENCRYPTION_SECRET', secret); vi.stubE
 afterEach(() => vi.unstubAllEnvs());
 
 describe('employee-bound encrypted console keys', () => {
+  it('new console rotation remains read-only even if its caller has explicit GIS eligibility', async () => {
+    const query = vi.fn(async (_sql: string, values: unknown[]) => {
+      const [id, employee_id, employee_email, token_hash, encrypted_token, scopes, expires_at] = values;
+      return { rows: [{ id, employee_id, employee_email, token_hash, encrypted_token, scopes, expires_at }] };
+    });
+    const result = await rotateOwnConsoleKey({ query } as unknown as PoolClient,
+      { ...identity, scopes: [...identity.scopes, 'gis:write'] }, now);
+    expect(result.scopes).toEqual(identity.scopes);
+    expect(query.mock.calls[0][1][5]).not.toContain('gis:write');
+  });
+
   it.each([{ adminAccess: true, analystAccess: false }, { adminAccess: false, analystAccess: true }, { adminAccess: false, analystAccess: false }])('issues analytics only with current Analyst access (%j)', async ({ adminAccess, analystAccess }) => {
     const query = vi.fn(async (sql: string, values: unknown[]) => {
       if (sql.includes('FROM public."VerifiedNumber"')) return { rows: [{ id: 7, email: identity.email, name: identity.name,
@@ -132,8 +143,15 @@ describe('database-backed business bearer keys', () => {
 
   it('never follows a reassigned email to a different employee record', async () => {
     const key = await findDatabaseKey(database([row()]).client, hash, now);
-    const query = vi.fn().mockResolvedValueOnce({ rows: [{ id }] }).mockResolvedValueOnce({ rows: [{ id: 8, email: identity.email, is_active: true, dashboardAccess: true, adminAccess: true, twenty_user_id: null }] });
+    const query = vi.fn().mockResolvedValueOnce({ rows: [{ id, scopes: identity.scopes }] }).mockResolvedValueOnce({ rows: [{ id: 8, email: identity.email, is_active: true, dashboardAccess: true, adminAccess: true, twenty_user_id: null }] });
     await expect(resolvePrincipal({ query } as unknown as PoolClient, key!)).rejects.toMatchObject({ status: 403 });
+  });
+
+  it.each([undefined, [], ['knowledge:read', 'unknown:write'], ['knowledge:read', 'knowledge:read']])('rejects malformed current credential scopes (%j)', async scopes => {
+    const key = await findDatabaseKey(database([row()]).client, hash, now);
+    const { client, query } = database([{ id, scopes }]);
+    await expect(resolvePrincipal(client, key!)).rejects.toMatchObject({ status: 401 });
+    expect(query).toHaveBeenCalledTimes(1);
   });
 
   it('keeps valid database keys usable after more than120 unrelated invalid credentials', async () => {

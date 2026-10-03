@@ -32,6 +32,13 @@ describe('authorization request and preview', () => {
     expect(() => readAuthorizationPreview({ ...previewResponse, requestedScopes: [...requestedScopes, 'analytics:write'] }, currentOrigin)).toThrow();
   });
 
+  it('accepts only the explicitly supported GIS action in the authorization preview', () => {
+    expect(readAuthorizationPreview({ ...previewResponse, requestedScopes: ['knowledge:read', 'gis:write'] }, currentOrigin).scopes)
+      .toEqual(['knowledge:read', 'gis:write']);
+    for (const scope of ['crm:write', 'warehouses:write', 'gis:delete'])
+      expect(() => readAuthorizationPreview({ ...previewResponse, requestedScopes: [scope] }, currentOrigin)).toThrow();
+  });
+
   it('allows localhost only over HTTP and rejects insecure public callback addresses', () => {
     expect(readAuthorizationPreview({ ...previewResponse, clientOrigin: 'http://localhost:4000', redirectOrigin: 'http://localhost:4000', redirectUri: 'http://localhost:4000/callback', resource: 'http://localhost:3100/mcp' }, 'http://localhost:3100').redirectOrigin).toBe('http://localhost:4000');
     expect(() => readAuthorizationPreview({ ...previewResponse, clientOrigin: 'http://client.example.test' }, currentOrigin)).toThrow();

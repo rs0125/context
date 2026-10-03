@@ -443,7 +443,7 @@ describe('CRM related context integration', () => {
       const original = deps.query.getMockImplementation()!;
       let revoked = false;
       deps.query.mockImplementation(async (sql, values) => sql.includes('context_auth_private.employee_api_keys')
-        ? { rows: revoked ? [] : [{ id: key.id }] } : original(sql, values));
+        ? { rows: revoked ? [] : [{ id: key.id, scopes: key.scopes }] } : original(sql, values));
       deps.relatedCrmContext.mockImplementationOnce(async () => { revoked = true; return deps.payload; });
       const result = await handleApiRequest(request(`${route}?section=notes`), path, deps);
       expect(result.status).toBe(401);
