@@ -4,13 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { consoleCookie, createConsoleSession, readSignedConsoleValue, signedConsoleValue, type ConsoleIdentity } from '../src/lib/console-auth';
 import { GMAIL_COMPOSE_SCOPE } from '../src/lib/gmail-client';
 import { GMAIL_CALLBACK_PATH, gmailAvailability, handleGmailCallback, handleGmailConnect, handleGmailConnection, handleGmailDisconnect, refreshGmailAccessToken } from '../src/lib/gmail-oauth';
-import { completeGmailDisconnect, encryptGmailSecret, getGmailConnection, saveGmailConnection, disconnectGmailConnection, type GmailConnection } from '../src/lib/gmail-storage';
+import { completeGmailDisconnect, encryptGmailSecret, getGmailConnection, quarantineGmailIssuedToken, saveGmailConnection, disconnectGmailConnection, type GmailConnection } from '../src/lib/gmail-storage';
 import { HttpError } from '../src/lib/errors';
 import type { withReadOnlyTransaction } from '../src/lib/db';
 
 vi.mock('../src/lib/gmail-storage', async importOriginal => {
   const original = await importOriginal<typeof import('../src/lib/gmail-storage')>();
-  return { ...original, getGmailConnection: vi.fn(), saveGmailConnection: vi.fn(), disconnectGmailConnection: vi.fn(), completeGmailDisconnect: vi.fn() };
+  return { ...original, getGmailConnection: vi.fn(), saveGmailConnection: vi.fn(), disconnectGmailConnection: vi.fn(), completeGmailDisconnect: vi.fn(), quarantineGmailIssuedToken: vi.fn() };
 });
 const origin = 'https://context.example.test';
 const clientId = 'draft-client.apps.googleusercontent.com';
@@ -37,6 +37,7 @@ beforeEach(() => {
   connection.encryptedRefreshToken = encryptGmailSecret(refreshToken, { purpose: 'refresh_token', employeeId: 7, id: connection.id });
   vi.mocked(getGmailConnection).mockReset().mockResolvedValue(null);
   vi.mocked(saveGmailConnection).mockReset().mockResolvedValue(connection);
+  vi.mocked(quarantineGmailIssuedToken).mockReset().mockResolvedValue('covered');
   vi.mocked(disconnectGmailConnection).mockReset().mockResolvedValue({ ...connection, version: 5, status: 'disconnected', encryptedRefreshToken: null });
   vi.mocked(completeGmailDisconnect).mockReset().mockImplementation(async (_client, _owner, revoke) => {
     await revoke({ ...connection, version: 5, status: 'revoking' });
@@ -336,5 +337,60 @@ describe('mailbox connection visibility and disconnect', () => {
     expect((await handleGmailDisconnect(request('/api/mail/connection', 'POST', sessionCookie(), 'https://evil.test'), d)).status).toBe(403);
     expect(disconnectGmailConnection).not.toHaveBeenCalled();
     expect(d.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('cleanup of verified tokens that cannot be attached', () => {
+  it('quarantines and revokes an issued token after connection persistence fails', async () => {
+    const { callback, dependencies: d } = await start();
+    vi.mocked(saveGmailConnection).mockRejectedValue(new Error('synthetic database failure'));
+    vi.mocked(quarantineGmailIssuedToken).mockResolvedValue('pending');
+    expectFailure(await handleGmailCallback(callback(), d), 'unavailable');
+    expect(quarantineGmailIssuedToken).toHaveBeenCalledWith(expect.anything(), { employeeId: 7, employeeEmail: email }, expect.objectContaining({ googleSub, refreshToken }));
+    expect(d.fetch.mock.calls.map(([url]) => url)).toEqual(['https://oauth2.googleapis.com/token', 'https://oauth2.googleapis.com/revoke']);
+    expect(completeGmailDisconnect).toHaveBeenCalledTimes(1);
+  });
+  it('does not revoke a current active connection that covers the same Google grant', async () => {
+    const { callback, dependencies: d } = await start();
+    vi.mocked(saveGmailConnection).mockRejectedValue(new HttpError(409, 'GMAIL_CONNECTION_CHANGED', 'Connection changed.'));
+    vi.mocked(quarantineGmailIssuedToken).mockResolvedValue('covered');
+    expectFailure(await handleGmailCallback(callback(), d), 'changed');
+    expect(completeGmailDisconnect).not.toHaveBeenCalled();
+    expect(d.fetch).toHaveBeenCalledTimes(1);
+  });
+  it('accepts cleanup already completed by another worker without revoking again', async () => {
+    const { callback, dependencies: d } = await start();
+    vi.mocked(saveGmailConnection).mockRejectedValue(new HttpError(409, 'GMAIL_CONNECTION_CHANGED', 'Connection changed.'));
+    vi.mocked(quarantineGmailIssuedToken).mockResolvedValue('pending');
+    vi.mocked(completeGmailDisconnect).mockResolvedValue({ ...connection, status: 'disconnected', encryptedRefreshToken: null });
+    expectFailure(await handleGmailCallback(callback(), d), 'changed');
+    expect(d.fetch).toHaveBeenCalledTimes(1);
+  });
+  it.each(['database', 'incompatible_subject'])('surfaces manual Google cleanup when safe quarantine is unavailable: %s', async mode => {
+    const { callback, dependencies: d } = await start();
+    vi.mocked(saveGmailConnection).mockRejectedValue(new Error('synthetic save failure'));
+    if (mode === 'database') vi.mocked(quarantineGmailIssuedToken).mockRejectedValue(new Error('still unavailable'));
+    else vi.mocked(quarantineGmailIssuedToken).mockResolvedValue('manual');
+    expectFailure(await handleGmailCallback(callback(), d), 'cleanup_required');
+    expect(completeGmailDisconnect).not.toHaveBeenCalled();
+    expect(d.fetch).toHaveBeenCalledTimes(1);
+  });
+  it('keeps a durable pending revocation and reports retry when Google cleanup fails', async () => {
+    const { callback, dependencies: d } = await start();
+    vi.mocked(saveGmailConnection).mockRejectedValue(new Error('synthetic save failure'));
+    vi.mocked(quarantineGmailIssuedToken).mockResolvedValue('pending');
+    d.fetch.mockImplementationOnce(async () => Response.json({ access_token: accessToken, refresh_token: refreshToken, id_token: 'synthetic-id-token', token_type: 'Bearer', scope: `openid email ${GMAIL_COMPOSE_SCOPE}` }))
+      .mockRejectedValueOnce(new Error('synthetic network failure'));
+    expectFailure(await handleGmailCallback(callback(), d), 'disconnect_pending');
+    expect(completeGmailDisconnect).toHaveBeenCalledTimes(1);
+  });
+  it('cleans up after offboarding or browser logout without reauthorizing the expired employee session', async () => {
+    for (const mode of ['inactive', 'logout']) {
+      const { callback, dependencies: d } = await start();
+      vi.mocked(quarantineGmailIssuedToken).mockResolvedValue('pending');
+      d.verify.mockImplementation(async () => { if (mode === 'inactive') d.deactivate(); else d.revoke(); return { email, sub: googleSub }; });
+      expectFailure(await handleGmailCallback(callback(), d), mode === 'inactive' ? 'denied' : 'expired');
+      expect(d.fetch).toHaveBeenCalledTimes(2);
+    }
   });
 });

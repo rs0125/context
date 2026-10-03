@@ -38,7 +38,7 @@ function harness() {
     try { return await work(client); } finally { state.sockets--; }
   };
   const draft: GmailDraft = { id: operation.draftId!, messageId: operation.messageId!, threadId: null, operationId: operation.operationId,
-    internetMessageId: null, subject: 'Warehouse options', to: [], cc: [], body, bodyTruncated: false, bodyFormat: 'text' };
+    internetMessageId: null, subject: 'Warehouse options', to: [], cc: [], bcc: [], body, bodyTruncated: false, bodyFormat: 'text' };
   const getDraft = vi.fn(async () => { expect(state.sockets).toBe(0); return draft; });
   const refresh = vi.fn(async () => { expect(state.sockets).toBe(0); return 'synthetic-access-token'; });
   const lookup = vi.fn(async () => structuredClone(operation));
@@ -115,15 +115,54 @@ describe('employee-owned Gmail draft REST reads', () => {
   });
 
   it.each([
-    ['revoking', 'GMAIL_REVOCATION_PENDING', 409],
-    ['needs_reauth', 'GMAIL_RECONNECT_REQUIRED', 401],
-  ] as const)('reports actionable %s state without provider access', async (status, code, httpStatus) => {
+    ['revoking', 'GMAIL_REVOCATION_PENDING', 'finish_gmail_disconnect'],
+    ['needs_reauth', 'GMAIL_RECONNECT_REQUIRED', 'reconnect_gmail'],
+  ] as const)('reports actionable %s state without challenging the Context grant', async (status, code, action) => {
     const h = harness(); h.connection.status = status;
     const response = await h.request(`mail/drafts/${h.operation.operationId}`);
-    expect(response.status).toBe(httpStatus);
-    expect((await response.json()).error.code).toBe(code);
+    expect(response.status).toBe(409);
+    expect(response.headers.has('WWW-Authenticate')).toBe(false);
+    expect(response.headers.has('Retry-After')).toBe(false);
+    expect((await response.json()).error).toMatchObject({ code, domain: 'gmail', recovery: { retryable: false, action, guidance: expect.any(String) } });
     expect(h.getDraft).not.toHaveBeenCalled();
     expect(h.refresh).not.toHaveBeenCalled();
+    // The connection read remains usable to obtain the reconnect URL.
+    expect((await (await h.request('mail/connection')).json()).data.connect_url).toBe(`${origin}/mail`);
+  });
+
+  it('preserves the actual Context grant challenge on a Gmail route', async () => {
+    const h = harness();
+    h.deps.revalidateKey.mockRejectedValue(new HttpError(401, 'UNAUTHORIZED', 'The Context grant has expired.'));
+    const response = await h.request(`mail/drafts/${h.operation.operationId}`);
+    expect(response.status).toBe(401);
+    expect(response.headers.get('WWW-Authenticate')).toBe('Bearer realm="wareongo-context"');
+    expect((await response.json()).error).toEqual({ code: 'UNAUTHORIZED', message: 'The Context grant has expired.' });
+    expect(h.refresh).not.toHaveBeenCalled();
+  });
+
+  it('does not downgrade employee denial because its code belongs to Gmail', async () => {
+    const h = harness();
+    h.deps.revalidateKey.mockRejectedValue(new HttpError(403, 'GMAIL_EMPLOYEE_CHANGED', 'Employee access changed.'));
+    const response = await h.request('mail/connection');
+    expect(response.status).toBe(403);
+    expect((await response.json()).error).not.toHaveProperty('domain');
+  });
+
+  it.each([
+    ['GMAIL_AUTH_REQUIRED', 409, 'reconnect_gmail'],
+    ['GMAIL_ACCESS_DENIED', 503, 'check_google_access'],
+    ['GMAIL_NOT_FOUND', 404, 'check_gmail_draft'],
+    ['GMAIL_RESPONSE_TOO_LARGE', 503, 'check_gmail_draft'],
+  ] as const)('returns source recovery for %s instead of a blind retry', async (code, status, action) => {
+    const h = harness();
+    h.getDraft.mockRejectedValue(new GmailClientError(code));
+    const response = await h.request(`mail/drafts/${h.operation.operationId}`);
+    expect(response.status).toBe(status);
+    expect(response.headers.has('WWW-Authenticate')).toBe(false);
+    expect(response.headers.has('Retry-After')).toBe(false);
+    const result = await response.json();
+    expect(result.error).toMatchObject({ code, domain: 'gmail', recovery: { retryable: false, action } });
+    expect(result).not.toHaveProperty('data');
   });
 
   it.each(['mail/connection', 'mail/drafts', 'draft'] as const)('rejects disabled, unscoped or inactive %s access before storage or Gmail', async route => {
@@ -218,7 +257,7 @@ describe('employee-owned Gmail draft REST reads', () => {
       if (change === 'scope') h.key.scopes = ['knowledge:read'];
       if (change === 'grant') h.deps.revalidateKey.mockRejectedValue(new HttpError(401, 'UNAUTHORIZED', 'Reconnect.'));
       return { id: 'synthetic-draft-id', messageId: 'synthetic-message-id', threadId: null, operationId: h.operation.operationId,
-        internetMessageId: null, subject: 'Warehouse options', to: [], cc: [], body, bodyTruncated: false, bodyFormat: 'text' };
+        internetMessageId: null, subject: 'Warehouse options', to: [], cc: [], bcc: [], body, bodyTruncated: false, bodyFormat: 'text' };
     });
     const response = await h.request(`mail/drafts/${h.operation.operationId}`);
     expect([401, 403, 409]).toContain(response.status);

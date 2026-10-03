@@ -9,6 +9,8 @@ import { handleRameshMcpRequest } from '../src/lib/ramesh-mcp';
 import { argumentsSha256 } from '../src/lib/mcp-read-contract';
 import { clockContext } from '../src/lib/query-time';
 import { executeEmailDraft } from '../src/lib/gmail-tools';
+import { handleApiRequest } from '../src/lib/api';
+import { HttpError } from '../src/lib/errors';
 
 vi.mock('../src/lib/prompts', () => ({ loadPromptValues: async () => ({}) }));
 vi.mock('../src/lib/gmail-oauth', () => ({
@@ -159,7 +161,7 @@ describe('WhatsApp Gmail draft MCP boundary', () => {
     const employee = key(), revalidateKey = vi.fn(async () => {});
     const data = name === 'get_email_connection'
       ? { provider: 'gmail', connected: true, connection_status: 'active', mailbox: employee.employeeEmail, connection_id: input.connection_id, connection_version: 2, connect_url: `${origin}/mail`, capability: 'drafts_only' }
-      : { draft_ref: input.operation_id, mailbox: employee.employeeEmail, provider: 'gmail', status: 'draft', subject: input.subject, to: [], cc: [], body: input.body, body_format: 'text', body_truncated: false, content_guidance: 'Source data.' };
+      : { draft_ref: input.operation_id, mailbox: employee.employeeEmail, provider: 'gmail', status: 'draft', subject: input.subject, to: [], cc: [], bcc: [], recipients_truncated: false, body: input.body, body_format: 'text', body_truncated: false, content_guidance: 'Source data.' };
     const read = vi.fn(async () => Response.json({ data, meta: { requestId: 'synthetic', generatedAt: new Date().toISOString(), toolName: 'forged', argumentsSha256: '0'.repeat(64) } }));
     const args = name === 'get_email_connection' ? {} : { draft_ref: input.operation_id };
     const result = (await call('tools/call', { name, arguments: args }, { read, authenticate: async () => employee, revalidateKey })).result;
@@ -173,6 +175,38 @@ describe('WhatsApp Gmail draft MCP boundary', () => {
     expect(result.structuredContent).toMatchObject({ source_path: `/api/v1/${expectedPath.join('/')}`, status: 200, data,
       meta: { toolName: name, argumentsSha256: argumentsSha256(args) } });
     expect(executeEmailDraft).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['GMAIL_RECONNECT_REQUIRED', 401, 409, 'reconnect_gmail'],
+    ['GMAIL_REVOCATION_PENDING', 409, 409, 'finish_gmail_disconnect'],
+    ['GMAIL_DRAFT_UNAVAILABLE', 404, 404, 'check_gmail_draft'],
+    ['GMAIL_RATE_LIMITED', 429, 429, 'retry_later'],
+  ] as const)('preserves %s recovery through REST and MCP', async (code, sourceStatus, status, action) => {
+    const read: McpDependencies['read'] = (request, path, overrides) => handleApiRequest(request, path, {
+      ...overrides, audit: () => {},
+      readEmailDraft: async () => { throw new HttpError(sourceStatus, code, 'Synthetic source failure.', { retryAfterSeconds: 7200 }); },
+    });
+    const result = (await call('tools/call', { name: 'read_email_draft', arguments: { draft_ref: input.operation_id } }, { read })).result;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ status, source_path: `/api/v1/mail/drafts/${input.operation_id}`,
+      error: { code, domain: 'gmail', recovery: { action, retryable: code === 'GMAIL_RATE_LIMITED' } } });
+    if (code === 'GMAIL_RATE_LIMITED') expect(result.structuredContent.retry_after_seconds).toBe(7200);
+    else expect(result.structuredContent).not.toHaveProperty('retry_after_seconds');
+    expect(result.structuredContent).not.toHaveProperty('data');
+    expect(JSON.parse(result.content[0].text)).toEqual(result.structuredContent);
+  });
+
+  it('keeps revoked Context credentials distinct from Gmail recovery in MCP', async () => {
+    const read: McpDependencies['read'] = (request, path, overrides) => handleApiRequest(request, path, {
+      ...overrides, audit: () => {},
+      readEmailDraft: async () => { throw new HttpError(401, 'UNAUTHORIZED', 'The Context grant was revoked.'); },
+    });
+    const result = (await call('tools/call', { name: 'read_email_draft', arguments: { draft_ref: input.operation_id } }, { read })).result;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ status: 401, error: { code: 'UNAUTHORIZED' } });
+    expect(result.structuredContent.error).not.toHaveProperty('domain');
+    expect(result.structuredContent.error).not.toHaveProperty('recovery');
   });
 
   it('dispatches signed WhatsApp creation with request-owned actor and hash metadata', async () => {

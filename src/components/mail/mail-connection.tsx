@@ -10,13 +10,14 @@ type ConnectionState = {
 };
 const errors: Record<string, string> = {
   cancelled: 'Gmail connection was cancelled. Your existing connection was not changed.',
-  scope: 'Allow Gmail draft access on the Google consent screen to connect your mailbox.',
+  scope: 'Gmail draft access was not granted. Review this app’s existing access using Manage Google account permissions below, remove any unwanted grant, then reconnect and allow Gmail draft access.',
   scope_excess: 'Google returned additional permissions. Remove this app’s existing access in your Google Account, then reconnect.',
   changed: 'Your connection changed while Google was open. Start the connection again.',
   disconnect_pending: 'Ramesh has stopped using this mailbox. Finish disconnecting from Google below before reconnecting.',
-  denied: 'Connect the same authorized @wareongo.com account you used to sign in.',
+  cleanup_required: 'Google may still have granted this app access, but Ramesh could not safely finish cleanup. Open Manage Google account permissions below and remove this app’s access before retrying. This can also disconnect other features sharing the Google app.',
+  denied: 'Connect the same authorized @wareongo.com account you used to sign in. If you approved Gmail access for a different account, use Manage Google account permissions below to review and remove this app’s access in that account.',
   expired: 'The connection link or sign-in session expired. Sign in and try again.',
-  unavailable: 'Gmail connection is temporarily unavailable. Try again shortly.',
+  unavailable: 'Gmail connection is temporarily unavailable. Try again shortly. If you already approved Google access but could not connect, review this app’s access using Manage Google account permissions below and remove any unwanted grant.',
 };
 
 export function MailConnection() {
@@ -25,6 +26,7 @@ export function MailConnection() {
   const [signedOut, setSignedOut] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [manualCleanupRequired, setManualCleanupRequired] = useState(false);
   const [message, setMessage] = useState('');
   const [returnedFromGoogle, setReturnedFromGoogle] = useState(false);
   const load = useCallback(async (signal?: AbortSignal) => {
@@ -43,7 +45,8 @@ export function MailConnection() {
   }, []);
   useEffect(() => {
     const url = new URL(window.location.href);
-    if (url.searchParams.has('error')) setError(errors[url.searchParams.get('error') ?? ''] ?? errors.unavailable);
+    if (url.searchParams.get('error') === 'cleanup_required') setManualCleanupRequired(true);
+    else if (url.searchParams.has('error')) setError(errors[url.searchParams.get('error') ?? ''] ?? errors.unavailable);
     setReturnedFromGoogle(url.searchParams.get('connected') === '1');
     if (url.search) window.history.replaceState(window.history.state, '', '/mail');
     const controller = new AbortController();
@@ -82,6 +85,7 @@ export function MailConnection() {
         <h2 id="mail-heading">{pending ? 'Finish disconnecting Gmail' : reconnectRequired ? 'Reconnect Gmail' : state?.connection.connected ? 'Gmail is connected' : 'Connect Gmail'}</h2>
         {returnedFromGoogle && !loading && state?.connection.connected && <Notice tone="info">Gmail connected. You can return to Ramesh on WhatsApp.</Notice>}
         {message && <Notice tone="info">{message}</Notice>}
+        {manualCleanupRequired && <Notice>{errors.cleanup_required}</Notice>}
         {error && <Notice action={<button className="text-button" onClick={() => { setError(''); void load(); }}>Check again</button>}>{error}</Notice>}
         {loading ? <Spinner label="Checking Gmail connection…" /> : signedOut ? <>
           <p>Sign in with your @wareongo.com account, then connect that same mailbox.</p>
@@ -99,9 +103,9 @@ export function MailConnection() {
             <button className="button button-secondary full-width" type="button" onClick={() => void disconnect()} disabled={busy}>{busy ? 'Disconnecting…' : pending ? 'Retry disconnect' : 'Disconnect Gmail'}</button>
             <p>Disconnect also removes this Google app’s permissions. Other Google features sharing this app may need reconnecting.</p>
           </>}
-          <p><a href="https://myaccount.google.com/connections" target="_blank" rel="noopener noreferrer">Manage Google account permissions</a></p>
           <p>After connecting, return to WhatsApp. Find prepared messages in Gmail’s Drafts folder.</p>
         </> : null}
+        <p><a href="https://myaccount.google.com/connections" target="_blank" rel="noopener noreferrer">Manage Google account permissions</a></p>
         <p>If Google sign-in is blocked inside WhatsApp, open this page in Chrome or Safari and try again.</p>
       </section>
     </main>

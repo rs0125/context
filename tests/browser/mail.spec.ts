@@ -75,3 +75,18 @@ test('pending Google revocation stays locally disabled, blocks reconnect and can
   await expect(page.getByText('Disconnected from Ramesh and removed the app’s Google access.', { exact: false })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Connect work Gmail' })).toBeEnabled();
 });
+
+for (const status of [503, 401]) {
+  test(`manual Google cleanup remains visible when the connection check returns ${status}`, async ({ page }) => {
+    await page.route('**/api/mail/connection', route => route.fulfill({ status, json: { error: { code: 'UNAVAILABLE' } } }));
+    await page.goto('/mail?error=cleanup_required');
+    await expect(page.getByText('Google may still have granted this app access', { exact: false })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Manage Google account permissions' })).toHaveAttribute('href', 'https://myaccount.google.com/connections');
+    if (status === 503) {
+      await expect(page.getByText('Could not check your Gmail connection.', { exact: false })).toBeVisible();
+      await page.getByRole('button', { name: 'Check again' }).click();
+      await expect(page.getByText('Google may still have granted this app access', { exact: false })).toBeVisible();
+    } else await expect(page.getByRole('link', { name: 'Sign in with Google' })).toBeVisible();
+    await expect(page).toHaveURL('/mail');
+  });
+}

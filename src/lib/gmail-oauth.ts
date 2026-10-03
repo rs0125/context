@@ -7,7 +7,7 @@ import { verifyGoogleIdToken } from './console-google';
 import { googleOAuthPost, GoogleOAuthTransportError } from './google-oauth-transport';
 import { withGmailWriteTransaction, withReadOnlyTransaction, withSessionWriteTransaction } from './db';
 import { GMAIL_COMPOSE_SCOPE } from './gmail-client';
-import { completeGmailDisconnect, decryptGmailSecret, disconnectGmailConnection, getGmailConnection, saveGmailConnection, type GmailConnection } from './gmail-storage';
+import { completeGmailDisconnect, decryptGmailSecret, disconnectGmailConnection, getGmailConnection, quarantineGmailIssuedToken, saveGmailConnection, type GmailConnection, type GmailOwner } from './gmail-storage';
 import { HttpError } from './errors';
 import { anonymousRequestLimit } from './rate-limit';
 
@@ -75,6 +75,7 @@ function failure(error: unknown, clear = false) {
     const code = error instanceof HttpError && error.code === 'GMAIL_OAUTH_CANCELLED' ? 'cancelled'
       : error instanceof HttpError && error.code === 'GMAIL_SCOPE_REQUIRED' ? 'scope'
         : error instanceof HttpError && error.code === 'GMAIL_SCOPE_UNSUPPORTED' ? 'scope_excess'
+        : error instanceof HttpError && error.code === 'GMAIL_MANUAL_CLEANUP_REQUIRED' ? 'cleanup_required'
         : error instanceof HttpError && ['GMAIL_DISCONNECT_PENDING', 'GMAIL_REVOCATION_PENDING'].includes(error.code) ? 'disconnect_pending'
         : error instanceof HttpError && error.code === 'GMAIL_CONNECTION_CHANGED' ? 'changed'
           : error instanceof HttpError && error.status === 403 ? 'denied'
@@ -197,6 +198,7 @@ function authorizationCode(params: URLSearchParams): string {
 export async function handleGmailCallback(request: Request, dependencies: Partial<Dependencies> = {}) {
   const deps = { ...defaults, ...dependencies };
   let clear = false;
+  let issued: { owner: GmailOwner; googleSub: string; refreshToken: string; grantedScopes: string[] } | undefined;
   try {
     const config = requireAvailable();
     const { flow, params } = callbackFlow(request, config.clientId, deps.now());
@@ -217,6 +219,10 @@ export async function handleGmailCallback(request: Request, dependencies: Partia
     if (verified.email !== flow.email || `google:${verified.sub}` !== flow.sub) {
       throw new HttpError(403, 'GMAIL_ACCOUNT_MISMATCH', 'Connect the same Wareongo work account that you used to sign in.');
     }
+    // From this point the issued credential is bound to a verified employee
+    // identity, even if logout/offboarding or a database error prevents saving.
+    issued = { owner: { employeeId: flow.employeeId, employeeEmail: flow.email },
+      googleSub: verified.sub, refreshToken: data.refresh_token as string, grantedScopes: scopes };
     await deps.writeTransaction(async client => {
       const identity = await getConsoleIdentity(request, client);
       // Storage checks expectedConnection under its owner lock, including a
@@ -229,7 +235,27 @@ export async function handleGmailCallback(request: Request, dependencies: Partia
     const response = redirect(`${consoleOrigin()}/mail?connected=1`);
     response.headers.append('Set-Cookie', flowCookie('', 0));
     return response;
-  } catch (error) { return failure(error, clear); }
+  } catch (error) {
+    if (issued) {
+      let quarantined = false;
+      try {
+        const issuedToken = issued;
+        const outcome = await deps.disconnectTransaction(client => quarantineGmailIssuedToken(client, issuedToken.owner, issuedToken));
+        if (outcome === 'manual') throw new Error('A different live mailbox must remain unchanged.');
+        if (outcome === 'pending') {
+          quarantined = true;
+          // Cleanup uses the already-verified identity and does not depend on
+          // the browser still being connected or the employee remaining active.
+          await deps.disconnectTransaction(client => completeGmailDisconnect(client, issuedToken.owner,
+            current => revokeGmailRefreshToken(current, deps.fetch)));
+        }
+      } catch {
+        return failure(new HttpError(503, quarantined ? 'GMAIL_DISCONNECT_PENDING' : 'GMAIL_MANUAL_CLEANUP_REQUIRED',
+          'Google access could not be fully removed. Review Google account permissions before connecting again.'), clear);
+      }
+    }
+    return failure(error, clear);
+  }
 }
 export async function handleGmailConnection(request: Request, dependencies: Partial<Dependencies> = {}) {
   const deps = { ...defaults, ...dependencies };

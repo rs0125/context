@@ -146,11 +146,15 @@ export async function getGmailConnection(client: PoolClient, owner: GmailOwner):
   return readConnection(client, owner);
 }
 
-async function lockOwner(client: PoolClient, owner: GmailOwner) {
+async function lockPrivateOwner(client: PoolClient, owner: GmailOwner) {
   validOwner(owner);
   // Serializes claims, reconnects and finishes even when no connection exists yet.
   // The surrounding transaction supplies statement/lock deadlines.
   await client.query('SELECT pg_advisory_xact_lock(1784056942, $1)', [owner.employeeId]);
+}
+
+async function lockOwner(client: PoolClient, owner: GmailOwner) {
+  await lockPrivateOwner(client, owner);
   await assertGmailOwnerActive(client, owner);
 }
 
@@ -224,7 +228,11 @@ export async function disconnectGmailConnection(client: PoolClient, owner: Gmail
  * rolls back this transaction, leaving access disabled and revocation retryable. */
 export async function completeGmailDisconnect(client: PoolClient, owner: GmailOwner,
   revoke: (connection: GmailConnection) => Promise<void>): Promise<GmailConnection | null> {
-  await lockOwner(client, owner);
+  // This can only erase an already-revoking private credential. Cleanup must
+  // remain possible after offboarding; it never grants or restores mail access.
+  // Browser callers still authenticate before entering this function. A trusted
+  // operator can finish an existing revocation without an active roster entry.
+  await lockPrivateOwner(client, owner);
   const current = await readConnection(client, owner);
   if (!current || current.status === 'disconnected') return current;
   if (current.status !== 'revoking' || !current.encryptedRefreshToken) return changed();
@@ -235,6 +243,45 @@ export async function completeGmailDisconnect(client: PoolClient, owner: GmailOw
     RETURNING ${CONNECTION_FIELDS}`, [owner.employeeId, owner.employeeEmail, current.id, current.version]);
   if (rows.length !== 1) return unavailable();
   return connection(rows[0], owner);
+}
+
+/** A verified OAuth callback received a token but could not attach it. Commit
+ * the returned pending quarantine before attempting provider revocation.
+ * A current active grant for the same Google subject remains useful and has
+ * its own future disconnect handle; never revoke it because a stale flow lost.
+ * A different live subject cannot share this one credential slot safely. */
+export async function quarantineGmailIssuedToken(client: PoolClient, owner: GmailOwner, input: {
+  googleSub: string; refreshToken: string; grantedScopes: string[];
+}, env: NodeJS.ProcessEnv = process.env): Promise<'pending' | 'covered' | 'manual'> {
+  validOwner(owner);
+  if (!/^[A-Za-z0-9_-]{1,255}$/.test(input.googleSub) || !/^[\x21-\x7e]{1,8192}$/.test(input.refreshToken)) return unavailable();
+  const grantedScopes = scopes(input.grantedScopes);
+  await lockPrivateOwner(client, owner);
+  const current = await readConnection(client, owner);
+  if (current?.status === 'active' && current.googleSub === input.googleSub) {
+    try { await assertGmailOwnerActive(client, owner); return 'covered'; }
+    catch (error) {
+      if (!(error instanceof HttpError) || error.code !== 'GMAIL_EMPLOYEE_INACTIVE') throw error;
+      // Offboarding removes the reason to retain this grant. Quarantine it for
+      // revocation without reopening access to either the old or issued token.
+    }
+  }
+  if (current?.encryptedRefreshToken && current.googleSub !== input.googleSub) return 'manual';
+  if (current && current.version >= 2_147_483_647) return unavailable();
+  const id = current?.id ?? randomUUID(), version = (current?.version ?? 0) + 1;
+  const encrypted = encryptGmailSecret(input.refreshToken, { purpose: 'refresh_token', employeeId: owner.employeeId, id }, env);
+  const { rows } = await client.query<Row>(`INSERT INTO ${CONNECTIONS}
+    (id, employee_id, employee_email, google_sub, account_email, encrypted_refresh_token, granted_scopes, version, status)
+    VALUES ($1, $2, $3, $4, $3, $5, $6::text[], $7, 'revoking')
+    ON CONFLICT (employee_id) DO UPDATE SET google_sub = EXCLUDED.google_sub,
+      encrypted_refresh_token = EXCLUDED.encrypted_refresh_token, granted_scopes = EXCLUDED.granted_scopes,
+      version = EXCLUDED.version, status = 'revoking', updated_at = CURRENT_TIMESTAMP
+    WHERE ${CONNECTIONS}.id = EXCLUDED.id AND ${CONNECTIONS}.employee_email = EXCLUDED.employee_email
+    RETURNING ${CONNECTION_FIELDS}`, [id, owner.employeeId, owner.employeeEmail, input.googleSub, encrypted, grantedScopes, version]);
+  if (rows.length !== 1) return unavailable();
+  connection(rows[0], owner);
+  await invalidateDispatches(client, owner);
+  return 'pending';
 }
 
 /** An old failed refresh must never invalidate a newly reconnected credential. */

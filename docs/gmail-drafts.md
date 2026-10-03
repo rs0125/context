@@ -49,6 +49,15 @@ WhatsApp additionally limits the serialized proposal arguments plus summary to
 4,800 characters, so keep drafts short. Longer proposals are rejected before
 confirmation; their content is never silently truncated.
 
+Reading an existing draft includes To, CC and BCC headers, including recipients
+added manually in Gmail. This does not add BCC to the create capability. Reads
+budget the serialized data to 76,000 bytes, leaving room for the REST/MCP envelope
+inside Ramesh's 80,000-byte evidence limit. Large edited bodies are truncated at
+a Unicode character boundary and marked `body_truncated`. Unusually large
+recipient headers may be shortened by whole entries and are explicitly marked
+`recipients_truncated`. An incomplete read must direct the employee to Gmail for
+the full content or recipient list.
+
 The success reply supplies the mailbox, subject and the fixed
 `https://mail.google.com/mail/#drafts` folder link. The employee must select the
 right Gmail account. It does not promise to open an individual draft. Google
@@ -79,6 +88,36 @@ two-second provider request holds the owner lock to prevent revoking a token
 installed by a simultaneous reconnect. Disconnect cannot cancel a Gmail request
 that Google already accepted.
 
+If a verified OAuth exchange returns a refresh token but the callback cannot
+save it, cleanup first commits it encrypted in the existing `revoking` slot,
+then uses the same serialized revocation path. A current active connection to
+the same verified Google account is preserved: its credential already provides
+a future project-wide disconnect handle. Cleanup never revokes that useful
+grant because a stale callback failed. Offboarding after token verification
+does not prevent quarantining and removing the unused credential.
+
+When the database cannot durably retain the token, or a different live Google
+account already occupies the credential slot, the callback explicitly asks for
+manual cleanup in Google account permissions. That guidance and link remain
+visible even if the connection check fails or the employee is signed out.
+Tokens rejected before their scope and expected identity are verified are not
+automatically revoked; the relevant error keeps its reason and asks the user to
+review unwanted Google grants. A process crash before the received credential
+can be retained, or a token exchange whose response never arrives, can still
+require manual Google cleanup. There is no separate cleanup queue.
+
+An operator can finish an **already-pending** revocation after the employee has
+been deactivated. Preview with
+`node scripts/finish-gmail-disconnect.mjs --employee-id 7 --email employee@wareongo.com`,
+then repeat with `--apply` to execute that exact target. Preview does not read
+local environment files or connect to a database. Execution requires the
+dedicated `CONTEXT_DATABASE_URL`, the existing Gmail encryption key, and Node
+22.15 or newer within major version 22 (validated on 22.21.1). The script reuses
+the application’s storage, encryption and bounded Google transport through a
+loader restricted to those three source modules. It holds the same owner lock,
+refuses active/replacement connections, and leaves failed cleanup pending.
+It never starts a new disconnect, restores employee access or reads mail.
+
 Google revocation affects the user's grants for the entire Google Cloud
 project, including its other OAuth clients. A separate OAuth client inside a
 shared project does not isolate that effect. Use a dedicated company-owned
@@ -105,6 +144,23 @@ After that deadline, the same confirmed operation and unchanged arguments can
 claim one new attempt on the unchanged active connection. It does not sleep
 inside a tool request or automatically create a replacement operation. A
 timeout, network failure or ambiguous server response never enters this path.
+
+Write recovery returns a structured `retry_at` deadline. If a connection repair
+is needed, `recovery.action` identifies that action separately from the outcome:
+an uncertain creation remains uncertain even when reconnection is required.
+The original operation UUID and unchanged content remain mandatory. Mailbox
+read errors have a Gmail domain and allowlisted recovery guidance; a Gmail
+reconnect must not invalidate a valid Context Engine grant or disable unrelated
+tools. Read cooldowns support delays through 24 hours.
+
+After Google returns a known outcome, its durable completion transaction does
+not use the cancelled HTTP request signal or require the caller's key to remain
+valid. Storage still enforces the original employee/mailbox binding. A separate
+fresh authorization runs after that transaction commits, before returning any
+receipt. Thus a cancelled request or revoked Context key cannot roll back known
+draft IDs, while private results remain withheld. Employee deactivation or
+mailbox changes can still prevent completion under the storage lifecycle rules;
+such cases retain uncertainty and cannot authorize a replacement create.
 
 If the response is lost, recovery searches for a deterministic Message-ID and
 checks an exact operation header in matching drafts. A verified match can recover

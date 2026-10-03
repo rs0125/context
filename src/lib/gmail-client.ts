@@ -39,6 +39,7 @@ export type GmailDraft = {
   /** Mailbox entries from the saved headers; may include user-edited display names. */
   to: string[];
   cc: string[];
+  bcc: string[];
   body: string | null;
   bodyTruncated: boolean;
   bodyFormat: 'text' | 'unsupported';
@@ -220,7 +221,7 @@ function parseDraft(value: unknown, expectedId?: string): GmailDraft {
   return {
     id, messageId: providerId(message.id), threadId: message.threadId === undefined ? null : providerId(message.threadId),
     operationId, internetMessageId: oneHeader(headers, 'message-id'), subject: decodeSubject(oneHeader(headers, 'subject')),
-    to: addresses(oneHeader(headers, 'to')), cc: addresses(oneHeader(headers, 'cc')),
+    to: addresses(oneHeader(headers, 'to')), cc: addresses(oneHeader(headers, 'cc')), bcc: addresses(oneHeader(headers, 'bcc')),
     ...(payload ? plainBody(payload) : { body: null, bodyTruncated: false, bodyFormat: 'unsupported' as const }),
   };
 }

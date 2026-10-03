@@ -15,6 +15,7 @@ import { analyticsCapabilities, ga4Report, searchConsoleReport, validateGa4Query
 import { parseShortlistAssessmentQuery, buildShortlistAssessment } from './shortlist-assessment';
 import { parseLocationQuery, resolveLocation } from './location-resolver';
 import { getEmailConnection, readEmailDraft, listEmailDrafts } from './gmail-tools';
+import { gmailReadError } from './gmail-read-errors';
 
 const ANALYTICS_GUIDANCE = 'Aggregate website analytics for Analysts: /api/v1/analytics/capabilities discovers supported reports; /api/v1/analytics/ga4 reports traffic and recorded events; /api/v1/analytics/search-console reports Google organic search. Analytics dates use the source timezone, not necessarily the India server clock. Preserve source_fetched_at, resolved dates, quality warnings and pagination. For form activity per session use ga4?report=form_performance with a landing_page_contains filter; its separate event ratios use matching entry sessions. For relative comparisons resolve period on the first group and reuse the returned dates for later groups. Recent data may change. Event counts are not unique CRM leads or a sequential conversion funnel; Search Console clicks are not GA sessions. Failed reads mean unavailable, never zero.';
 
@@ -338,11 +339,15 @@ export async function handleApiRequest(request: Request, path: string[], depende
     return Response.json({ data: result.value, meta }, { headers });
   } catch (error) {
     const safeError = error instanceof HttpError ? error : new HttpError(503, 'SOURCE_UNAVAILABLE', 'The context source is temporarily unavailable.');
-    status = safeError.status;
+    const gmailError = path[0] === 'mail' ? gmailReadError(safeError.code) : undefined;
+    // Gmail credentials belong to the source connection. A missing/revoked
+    // mailbox grant must not challenge or invalidate the Context Engine grant.
+    status = gmailError?.recovery.action === 'reconnect_gmail' ? 409 : safeError.status;
     errorCode = safeError.code;
     if (status === 401) headers.set('WWW-Authenticate', 'Bearer realm="wareongo-context"');
-    if (status === 429 || status === 503) headers.set('Retry-After', String(safeError.retryAfterSeconds ?? (status === 429 ? 60 : 10)));
-    return Response.json({ error: { code: safeError.code, message: safeError.message }, meta }, { status, headers });
+    if ((status === 429 || status === 503) && gmailError?.recovery.retryable !== false)
+      headers.set('Retry-After', String(safeError.retryAfterSeconds ?? (status === 429 ? 60 : 10)));
+    return Response.json({ error: { code: safeError.code, message: safeError.message, ...gmailError }, meta }, { status, headers });
   } finally {
     // Do not log tokens, query values, record payloads, or raw database errors.
     const route = path.join('/');

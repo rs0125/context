@@ -205,7 +205,7 @@ function registerTools(server: McpServer, key: KeyRegistration, request: Request
     const recovery = (body.error as { recovery?: { retryable: boolean } } | undefined)?.recovery;
     if (!response.ok && recovery?.retryable !== false && response.headers.has('retry-after')) {
       const seconds = Number(response.headers.get('retry-after'));
-      if (Number.isFinite(seconds) && seconds >= 0) Object.assign(result, { retry_after_seconds: seconds });
+      if (Number.isInteger(seconds) && seconds >= 0 && seconds <= 86400) Object.assign(result, { retry_after_seconds: seconds });
     }
     return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result, ...(!response.ok ? { isError: true } : {}) };
   };

@@ -23,7 +23,8 @@ function database() {
       const row = { id, employee_id, employee_email,
         ...(values.length === 3
           ? { google_sub: null, account_email: employee_email, encrypted_refresh_token: null, granted_scopes: [], version: 1, status: 'disconnected' }
-          : { google_sub: values[3], account_email: values[4], encrypted_refresh_token: values[5], granted_scopes: values[6], version: values[7], status: 'active' }),
+          : values.length === 7 ? { google_sub: values[3], account_email: employee_email, encrypted_refresh_token: values[4], granted_scopes: values[5], version: values[6], status: 'revoking' }
+            : { google_sub: values[3], account_email: values[4], encrypted_refresh_token: values[5], granted_scopes: values[6], version: values[7], status: 'active' }),
         created_at: new Date(), updated_at: new Date() };
       rows.splice(0, rows.length, row);
       return { rows: [{ ...row }] };
@@ -39,7 +40,7 @@ function database() {
     if (sql.startsWith('UPDATE context_gmail_private.draft_operations')) return { rows: [] };
     throw new Error('Unexpected database statement');
   });
-  return { rows, client: { query } as unknown as PoolClient };
+  return { rows, roster, client: { query } as unknown as PoolClient };
 }
 
 afterEach(() => vi.unstubAllEnvs());
@@ -67,7 +68,7 @@ describe('Gmail callback and disconnect races', () => {
     const fetching = new Promise<void>(resolve => { markFetching = resolve; });
     const transaction = async <T>(operation: (client: PoolClient) => Promise<T>) => operation(client);
     const deps = { transaction, writeTransaction: transaction, disconnectTransaction: transaction,
-      fetch: vi.fn<typeof fetch>(async () => { markFetching(); return tokenResponse; }),
+      fetch: vi.fn<typeof fetch>(async url => { if (String(url).endsWith('/revoke')) return new Response(''); markFetching(); return tokenResponse; }),
       verify: vi.fn(async () => ({ email, sub: googleSub })), limit: vi.fn() };
     const start = await handleGmailConnect(request('/api/mail/google/connect', 'POST'), deps);
     expect(start.status).toBe(303);
@@ -83,7 +84,7 @@ describe('Gmail callback and disconnect races', () => {
     allowToken(Response.json({ access_token: 'synthetic-access', refresh_token: 'synthetic-new-refresh', id_token: 'synthetic-id-token', token_type: 'Bearer', scope: `openid email ${scope}` }));
     const completed = await callback;
     expect(completed.headers.get('location')).toBe(`${origin}/mail?error=changed`);
-    expect(rows[0]).toMatchObject({ status: 'disconnected', encrypted_refresh_token: null, version });
-    expect(deps.fetch).toHaveBeenCalledTimes(1);
+    expect(rows[0]).toMatchObject({ status: 'disconnected', encrypted_refresh_token: null, version: version + 1 });
+    expect(deps.fetch).toHaveBeenCalledTimes(2);
   });
 });

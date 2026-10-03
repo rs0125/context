@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   assertGmailOwnerActive, claimGmailDraftOperation, decryptGmailSecret, disconnectGmailConnection,
   encryptGmailSecret, finishGmailDraftOperation, getGmailConnection, getGmailDraftOperation,
-  saveGmailConnection, listGmailDraftReferences, completeGmailDisconnect, markGmailNeedsReauth, type GmailOwner,
+  saveGmailConnection, listGmailDraftReferences, completeGmailDisconnect, quarantineGmailIssuedToken, markGmailNeedsReauth, type GmailOwner,
 } from '../src/lib/gmail-storage';
 
 const owner: GmailOwner = { employeeId: 7, employeeEmail: 'employee@wareongo.com' };
@@ -33,6 +33,8 @@ function database() {
       const row = values.length === 3
         ? { id, employee_id, employee_email, google_sub: null, account_email: employee_email, encrypted_refresh_token: null,
           granted_scopes: [], version: 1, status: 'disconnected', created_at: instant, updated_at: instant }
+        : values.length === 7 ? { id, employee_id, employee_email, google_sub, account_email: employee_email,
+          encrypted_refresh_token: values[4], granted_scopes: values[5], version: values[6], status: 'revoking', created_at: existing?.created_at ?? instant, updated_at: instant }
         : { id, employee_id, employee_email, google_sub, account_email, encrypted_refresh_token, granted_scopes, version,
           status: 'active', created_at: existing?.created_at ?? instant, updated_at: instant };
       if (existing) Object.assign(existing, row); else connections.push(row);
@@ -306,7 +308,7 @@ describe('Gmail private encrypted storage', () => {
     const db = await connected();
     await disconnectGmailConnection(db.client, owner);
     const revoke = vi.fn(async () => {
-      expect(db.query.mock.calls.at(-2)?.[0]).toContain('FROM public."VerifiedNumber"');
+      expect(db.query.mock.calls.at(-2)?.[0]).toContain('pg_advisory_xact_lock');
       expect(db.query.mock.calls.at(-1)?.[0]).toContain('FROM context_gmail_private.connections');
       throw new Error('Synthetic revocation failure');
     });
@@ -436,5 +438,42 @@ describe('Gmail private encrypted storage', () => {
     await claimGmailDraftOperation(db.client, owner, db.claim);
     db.operations[0].state = 'created';
     await expect(getGmailDraftOperation(db.client, owner, operationId)).rejects.toMatchObject({ code: 'GMAIL_STORAGE_UNAVAILABLE' });
+  });
+});
+
+describe('issued Gmail token cleanup', () => {
+  const issued = { googleSub: 'synthetic_subject', refreshToken: 'fresh-issued-token', grantedScopes: scopes };
+  it('quarantines an unattached token and permits pending-only completion after offboarding', async () => {
+    const db = database(); db.employees[0].is_active = false;
+    expect(await quarantineGmailIssuedToken(db.client, owner, issued, env)).toBe('pending');
+    expect(db.connections[0]).toMatchObject({ status: 'revoking', version: 1 });
+    const revoke = vi.fn(async (connection) => {
+      expect(decryptGmailSecret(connection.encryptedRefreshToken, { purpose: 'refresh_token', employeeId: owner.employeeId, id: connection.id }, env)).toBe(issued.refreshToken);
+    });
+    expect(await completeGmailDisconnect(db.client, owner, revoke)).toMatchObject({ status: 'disconnected', encryptedRefreshToken: null });
+    expect(revoke).toHaveBeenCalledTimes(1);
+    await expect(saveGmailConnection(db.client, owner, { ...issued, accountEmail: owner.employeeEmail }, env)).rejects.toMatchObject({ code: 'GMAIL_EMPLOYEE_INACTIVE' });
+  });
+  it('preserves a current active grant to the same verified subject without revoking or replacing it', async () => {
+    const db = await connected(), before = { ...db.connections[0] };
+    expect(await quarantineGmailIssuedToken(db.client, owner, issued, env)).toBe('covered');
+    expect(db.connections[0]).toEqual(before);
+  });
+  it('requires explicit manual cleanup instead of replacing a different live Google subject', async () => {
+    const db = await connected(), before = { ...db.connections[0] };
+    expect(await quarantineGmailIssuedToken(db.client, owner, { ...issued, googleSub: 'different_subject' }, env)).toBe('manual');
+    expect(db.connections[0]).toEqual(before);
+  });
+  it('uses the newly issued token for pending revocation rather than an older possibly invalid token', async () => {
+    const db = await connected(); await disconnectGmailConnection(db.client, owner);
+    expect(await quarantineGmailIssuedToken(db.client, owner, issued, env)).toBe('pending');
+    const row = db.connections[0];
+    expect(row).toMatchObject({ status: 'revoking', version: 3 });
+    expect(decryptGmailSecret(String(row.encrypted_refresh_token), { purpose: 'refresh_token', employeeId: owner.employeeId, id: String(row.id) }, env)).toBe(issued.refreshToken);
+  });
+  it('does not preserve an active grant after its employee is deactivated', async () => {
+    const db = await connected(); db.employees[0].is_active = false;
+    expect(await quarantineGmailIssuedToken(db.client, owner, issued, env)).toBe('pending');
+    expect(db.connections[0]).toMatchObject({ status: 'revoking', version: 2 });
   });
 });

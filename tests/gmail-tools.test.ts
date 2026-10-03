@@ -19,7 +19,7 @@ const input = { operation_id: operationId, connection_id: connectionId, connecti
   to: ['recipient@example.test'], cc: [], subject: 'Synthetic proposal', body: 'Synthetic draft content' };
 const now = '2026-10-04T09:00:00.000Z';
 const savedDraft: GmailDraft = { id: 'draft_123', messageId: 'message_456', threadId: null, operationId,
-  internetMessageId: '<synthetic@drafts.wareongo.com>', subject: input.subject, to: input.to, cc: [], body: input.body,
+  internetMessageId: '<synthetic@drafts.wareongo.com>', subject: input.subject, to: input.to, cc: [], bcc: [], body: input.body,
   bodyTruncated: false, bodyFormat: 'text' };
 
 function fixture() {
@@ -57,9 +57,14 @@ function fixture() {
   });
   const finish = vi.fn<GmailToolDependencies['finish']>(async (_client, _owner, id, outcome) => {
     const previous = operations.get(id)!;
-    if (previous.state === 'dispatching' || (previous.state === 'unknown' && outcome.state === 'created')) {
-      Object.assign(previous, { state: outcome.state, draftId: outcome.draftId ?? null, messageId: outcome.messageId ?? null, reason: outcome.reason ?? null,
-        retryAt: outcome.state === 'retryable' ? new Date(Date.now() + outcome.retryAfterMs!).toISOString() : null });
+    const mailboxChanged = state.connection?.status !== 'active' || state.connection.id !== previous.connectionId
+      || !previous.googleSub || state.connection.googleSub !== previous.googleSub;
+    const reconciled = previous.state === 'unknown' && outcome.state === 'created' && !mailboxChanged;
+    if (previous.state === 'dispatching' || reconciled) {
+      const saved: Parameters<GmailToolDependencies['finish']>[3] = !reconciled && (mailboxChanged || state.connection!.version !== previous.connectionVersion)
+        ? { state: 'unknown', reason: 'CONNECTION_CHANGED' } : outcome;
+      Object.assign(previous, { state: saved.state, draftId: saved.draftId ?? null, messageId: saved.messageId ?? null, reason: saved.reason ?? null,
+        retryAt: saved.state === 'retryable' ? new Date(Date.now() + saved.retryAfterMs!).toISOString() : null });
     }
     return { ...previous };
   });
@@ -123,7 +128,7 @@ describe('employee-bound Gmail draft tools', () => {
     expect(ctx.claim.mock.calls[0][1]).toEqual({ employeeId: 7, employeeEmail: principal.email });
     expect(ctx.claim.mock.calls[0][2]).toMatchObject({ connectionId, connectionVersion: 1, operationId, requestHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
     expect(JSON.stringify(result)).not.toMatch(/synthetic-(?:access|refresh)-token|draft_123|message_456|encryptedRefreshToken|mail\.google\.com/);
-    expect(ctx.revalidate).toHaveBeenCalledTimes(5);
+    expect(ctx.revalidate).toHaveBeenCalledTimes(4);
     expect(ctx.claim.mock.calls[0][2]).not.toHaveProperty('encryptedContent');
   });
 
@@ -183,7 +188,7 @@ describe('employee-bound Gmail draft tools', () => {
     await ctx.run();
     ctx.refresh.mockRejectedValueOnce(new HttpError(401, 'GMAIL_RECONNECT_REQUIRED', 'Reconnect the mailbox.'));
     const result = await ctx.run();
-    expect(result).toMatchObject({ outcome: 'outcome_unknown' });
+    expect(result).toMatchObject({ outcome: 'outcome_unknown', recovery: { action: 'reconnect_gmail' } });
     expect(result).not.toHaveProperty('data');
     expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
   });
@@ -238,9 +243,9 @@ describe('employee-bound Gmail draft tools', () => {
     vi.useFakeTimers(); vi.setSystemTime(now);
     const ctx = fixture();
     ctx.gmail.createDraft.mockRejectedValueOnce(new GmailClientError('GMAIL_RATE_LIMITED', { status: 429, retryAfterMs: 5000 }));
-    expect(await ctx.run()).toMatchObject({ outcome: 'not_dispatched', code: 'GMAIL_RATE_LIMITED' });
+    expect(await ctx.run()).toMatchObject({ outcome: 'not_dispatched', code: 'GMAIL_RATE_LIMITED', retry_at: new Date(Date.now() + 5000).toISOString() });
     expect(ctx.operations.get(operationId)).toMatchObject({ state: 'retryable', retryAt: new Date(Date.now() + 5000).toISOString() });
-    expect(await ctx.run()).toMatchObject({ outcome: 'not_dispatched', code: 'GMAIL_RETRY_LATER' });
+    expect(await ctx.run()).toMatchObject({ outcome: 'not_dispatched', code: 'GMAIL_RETRY_LATER', retry_at: new Date(Date.now() + 5000).toISOString() });
     expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
     vi.setSystemTime(Date.now() + 5001);
     const results = await Promise.all([ctx.run(), ctx.run()]);
@@ -333,11 +338,11 @@ describe('employee-bound Gmail draft tools', () => {
     const first = await ctx.run();
     expect(first).toMatchObject({ outcome: 'outcome_unknown' });
     expect(first).not.toHaveProperty('data');
-    expect(ctx.operations.get(operationId)!.state).toBe('unknown');
+    expect(ctx.operations.get(operationId)!.state).toBe('created');
     ctx.gmail.findDraftByOperation.mockResolvedValueOnce({ draft: savedDraft, complete: true, checked: 1 });
     expect(await ctx.run()).toMatchObject({ outcome: 'replayed' });
     expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
-    expect(ctx.gmail.findDraftByOperation).toHaveBeenCalledOnce();
+    expect(ctx.gmail.findDraftByOperation).not.toHaveBeenCalled();
   });
 
   it('rolls a claim back if credentials are revoked while acquiring the mailbox lock', async () => {
@@ -352,14 +357,59 @@ describe('employee-bound Gmail draft tools', () => {
     expect(ctx.gmail.createDraft).not.toHaveBeenCalled();
   });
 
-  it('rolls receipt persistence back if credentials are revoked while finishing the operation', async () => {
+  it('persists a known receipt but withholds disclosure if credentials are revoked while finishing', async () => {
     const ctx = fixture();
     const finish = ctx.finish.getMockImplementation()!;
     ctx.finish.mockImplementationOnce(async (...args) => {
       const result = await finish(...args); ctx.state.revoked = true; return result;
     });
     expect(await ctx.run()).toMatchObject({ outcome: 'outcome_unknown' });
-    expect(ctx.operations.get(operationId)?.state).toBe('dispatching');
+    expect(ctx.operations.get(operationId)).toMatchObject({ state: 'created', draftId: savedDraft.id, messageId: savedDraft.messageId });
+    expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
+  });
+
+  it('commits known Google IDs when the caller aborts while acquiring the completion transaction', async () => {
+    const ctx = fixture(), caller = new AbortController();
+    const transaction = ctx.deps.writeTransaction;
+    let writes = 0;
+    ctx.deps.writeTransaction = async work => {
+      if (++writes === 2) {
+        expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
+        caller.abort();
+      }
+      return transaction(work);
+    };
+    const cancelled = await ctx.run(input, caller.signal);
+    expect(cancelled).toMatchObject({ outcome: 'outcome_unknown' });
+    expect(cancelled).not.toHaveProperty('data');
+    expect(ctx.operations.get(operationId)).toMatchObject({ state: 'created', draftId: savedDraft.id, messageId: savedDraft.messageId });
+    expect(await ctx.run()).toMatchObject({ outcome: 'replayed', data: { draft_ref: operationId } });
+    expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
+    expect(ctx.gmail.findDraftByOperation).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['needs_reauth', 'reconnect_gmail'], ['revoking', 'finish_gmail_disconnect'], ['disconnected', 'connect_gmail'],
+  ] as const)('keeps prior uncertainty and exposes the repair action for %s', async (status, action) => {
+    const ctx = fixture();
+    ctx.gmail.createDraft.mockRejectedValueOnce(new GmailClientError('GMAIL_TIMEOUT', { operationMayHaveSucceeded: true }));
+    await ctx.run();
+    ctx.state.connection!.status = status;
+    const result = await ctx.run();
+    expect(result).toMatchObject({ outcome: 'outcome_unknown', recovery: { action } });
+    expect(result).not.toHaveProperty('data');
+    expect(emailDraftOutputSchema.safeParse(result).success).toBe(true);
+    expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
+    expect(ctx.gmail.findDraftByOperation).not.toHaveBeenCalled();
+  });
+
+  it('keeps the retry deadline when read-only reconciliation encounters a long provider cooldown', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const ctx = fixture();
+    ctx.gmail.createDraft.mockRejectedValueOnce(new GmailClientError('GMAIL_TIMEOUT', { operationMayHaveSucceeded: true }));
+    await ctx.run();
+    ctx.gmail.findDraftByOperation.mockRejectedValueOnce(new GmailClientError('GMAIL_RATE_LIMITED', { retryAfterMs: 7_200_000 }));
+    expect(await ctx.run()).toMatchObject({ outcome: 'outcome_unknown', retry_at: new Date(Date.now() + 7_200_000).toISOString() });
     expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
   });
 
@@ -384,7 +434,8 @@ describe('employee-bound Gmail draft tools', () => {
       });
       const result = await ctx.run();
       expect(result).toMatchObject({ outcome: 'outcome_unknown' });
-      expect(result).not.toHaveProperty('data'); expect(ctx.finish).not.toHaveBeenCalled();
+      expect(result).not.toHaveProperty('data'); expect(ctx.finish).toHaveBeenCalledOnce();
+      expect(ctx.operations.get(operationId)?.state).toBe('created');
     }
   });
 
@@ -397,6 +448,32 @@ describe('employee-bound Gmail draft tools', () => {
     await expect(ctx.read({ draft_ref: 'arbitrary-provider-draft-id' })).rejects.toMatchObject({ code: 'GMAIL_INVALID_INPUT' });
     await expect(ctx.read({ draft_ref: '33333333-3333-4333-8333-333333333333' })).rejects.toMatchObject({ code: 'GMAIL_DRAFT_UNAVAILABLE' });
     expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
+  });
+
+  it.each(['x'.repeat(85_000), '"\\\0'.repeat(28_000), '🏠न'.repeat(20_000)])
+    ('bounds a large Gmail-edited body including JSON escaping and UTF-8', async body => {
+      const ctx = fixture(); await ctx.run();
+      ctx.gmail.getDraft.mockResolvedValueOnce({ ...savedDraft, bcc: ['hidden@example.test'], body });
+      const result = await ctx.read();
+      const envelope = { source_path: `/api/v1/mail/drafts/${operationId}`, status: 200, data: result,
+        meta: { requestId: operationId, generatedAt: now, toolName: 'read_email_draft', argumentsSha256: 'a'.repeat(64) } };
+      expect(Buffer.byteLength(JSON.stringify(envelope))).toBeLessThan(80_000);
+      expect(result).toMatchObject({ body_truncated: true, bcc: ['hidden@example.test'], recipients_truncated: false });
+      expect(result.body!.length).toBeGreaterThan(0);
+      expect(body.startsWith(result.body!)).toBe(true);
+      expect(result.body).not.toMatch(/[\uD800-\uDBFF]$/);
+      expect(result.content_guidance).toContain('incomplete');
+    });
+
+  it('explicitly marks incomplete recipients if edited headers consume the read budget', async () => {
+    const ctx = fixture(); await ctx.run();
+    const entries = Array.from({ length: 15 }, (_, i) => `${'न'.repeat(960)} <person${i}@example.test>`);
+    ctx.gmail.getDraft.mockResolvedValueOnce({ ...savedDraft, to: [...entries], cc: [...entries], bcc: [...entries] });
+    const result = await ctx.read();
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(76_000);
+    expect(result.recipients_truncated).toBe(true);
+    expect(result.to.length + result.cc.length + result.bcc.length).toBeLessThan(45);
+    expect([...result.to, ...result.cc, ...result.bcc].every(entry => entries.includes(entry))).toBe(true);
   });
 
   it.each(['unknown', 'other_owner', 'different_account', 'revoked_during_read'] as const)

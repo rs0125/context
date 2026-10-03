@@ -20,6 +20,7 @@ function fullDraft(overrides: Record<string, unknown> = {}) {
         { name: 'Subject', value: input.subject },
         { name: 'To', value: '"Client, Example" <client@example.com>, other@example.com' },
         { name: 'Cc', value: 'colleague@wareongo.com' },
+        { name: 'Bcc', value: '"Hidden, Reader" <hidden@example.com>, second@example.com' },
         { name: 'Content-Type', value: 'text/plain; charset="UTF-8"' },
       ], body: { data: Buffer.from(input.body).toString('base64url'), size: Buffer.byteLength(input.body) },
       ...overrides,
@@ -102,7 +103,8 @@ describe('draft-only Gmail HTTP adapter', () => {
     expect(fetch.mock.calls[0][1]).toMatchObject({ method: 'GET', redirect: 'error', cache: 'no-store' });
     expect(fetch.mock.calls[0][1]).not.toHaveProperty('body');
     expect(result).toMatchObject({ operationId, internetMessageId, subject: input.subject, body: input.body,
-      to: ['"Client, Example" <client@example.com>', 'other@example.com'], cc: input.cc, bodyFormat: 'text', bodyTruncated: false });
+      to: ['"Client, Example" <client@example.com>', 'other@example.com'], cc: input.cc,
+      bcc: ['"Hidden, Reader" <hidden@example.com>', 'second@example.com'], bodyFormat: 'text', bodyTruncated: false });
   });
 
   it('uses text alternatives, skips attachments, and marks HTML-only bodies unsupported', async () => {

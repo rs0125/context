@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   claimGmailDraftOperation, completeGmailDisconnect, decryptGmailSecret, disconnectGmailConnection,
   encryptGmailSecret, finishGmailDraftOperation,
-  getGmailConnection, getGmailDraftOperation, listGmailDraftReferences, markGmailNeedsReauth, saveGmailConnection,
+  getGmailConnection, getGmailDraftOperation, listGmailDraftReferences, markGmailNeedsReauth, quarantineGmailIssuedToken, saveGmailConnection,
   type GmailOwner,
 } from '../src/lib/gmail-storage';
 
@@ -259,6 +259,87 @@ describe.skipIf(!databaseUrl)('Gmail lifecycle on isolated PostgreSQL', () => {
     const replacement = await connect(owner);
     expect(await tx(client => markGmailNeedsReauth(client, owner, first))).toBe(false);
     expect(await tx(client => getGmailConnection(client, owner))).toMatchObject({ status: 'active', version: replacement.version });
+  });
+
+  it.each(['absent', 'disconnected'] as const)('quarantines an unattached token over an %s connection and retains failed cleanup for retry', async initial => {
+    const owner = await employee();
+    const before = initial === 'disconnected' ? await tx(client => disconnectGmailConnection(client, owner)) : null;
+    const issued = { googleSub: 'verified_orphan_subject', refreshToken: 'synthetic-orphan-refresh-token', grantedScopes: scopes };
+    expect(await tx(client => quarantineGmailIssuedToken(client, owner, issued, env))).toBe('pending');
+    const pending = await tx(client => getGmailConnection(client, owner));
+    expect(pending).toMatchObject({ status: 'revoking', version: (before?.version ?? 0) + 1,
+      googleSub: issued.googleSub, accountEmail: owner.employeeEmail });
+    if (before) expect(pending!.id).toBe(before.id);
+    expect(pending!.encryptedRefreshToken).toMatch(/^v1\./);
+    expect(decryptGmailSecret(pending!.encryptedRefreshToken!,
+      { purpose: 'refresh_token', employeeId: owner.employeeId, id: pending!.id }, env)).toBe(issued.refreshToken);
+    await expect(connect(owner)).rejects.toMatchObject({ code: 'GMAIL_REVOCATION_PENDING' });
+    await expect(tx(client => completeGmailDisconnect(client, owner, async () => { throw new Error('synthetic provider outage'); })))
+      .rejects.toThrow('synthetic provider outage');
+    expect(await tx(client => getGmailConnection(client, owner))).toEqual(pending);
+
+    // A second failed callback for this same grant replaces the cleanup handle
+    // while retaining the disconnected state and invalidating stale bindings.
+    const later = { ...issued, refreshToken: 'synthetic-newer-orphan-refresh-token' };
+    expect(await tx(client => quarantineGmailIssuedToken(client, owner, later, env))).toBe('pending');
+    const replacement = await tx(client => getGmailConnection(client, owner));
+    expect(replacement).toMatchObject({ id: pending!.id, status: 'revoking', version: pending!.version + 1 });
+    let revoked = 0;
+    const disconnected = await tx(client => completeGmailDisconnect(client, owner, async current => {
+      expect(decryptGmailSecret(current.encryptedRefreshToken!,
+        { purpose: 'refresh_token', employeeId: owner.employeeId, id: current.id }, env)).toBe(later.refreshToken);
+      revoked++;
+    }));
+    expect(revoked).toBe(1);
+    expect(disconnected).toMatchObject({ status: 'disconnected', encryptedRefreshToken: null, version: replacement!.version });
+  });
+
+  it('finishes an existing pending revocation after offboarding without restoring employee access', async () => {
+    const owner = await employee(), connection = await connect(owner);
+    await tx(client => disconnectGmailConnection(client, owner));
+    await admin.query('UPDATE public."VerifiedNumber" SET is_active=false WHERE id=$1', [owner.employeeId]);
+    await expect(tx(client => getGmailConnection(client, owner))).rejects.toMatchObject({ code: 'GMAIL_EMPLOYEE_INACTIVE' });
+    await expect(connect(owner)).rejects.toMatchObject({ code: 'GMAIL_EMPLOYEE_INACTIVE' });
+    let revoked = 0;
+    const result = await tx(client => completeGmailDisconnect(client, owner, async current => {
+      expect(current.id).toBe(connection.id);
+      expect(decryptGmailSecret(current.encryptedRefreshToken!,
+        { purpose: 'refresh_token', employeeId: owner.employeeId, id: current.id }, env)).toBe('synthetic-refresh-token');
+      revoked++;
+    }));
+    expect(revoked).toBe(1);
+    expect(result).toMatchObject({ status: 'disconnected', encryptedRefreshToken: null });
+    expect((await admin.query('SELECT is_active FROM public."VerifiedNumber" WHERE id=$1', [owner.employeeId])).rows[0].is_active).toBe(false);
+    await expect(tx(client => getGmailConnection(client, owner))).rejects.toMatchObject({ code: 'GMAIL_EMPLOYEE_INACTIVE' });
+  });
+
+  it('preserves a newer active grant when a stale callback has issued same-account or different-account credentials', async () => {
+    const owner = await employee(), newer = await connect(owner, 'newer_verified_subject');
+    const issued = { googleSub: newer.googleSub!, refreshToken: 'synthetic-discarded-flow-token', grantedScopes: scopes };
+    expect(await tx(client => quarantineGmailIssuedToken(client, owner, issued, env))).toBe('covered');
+    expect(await tx(client => getGmailConnection(client, owner))).toEqual(newer);
+    expect(await tx(client => quarantineGmailIssuedToken(client, owner, { ...issued, googleSub: 'different_verified_subject' }, env))).toBe('manual');
+    expect(await tx(client => getGmailConnection(client, owner))).toEqual(newer);
+    let revokeCalled = false;
+    await expect(tx(client => completeGmailDisconnect(client, owner, async () => { revokeCalled = true; })))
+      .rejects.toMatchObject({ code: 'GMAIL_CONNECTION_CHANGED' });
+    expect(revokeCalled).toBe(false);
+  });
+
+  it('quarantines credentials arriving after offboarding and invalidates pending draft claims', async () => {
+    const owner = await employee(), connection = await connect(owner), draft = claimInput(connection);
+    await tx(client => claimGmailDraftOperation(client, owner, draft));
+    await admin.query('UPDATE public."VerifiedNumber" SET is_active=false WHERE id=$1', [owner.employeeId]);
+    const issued = { googleSub: connection.googleSub!, refreshToken: 'synthetic-offboarded-callback-token', grantedScopes: scopes };
+    expect(await tx(client => quarantineGmailIssuedToken(client, owner, issued, env))).toBe('pending');
+    const row = (await admin.query('SELECT status, version FROM context_gmail_private.connections WHERE employee_id=$1', [owner.employeeId])).rows[0];
+    expect(row).toEqual({ status: 'revoking', version: connection.version + 1 });
+    expect((await admin.query('SELECT state FROM context_gmail_private.draft_operations WHERE employee_id=$1 AND operation_id=$2',
+      [owner.employeeId, draft.operationId])).rows[0].state).toBe('unknown');
+    expect(await tx(client => completeGmailDisconnect(client, owner, async current => {
+      expect(decryptGmailSecret(current.encryptedRefreshToken!,
+        { purpose: 'refresh_token', employeeId: owner.employeeId, id: current.id }, env)).toBe(issued.refreshToken);
+    }))).toMatchObject({ status: 'disconnected', encryptedRefreshToken: null });
   });
 
   it('retains historical references and reconciles uncertain drafts only for the same verified Google account', async () => {
