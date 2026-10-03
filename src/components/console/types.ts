@@ -15,6 +15,7 @@ export const AGENT_SCOPE_OPTIONS = [
   ...READ_SCOPE_OPTIONS,
   { value: 'gis:write', label: 'Create and undo own GIS points' },
   { value: 'mail:drafts', label: 'Create and read own email drafts' },
+  { value: 'crm.rfq:write', label: 'Create new CRM RFQs' },
 ] as const;
 
 export type Employee = { email: string; name: string; isAdmin: boolean; isAnalyst: boolean; scopes: string[] };

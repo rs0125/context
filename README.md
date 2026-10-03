@@ -1,6 +1,8 @@
 # Wareongo Context
 
-A REST, Markdown, and remote MCP context service for employee AI tools. REST remains read-only; MCP additionally supports explicitly authorized GIS creation, guarded compensation and employee Gmail draft creation. It combines reviewed company guides with permitted warehouse facts and CRM opportunities. Employees see leads they created or are assigned to; Analysts (including roster admins) see all mirrored leads. The same Next.js deployment hosts the `/mcp` endpoint and an employee console for agent setup, with Markdown editing for roster admins.
+A REST, Markdown, and remote MCP context service for employee AI tools. REST remains read-only; MCP additionally supports explicitly authorized GIS creation, guarded GIS compensation, employee Gmail draft creation and new CRM RFQ creation. It combines reviewed company guides with permitted warehouse facts and CRM opportunities. Employees see leads they created or are assigned to; Analysts (including roster admins) see all mirrored leads. The same Next.js deployment hosts the `/mcp` endpoint and an employee console for agent setup, with Markdown editing for roster admins.
+
+`create_crm_rfq` adds explicitly granted new-RFQ creation with verbatim source descriptions and duplicate-safe receipt recovery. It remains disabled until configured; CRM audit/history and reversal are deferred. See [RFQ SOP, permissions and setup](docs/crm-rfq-writes.md).
 
 `create_gis_poi` requires an explicit `gis:write` grant plus current dashboard access and calls the dashboard backend using Context Engine's own signed identity. The foundation was migrated, configured and deployed on 3 October 2026; fresh installations remain disabled by default. Existing grants do not gain writes automatically. Ramesh still needs a generic write executor before it can invoke this tool. See [GIS tool setup and boundaries](docs/gis-write-tool.md).
 

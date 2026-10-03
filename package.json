@@ -30,6 +30,7 @@
     "test:mcp:live": "node scripts/verify-mcp.mjs",
     "test:tooling:agent": "node scripts/tooling-eval.mjs",
     "test:crm-query:live": "CONTEXT_LIVE_CRM_QUERY_TEST=1 vitest run tests/crm-query-live.test.ts",
+    "crm-writes:migrate": "node scripts/migrate-crm-writes.mjs",
     "mcp:migrate": "node scripts/migrate-mcp-oauth.mjs",
     "security:migrate": "node scripts/migrate-security.mjs",
     "security:runtime": "node scripts/provision-runtime-role.mjs",

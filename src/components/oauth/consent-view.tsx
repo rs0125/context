@@ -20,6 +20,7 @@ const permissionLabels: Record<string, string> = {
   'analytics:read': 'Website analytics (Analyst access)',
   'gis:write': 'Create and undo own GIS points',
   'mail:drafts': 'Create and read own email drafts',
+  'crm.rfq:write': 'Create new CRM RFQs',
 };
 
 export function ConsentView({ details, loading, error, onRetry, onConnect, onCancel }: {
@@ -30,10 +31,11 @@ export function ConsentView({ details, loading, error, onRetry, onConnect, onCan
   const [submitting, setSubmitting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [formError, setFormError] = useState('');
-  const requestsWrites = details?.scopes.some(scope => scope === 'gis:write' || scope === 'mail:drafts') === true;
+  const requestsWrites = details?.scopes.some(scope => scope === 'gis:write' || scope === 'mail:drafts' || scope === 'crm.rfq:write') === true;
   const actionBoundary = [
     ...(details?.scopes.includes('gis:write') ? ['Create and undo your own eligible GIS points.'] : []),
     ...(details?.scopes.includes('mail:drafts') ? ['Create and read drafts in your connected work mailbox. This does not send email or read your inbox.'] : []),
+    ...(details?.scopes.includes('crm.rfq:write') ? ['Create new CRM RFQs with the original request text. This does not grant CRM updates, notes or deletion.'] : []),
   ].join(' ');
 
   async function connect(event: FormEvent<HTMLFormElement>) {
@@ -62,7 +64,7 @@ export function ConsentView({ details, loading, error, onRetry, onConnect, onCan
           <div className="consent-application"><dl><div><dt>Application website</dt><dd>{details.clientOrigin}</dd></div><div><dt>Return address</dt><dd>{details.redirectOrigin}</dd></div></dl>
             <details className="consent-details"><summary>Connection details</summary><dl><div><dt>Full return URL</dt><dd>{details.redirectUri}</dd></div><div><dt>Wareongo server</dt><dd>{details.resource}</dd></div></dl><p className="consent-client-note">The application supplies its name; Wareongo has not verified it. Check that you trust the website and return address.</p></details>
           </div>
-          <div className="consent-permissions"><h2>{requestsWrites ? 'Requested permissions' : 'Can read'}</h2><ul>{details.scopes.map(scope => <li key={scope}><span><Icon name="check" size={15} /></span><div><strong>{permissionLabels[scope] ?? scope}</strong></div></li>)}</ul><p className="consent-boundary">{requestsWrites ? `${actionBoundary} Requires your key's explicit grants and current employee access. This does not grant changes to CRM or warehouse records.` : 'Only the data your API key allows. Nothing can be changed.'}</p></div>
+          <div className="consent-permissions"><h2>{requestsWrites ? 'Requested permissions' : 'Can read'}</h2><ul>{details.scopes.map(scope => <li key={scope}><span><Icon name="check" size={15} /></span><div><strong>{permissionLabels[scope] ?? scope}</strong></div></li>)}</ul><p className="consent-boundary">{requestsWrites ? `${actionBoundary} Requires your key's explicit grants and current employee access. Only the listed actions are granted.` : 'Only the data your API key allows. Nothing can be changed.'}</p></div>
           <form className="consent-form" method="post" action="/api/oauth/authorize" onSubmit={event => void connect(event)}>
             <label htmlFor="employee-api-key">Employee API key</label><input id="employee-api-key" name="apiKey" type="password" autoComplete="off" autoCapitalize="none" spellCheck={false} value={key} maxLength={128} onChange={event => setKey(event.target.value)} disabled={submitting || cancelling} required aria-describedby="employee-key-help" />
             <p id="employee-key-help">{requestsWrites ? 'Use an employee key explicitly granted the requested actions. Keys created on the Connect Claude page grant reads only.' : 'Copy your employee API key from the Connect Claude page and paste it here.'}</p>

@@ -76,6 +76,12 @@ export async function withGmailWriteTransaction<T>(operation: (client: PoolClien
   return withTransaction(operation, pool ?? getPool(), false);
 }
 
+/** Private CRM dispatch receipts only. Business records are written through Twenty. */
+export async function withCrmWriteTransaction<T>(operation: (client: PoolClient) => Promise<T>, pool?: Pool): Promise<T> {
+  if (process.env.CONTEXT_CRM_RFQ_WRITES_ENABLED !== 'true') throw new HttpError(503, 'CRM_WRITES_DISABLED', 'RFQ creation is not enabled.');
+  return withTransaction(operation, pool ?? getPool(), false);
+}
+
 async function withTransaction<T>(operation: (client: PoolClient) => Promise<T>, pool: Pool, readOnly: boolean): Promise<T> {
   if (pool.waitingCount >= 4) {
     throw new HttpError(503, 'DATABASE_BUSY', 'The read service is busy. Retry shortly.');

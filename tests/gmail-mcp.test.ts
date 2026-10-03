@@ -157,6 +157,43 @@ describe('WhatsApp Gmail draft MCP boundary', () => {
     expect(executeEmailDraft).not.toHaveBeenCalled();
   });
 
+  it('keeps RFQ and mail capabilities independent when both are enabled', async () => {
+    vi.stubEnv('CONTEXT_CRM_RFQ_WRITES_ENABLED', 'true');
+    vi.stubEnv('TWENTY_CRM_BASE_URL', 'https://crm.example.test');
+    vi.stubEnv('CONTEXT_CRM_WRITE_API_KEY', 'synthetic');
+    const employee: KeyRegistration = { ...key(), scopes: ['knowledge:read', 'mail:drafts', 'crm.rfq:write'] };
+    let currentScopes: string[] = employee.scopes;
+    const read: McpDependencies['read'] = async () => Response.json({ data: { employee_id: 7, scopes: currentScopes, read_only: true,
+      knowledge_discovery: { permitted: true, status: 'not_checked', index_path: '/api/v1/wiki/pages', search_path: '/api/v1/wiki/search' },
+      server_clock: clockContext() }, meta: { requestId: 'synthetic', generatedAt: new Date().toISOString() } });
+    const args = { operation_id: randomUUID(), raw_text: '5000 sqft in Hoskote', location: 'Hoskote', requirement: '5000 sqft' };
+    const crmRfq = vi.fn(async () => ({ operation_id: args.operation_id, outcome: 'outcome_unknown' as const,
+      code: 'CRM_OUTCOME_UNKNOWN', message: 'Recover the same operation.' }));
+    const deps = { authenticate: async () => employee, read, crmRfq };
+    const tools = (await call('tools/list', {}, deps)).result.tools;
+    for (const [name, scope] of [['create_email_draft', 'mail:drafts'], ['create_crm_rfq', 'crm.rfq:write']]) {
+      expect(tools.find((tool: { name: string }) => tool.name === name)._meta['wareongo/context-write-v1'].requiredScopes).toEqual([scope]);
+    }
+    for (const [scopes, capabilities] of [
+      [['mail:drafts', 'crm.rfq:write'], ['create_email_draft', 'create_crm_rfq']],
+      [['mail:drafts'], ['create_email_draft']],
+      [['crm.rfq:write'], ['create_crm_rfq']],
+      [[], []],
+    ]) {
+      currentScopes = scopes;
+      const result = (await call('tools/call', { name: 'get_context', arguments: {} }, deps)).result;
+      expect(result.structuredContent.data).toMatchObject({ read_only: capabilities.length === 0, write_capabilities: capabilities });
+    }
+    const rfq = (await call('tools/call', { name: 'create_crm_rfq', arguments: args }, deps)).result;
+    expect(rfq.structuredContent).toMatchObject({ code: 'CRM_OUTCOME_UNKNOWN', meta: { toolName: 'create_crm_rfq' } });
+    expect(crmRfq).toHaveBeenCalledOnce();
+    expect(executeEmailDraft).not.toHaveBeenCalled();
+    const mail = (await call('tools/call', { name: 'create_email_draft', arguments: input }, deps)).result;
+    expect(mail.structuredContent).toMatchObject({ code: 'GMAIL_DRAFT_SAVED', meta: { toolName: 'create_email_draft' } });
+    expect(executeEmailDraft).toHaveBeenCalledOnce();
+    expect(crmRfq).toHaveBeenCalledOnce();
+  });
+
   it.each(['get_email_connection', 'read_email_draft'] as const)('keeps %s on the read envelope and passes grant revalidation', async name => {
     const employee = key(), revalidateKey = vi.fn(async () => {});
     const data = name === 'get_email_connection'

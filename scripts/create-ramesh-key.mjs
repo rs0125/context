@@ -10,7 +10,7 @@ if (!values.directory || !values.kid || !/^[A-Za-z0-9_-]{1,48}$/.test(values.kid
 // Writes require explicit opt-in plus a compatible action harness and current employee access.
 const scopes = values.scopes.split(',');
 if (!scopes.length || new Set(scopes).size !== scopes.length
-  || scopes.some(scope => !['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read', 'gis:write', 'mail:drafts'].includes(scope))) throw new Error('INVALID_SCOPES');
+  || scopes.some(scope => !['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read', 'gis:write', 'mail:drafts', 'crm.rfq:write'].includes(scope))) throw new Error('INVALID_SCOPES');
 const directory = path.resolve(values.directory);
 await mkdir(directory, { mode: 0o700 }); // A new directory prevents accidentally replacing installed secrets.
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
