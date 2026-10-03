@@ -14,6 +14,7 @@ import { parseCrmContextQuery } from './crm-context-query';
 import { analyticsCapabilities, ga4Report, searchConsoleReport, validateGa4Query, validateSearchConsoleQuery } from './analytics';
 import { parseShortlistAssessmentQuery, buildShortlistAssessment } from './shortlist-assessment';
 import { parseLocationQuery, resolveLocation } from './location-resolver';
+import { getEmailConnection, readEmailDraft, listEmailDrafts } from './gmail-tools';
 
 const ANALYTICS_GUIDANCE = 'Aggregate website analytics for Analysts: /api/v1/analytics/capabilities discovers supported reports; /api/v1/analytics/ga4 reports traffic and recorded events; /api/v1/analytics/search-console reports Google organic search. Analytics dates use the source timezone, not necessarily the India server clock. Preserve source_fetched_at, resolved dates, quality warnings and pagination. For form activity per session use ga4?report=form_performance with a landing_page_contains filter; its separate event ratios use matching entry sessions. For relative comparisons resolve period on the first group and reuse the returned dates for later groups. Recent data may change. Event counts are not unique CRM leads or a sequential conversion funnel; Search Console clicks are not GA sessions. Failed reads mean unavailable, never zero.';
 
@@ -29,6 +30,9 @@ type ApiDependencies = {
   ga4Report: typeof ga4Report;
   searchConsoleReport: typeof searchConsoleReport;
   resolveLocation: typeof resolveLocation;
+  getEmailConnection: typeof getEmailConnection;
+  readEmailDraft: typeof readEmailDraft;
+  listEmailDrafts: typeof listEmailDrafts;
   audit: (entry: Record<string, unknown>) => void;
 };
 const defaults: ApiDependencies = {
@@ -36,7 +40,7 @@ const defaults: ApiDependencies = {
   authenticate: request => authenticateRequestKey(request, hash => withReadOnlyTransaction(client => findDatabaseKey(client, hash))),
   liveCrmAccess: (principal, view, opportunityId) => getLiveCrmAccess(principal, { view, opportunityId }),
   relatedCrmContext: getRelatedCrmContext,
-  analyticsCapabilities, ga4Report, searchConsoleReport, resolveLocation,
+  analyticsCapabilities, ga4Report, searchConsoleReport, resolveLocation, getEmailConnection, readEmailDraft, listEmailDrafts,
   audit: entry => console.info(JSON.stringify(entry)),
 };
 
@@ -211,6 +215,25 @@ export async function handleApiRequest(request: Request, path: string[], depende
     const key = await deps.authenticate(request);
     keyId = key.id;
     rateLimit(key.id);
+    if (path[0] === 'mail') {
+      const query = new URL(request.url).searchParams;
+      const listing = path.join('/') === 'mail/drafts';
+      strictQuery(query, listing ? ['limit', 'cursor'] : []);
+      employeeId = key.employeeId;
+      const revalidate = deps.revalidateKey ?? (async () => {});
+      // The mail service owns fresh grant/connection checks around Google I/O.
+      // It never holds a database transaction while calling Google.
+      const value = path.join('/') === 'mail/connection'
+        ? await deps.getEmailConnection(key, request.signal, revalidate, { readTransaction: deps.transaction })
+        : listing ? await deps.listEmailDrafts({
+          ...(query.has('limit') ? { limit: /^\d+$/.test(query.get('limit')!) ? Number(query.get('limit')) : NaN } : {}),
+          ...(query.has('cursor') ? { cursor: query.get('cursor') } : {}),
+        }, key, request.signal, revalidate, { readTransaction: deps.transaction })
+        : path.length === 3 && path[1] === 'drafts'
+          ? await deps.readEmailDraft({ draft_ref: path[2] }, key, request.signal, revalidate, { readTransaction: deps.transaction })
+          : (() => { throw new HttpError(404, 'NOT_FOUND', 'Endpoint not found.'); })();
+      return request.method === 'HEAD' ? new Response(null, { headers }) : Response.json({ data: value, meta }, { headers });
+    }
     let crmAccess: CrmAccess | undefined;
     let verifiedPrincipal: Principal | undefined;
     let relatedContext: Awaited<ReturnType<typeof getRelatedCrmContext>> | undefined;
@@ -325,8 +348,9 @@ export async function handleApiRequest(request: Request, path: string[], depende
     const route = path.join('/');
     const operation = ['context', 'context.md', 'wiki/pages', 'wiki/search', 'warehouses', 'warehouses/filters',
       'warehouses/summary', 'crm/opportunities', 'crm/summary', 'crm/filters', 'crm/my-briefing',
-      'analytics/capabilities', 'analytics/ga4', 'analytics/search-console', 'locations/resolve', 'openapi.json'].includes(route)
+      'analytics/capabilities', 'analytics/ga4', 'analytics/search-console', 'locations/resolve', 'mail/connection', 'mail/drafts', 'openapi.json'].includes(route)
       ? route : path.length === 2 && path[0] === 'warehouses' ? 'warehouses/read'
+        : path.length === 3 && path[0] === 'mail' && path[1] === 'drafts' ? 'mail/draft/read'
         : path.length === 3 && path[0] === 'wiki' && path[1] === 'pages' ? 'wiki/read'
           : path.length === 4 && path[0] === 'crm' && path[1] === 'opportunities' && path[3] === 'context' ? 'crm/context'
             : path.length === 4 && path[0] === 'crm' && path[1] === 'opportunities' && path[3] === 'assessment' ? 'crm/assessment'

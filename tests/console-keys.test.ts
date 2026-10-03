@@ -20,15 +20,16 @@ beforeEach(() => { vi.stubEnv('CONTEXT_KEY_ENCRYPTION_SECRET', secret); vi.stubE
 afterEach(() => vi.unstubAllEnvs());
 
 describe('employee-bound encrypted console keys', () => {
-  it('new console rotation remains read-only even if its caller has explicit GIS eligibility', async () => {
+  it('new console rotation remains read-only even if its caller has explicit action eligibility', async () => {
     const query = vi.fn(async (_sql: string, values: unknown[]) => {
       const [id, employee_id, employee_email, token_hash, encrypted_token, scopes, expires_at] = values;
       return { rows: [{ id, employee_id, employee_email, token_hash, encrypted_token, scopes, expires_at }] };
     });
     const result = await rotateOwnConsoleKey({ query } as unknown as PoolClient,
-      { ...identity, scopes: [...identity.scopes, 'gis:write'] }, now);
+      { ...identity, scopes: [...identity.scopes, 'gis:write', 'mail:drafts'] }, now);
     expect(result.scopes).toEqual(identity.scopes);
     expect(query.mock.calls[0][1][5]).not.toContain('gis:write');
+    expect(query.mock.calls[0][1][5]).not.toContain('mail:drafts');
   });
 
   it.each([{ adminAccess: true, analystAccess: false }, { adminAccess: false, analystAccess: true }, { adminAccess: false, analystAccess: false }])('issues analytics only with current Analyst access (%j)', async ({ adminAccess, analystAccess }) => {

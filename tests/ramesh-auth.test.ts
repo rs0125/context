@@ -54,10 +54,22 @@ describe('Ramesh signed request authentication', () => {
     expect(key.id).toMatch(/^ramesh_/); expect(nonces.size).toBe(1);
     await revalidateRameshRequest(db, key);
   });
+  it('admits explicitly registered draft access for an active employee without dashboard permissions', async () => {
+    registration.scopes = ['mail:drafts'];
+    vi.stubEnv('CONTEXT_RAMESH_PUBLIC_KEYS_JSON', JSON.stringify([registration]));
+    rows[0].dashboardAccess = false;
+    const key = await authenticateRameshRequest(await signed({ claims: { scopes: ['mail:drafts'] } }), deps);
+    expect(key.employeeId).toBe(23);
+    expect(key.scopes).toEqual(['mail:drafts']);
+    await revalidateRameshRequest(db, key);
+    rows[0].is_active = false;
+    await expect(revalidateRameshRequest(db, key)).rejects.toMatchObject({ status: 401 });
+  });
   it.each([
     ['issuer', { iss: 'attacker' }], ['audience', { aud: `${origin}/mcp` }], ['target', { htu: `${origin}/mcp` }],
     ['method', { htm: 'DELETE' }], ['group', { chat_type: 'group' }], ['other employee', { sub: '24' }],
     ['unknown number', { phone: '+919999999999' }], ['unregistered analytics scope', { scopes: ['analytics:read'] }],
+    ['unregistered draft scope', { scopes: ['mail:drafts'] }], ['unsupported mail sending', { scopes: ['mail:send'] }],
     ['duplicate scope', { scopes: ['crm:read', 'crm:read'] }], ['unknown claim', { admin: true }],
     ['long expiry', { exp: Math.floor(Date.now() / 1000) + 900 }],
     ['expired', { iat: Math.floor(Date.now() / 1000) - 80, exp: Math.floor(Date.now() / 1000) - 20 }],

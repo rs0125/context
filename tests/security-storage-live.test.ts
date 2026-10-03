@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { resolvePrincipal } from '../src/lib/auth';
@@ -6,6 +6,7 @@ import { requireActiveConsoleSession, revokeConsoleSession } from '../src/lib/co
 import { rotateOwnConsoleKey, getOwnConsoleKey } from '../src/lib/console-keys';
 import { savePrompt } from '../src/lib/prompts';
 import { consumeRameshNonce } from '../src/lib/ramesh-replay';
+import { claimGmailDraftOperation, saveGmailConnection } from '../src/lib/gmail-storage';
 const securityModule = '../scripts/migrate-security.mjs';
 const roleModule = '../scripts/provision-runtime-role.mjs';
 const knowledgeModule = '../scripts/migrate-knowledge.mjs';
@@ -18,6 +19,8 @@ const { migrateKnowledge } = await import(knowledgeModule);
 const { migrateConsoleStorage } = await import(consoleModule);
 const { migratePromptStorage } = await import(promptsModule);
 const { migrateMcpOAuthStorage } = await import(oauthModule);
+const gmailModule = '../scripts/migrate-gmail.mjs';
+const { migrateGmailStorage } = await import(gmailModule);
 const rameshModule = '../scripts/migrate-ramesh-auth.mjs';
 const { applyRameshAuthSchema } = await import(rameshModule);
 const platformModule = '../scripts/restrict-public-runtime-access.mjs';
@@ -55,9 +58,10 @@ describe.skipIf(!connection)('isolated PostgreSQL security boundaries', () => {
     await migrateConsoleStorage(owner); await migrateKnowledge(owner, []);
     await migratePromptStorage(owner); await migrateMcpOAuthStorage(owner);
     await migrateSecurityStorage(owner, [legacy]);
+    await migrateGmailStorage(owner);
     const password = randomBytes(32).toString('base64url');
     // --check must leave no role or changed privileges behind.
-    expect(await provisionRuntimeRole(owner, password, { commit: false })).toMatchObject({ applied: false });
+    expect(await provisionRuntimeRole(owner, password, { commit: false })).toMatchObject({ applied: false, privateTables: 11 });
     expect((await owner.query("SELECT oid FROM pg_roles WHERE rolname = 'context_engine_runtime'")).rows).toEqual([]);
     for (const grant of [
       'INSERT ON public."Warehouse"', 'INSERT (id) ON public."Warehouse"', 'CREATE ON SCHEMA public',
@@ -115,6 +119,8 @@ describe.skipIf(!connection)('isolated PostgreSQL security boundaries', () => {
     'SET ROLE postgres',
     'UPDATE context_security_private.legacy_key_bindings SET employee_id = 8',
     'DELETE FROM context_prompts_private.prompt_overrides',
+    'DELETE FROM context_gmail_private.connections',
+    'TRUNCATE context_gmail_private.draft_operations',
     "UPDATE context_ramesh_private.request_nonces SET expires_at = now() + interval '1 hour'",
   ])('denies %s', async sql => { await expect(runtime.query(sql)).rejects.toMatchObject({ code: '42501' }); });
   it('can issue and recopy a private key and save a prompt with the restricted role', async () => {
@@ -136,10 +142,37 @@ describe.skipIf(!connection)('isolated PostgreSQL security boundaries', () => {
     await revokeConsoleSession(runtime, session);
     await expect(requireActiveConsoleSession(owner, session)).rejects.toMatchObject({ status: 401 });
   });
+  it('keeps Gmail private and claims a draft at most once across real committed concurrent transactions', async () => {
+    const gmailOwner = { employeeId: identity.employeeId, employeeEmail: identity.email };
+    const env: NodeJS.ProcessEnv = { NODE_ENV: 'test', CONTEXT_GMAIL_ENCRYPTION_KEY: randomBytes(32).toString('base64url') };
+    await runtime.query('BEGIN');
+    const connection = await saveGmailConnection(runtime, gmailOwner, { googleSub: 'synthetic-google-sub',
+      accountEmail: identity.email, refreshToken: 'synthetic-refresh-token', grantedScopes: ['https://www.googleapis.com/auth/gmail.compose'] }, env);
+    await runtime.query('COMMIT');
+    const claim = { operationId: randomUUID(), connectionId: connection.id, connectionVersion: connection.version, requestHash: 'a'.repeat(64) };
+    const results = await Promise.all([1, 2, 3].map(async () => {
+      const client = await runtimePool.connect();
+      try {
+        await client.query('BEGIN');
+        const result = await claimGmailDraftOperation(client, gmailOwner, claim);
+        await client.query('COMMIT'); return result;
+      } catch (error) { await client.query('ROLLBACK'); throw error; }
+      finally { client.release(); }
+    }));
+    expect(results.filter(result => result.claimed)).toHaveLength(1);
+    for (const role of ['anon', 'authenticated', 'service_role']) {
+      await owner.query('BEGIN');
+      try {
+        await owner.query(`SET LOCAL ROLE ${role}`);
+        await expect(owner.query('SELECT * FROM context_gmail_private.connections')).rejects.toMatchObject({ code: '42501' });
+      } finally { await owner.query('ROLLBACK'); }
+    }
+  });
   it('reruns all private migrations safely after restricted-role policies are installed', async () => {
     await migrateConsoleStorage(owner); await migrateKnowledge(owner, []);
     await migratePromptStorage(owner); await migrateMcpOAuthStorage(owner);
     await expect(migrateSecurityStorage(owner, [legacy])).resolves.toMatchObject({ verified: true });
+    await expect(migrateGmailStorage(owner)).resolves.toMatchObject({ verified: true, runtimeGranted: true });
   });
   it('does not adopt an existing runtime role or reset its password', async () => {
     await expect(provisionRuntimeRole(owner, randomBytes(32).toString('base64url'))).rejects.toThrow('RUNTIME_ROLE_ALREADY_EXISTS');

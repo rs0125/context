@@ -39,6 +39,13 @@ describe('authorization request and preview', () => {
       expect(() => readAuthorizationPreview({ ...previewResponse, requestedScopes: [scope] }, currentOrigin)).toThrow();
   });
 
+  it('accepts draft access without inventing inbox or email-sending permissions', () => {
+    expect(readAuthorizationPreview({ ...previewResponse, requestedScopes: ['mail:drafts'] }, currentOrigin).scopes)
+      .toEqual(['mail:drafts']);
+    for (const scope of ['mail:send', 'mail:inbox', 'mail:*'])
+      expect(() => readAuthorizationPreview({ ...previewResponse, requestedScopes: [scope] }, currentOrigin)).toThrow();
+  });
+
   it('allows localhost only over HTTP and rejects insecure public callback addresses', () => {
     expect(readAuthorizationPreview({ ...previewResponse, clientOrigin: 'http://localhost:4000', redirectOrigin: 'http://localhost:4000', redirectUri: 'http://localhost:4000/callback', resource: 'http://localhost:3100/mcp' }, 'http://localhost:3100').redirectOrigin).toBe('http://localhost:4000');
     expect(() => readAuthorizationPreview({ ...previewResponse, clientOrigin: 'http://client.example.test' }, currentOrigin)).toThrow();

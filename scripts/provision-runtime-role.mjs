@@ -24,6 +24,8 @@ export const RUNTIME_TABLES = [
   ['context_mcp_private.oauth_tokens', 'SELECT, INSERT, UPDATE'],
   ['context_security_private.session_revocations', 'SELECT, INSERT, DELETE'],
   ['context_security_private.legacy_key_bindings', 'SELECT'],
+  ['context_gmail_private.connections', 'SELECT, INSERT, UPDATE'],
+  ['context_gmail_private.draft_operations', 'SELECT, INSERT, UPDATE'],
 ];
 
 export async function provisionRuntimeRole(client, password, { commit = true, allowReviewedPlatformAccess = false } = {}) {
@@ -90,7 +92,7 @@ export async function provisionRuntimeRole(client, password, { commit = true, al
     if (!unsafe || ['definer_access', 'extra_privileges', 'schema_create', 'roster_excess', 'unrelated_access']
       .some(flag => unsafe[flag] !== false)) throw new Error('RUNTIME_PUBLIC_GRANTS_UNSAFE');
     await client.query(commit ? 'COMMIT' : 'ROLLBACK');
-    return { applied: commit, verified: true, role: RUNTIME_ROLE, sourceWrites: false, sourceTables: 6, privateTables: 9,
+    return { applied: commit, verified: true, role: RUNTIME_ROLE, sourceWrites: false, sourceTables: 6, privateTables: 11,
       platformIsolation: platform.report.length === 0, inheritedPlatformAccess: platform.report };
   } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
 }

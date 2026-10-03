@@ -15,7 +15,7 @@ const JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
 export const GOOGLE_CALLBACK_PATH = '/api/auth/google/callback';
 export const GOOGLE_FLOW_SECONDS = 10 * 60;
 const RANDOM_VALUE = /^[A-Za-z0-9_-]{43}$/;
-type Flow = { state: string; nonce: string; verifier: string; clientId: string; iat: number; exp: number };
+type Flow = { state: string; nonce: string; verifier: string; clientId: string; iat: number; exp: number; returnTo?: '/mail' };
 type VerifiedIdentity = { email: string; sub: string };
 type Dependencies = {
   fetch: typeof fetch;
@@ -23,6 +23,7 @@ type Dependencies = {
   verify: typeof verifyGoogleIdToken;
   limit: typeof anonymousRequestLimit;
   now: () => number;
+  returnTo?: '/mail';
 };
 const defaults: Dependencies = {
   fetch: (...args) => fetch(...args), transaction: withReadOnlyTransaction,
@@ -136,10 +137,12 @@ export async function handleGoogleLogin(request: Request, dependencies: Partial<
   try {
     const config = googleConfiguration(), url = new URL(request.url);
     if (request.method !== 'GET' || url.origin !== consoleOrigin() || url.search) throw invalid();
+    if (deps.returnTo !== undefined && deps.returnTo !== '/mail') throw invalid();
     deps.limit(request, 'console-google:login', 30);
     const iat = Math.floor(deps.now() / 1000);
     const flow: Flow = { state: randomBytes(32).toString('base64url'), nonce: randomBytes(32).toString('base64url'),
-      verifier: randomBytes(32).toString('base64url'), clientId: config.clientId, iat, exp: iat + GOOGLE_FLOW_SECONDS };
+      verifier: randomBytes(32).toString('base64url'), clientId: config.clientId, iat, exp: iat + GOOGLE_FLOW_SECONDS,
+      ...(deps.returnTo ? { returnTo: deps.returnTo } : {}) };
     const authorization = new URL(AUTHORIZATION_URL);
     authorization.search = new URLSearchParams({ client_id: config.clientId, response_type: 'code',
       scope: 'openid email', redirect_uri: config.redirectUri, state: flow.state, nonce: flow.nonce,
@@ -164,7 +167,8 @@ function callbackFlow(request: Request, clientId: string, now: number) {
     || flow.clientId !== clientId || !Number.isInteger(flow.iat) || !Number.isInteger(flow.exp)
     || Number(flow.iat) > seconds + 30 || Number(flow.exp) <= seconds
     || Number(flow.exp) - Number(flow.iat) !== GOOGLE_FLOW_SECONDS
-    || Object.keys(flow).some(key => !['state', 'nonce', 'verifier', 'clientId', 'iat', 'exp'].includes(key))
+    || (flow.returnTo !== undefined && flow.returnTo !== '/mail')
+    || Object.keys(flow).some(key => !['state', 'nonce', 'verifier', 'clientId', 'iat', 'exp', 'returnTo'].includes(key))
     || !state || !RANDOM_VALUE.test(state) || !timingSafeEqual(Buffer.from(state), Buffer.from(flow.state))) throw invalid();
   return { flow: flow as Flow, params: url.searchParams };
 }
@@ -232,7 +236,7 @@ export async function handleGoogleCallback(request: Request, dependencies: Parti
     const token = await exchangeCode(code, flow.verifier, config, deps.fetch);
     const verified = await deps.verify(token, { clientId: config.clientId, nonce: flow.nonce, now: deps.now() });
     const identity = await deps.transaction(client => resolveConsoleEmployee(client, verified.email));
-    const response = redirect(`${consoleOrigin()}/`);
+    const response = redirect(`${consoleOrigin()}${flow.returnTo ?? '/'}`);
     response.headers.append('Set-Cookie', consoleCookie('oauth', '', 0));
     response.headers.append('Set-Cookie', consoleCookie('session', createConsoleSession(identity, `google:${verified.sub}`, process.env, deps.now()), SESSION_SECONDS));
     securityAudit('login', 'success', { employeeId: identity.employeeId });

@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { handleMcpRequest } from '../src/lib/mcp';
-vi.mock('../src/lib/prompts', () => ({ loadPromptValues: async () => ({}) }));
+// This evaluation has a fixed business-read fixture profile. The production
+// location resolver has no fixture here; select the profile through the real
+// platform controls without weakening the evaluator's fail-closed catalog guard.
+vi.mock('../src/lib/prompts', () => ({ loadPromptValues: async () => ({ toolPlatforms: { resolve_location: [] } }) }));
 import type { KeyRegistration } from '../src/lib/auth';
 const modulePath = '../scripts/tooling-eval.mjs';
 const { answerSchema, createModelClient, evaluationInstructions, fetchAuthorizedCatalog, fetchCatalog, fixtureResult, FIXTURE_NOW, gradeScenario, LEADS, LIMITS, matchesSchema, modelTools, runScenario, SCENARIOS } = await import(modulePath);
@@ -29,7 +32,7 @@ function answerFor(entry: ReturnType<typeof call>, summary = 'Synthetic answer w
 }
 const scenario = (id: string) => SCENARIOS.find((item: { id: string }) => item.id === id)!;
 
-describe('natural-language evaluation with current real MCP definitions', () => {
+describe('natural-language business evaluation with current real MCP definitions', () => {
   it('discovers fourteen read-only tools through the SDK without business reads or OAuth state', () => {
     expect(catalog.tools).toHaveLength(14);
     expect(read).not.toHaveBeenCalled();
@@ -50,6 +53,7 @@ describe('natural-language evaluation with current real MCP definitions', () => 
     const original = catalog.tools[0];
     expect(() => modelTools([{ ...original, annotations: { readOnlyHint: false } }])).toThrow('UNSAFE_CATALOG');
     expect(() => modelTools([{ ...original, name: 'update_crm' }])).toThrow('UNSAFE_CATALOG');
+    expect(() => modelTools([{ ...original, name: 'resolve_location' }])).toThrow('UNSAFE_CATALOG');
     expect(() => modelTools([original, original])).toThrow('UNSAFE_CATALOG');
   });
   it.each([

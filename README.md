@@ -1,10 +1,16 @@
 # Wareongo Context
 
-A REST, Markdown, and remote MCP context service for employee AI tools. REST remains read-only; MCP additionally supports explicitly authorized GIS creation and guarded compensation. It combines reviewed company guides with permitted warehouse facts and CRM opportunities. Employees see leads they created or are assigned to; Analysts (including roster admins) see all mirrored leads. The same Next.js deployment hosts the `/mcp` endpoint and an employee console for agent setup, with Markdown editing for roster admins.
+A REST, Markdown, and remote MCP context service for employee AI tools. REST remains read-only; MCP additionally supports explicitly authorized GIS creation, guarded compensation and employee Gmail draft creation. It combines reviewed company guides with permitted warehouse facts and CRM opportunities. Employees see leads they created or are assigned to; Analysts (including roster admins) see all mirrored leads. The same Next.js deployment hosts the `/mcp` endpoint and an employee console for agent setup, with Markdown editing for roster admins.
 
 `create_gis_poi` requires an explicit `gis:write` grant plus current dashboard access and calls the dashboard backend using Context Engine's own signed identity. The foundation was migrated, configured and deployed on 3 October 2026; fresh installations remain disabled by default. Existing grants do not gain writes automatically. Ramesh still needs a generic write executor before it can invoke this tool. See [GIS tool setup and boundaries](docs/gis-write-tool.md).
 
 `resolve_location` normalizes Google Maps links, raw coordinates and native pin coordinate pairs through one read-only tool, retaining extraction method and ambiguity. It does not save GIS points or call warehouse enrichment. See [location resolution and storage fields](docs/location-resolution.md).
+
+Optional employee Gmail drafts add `get_email_connection`, `create_email_draft`,
+`list_email_drafts` and `read_email_draft` for WhatsApp with an explicit `mail:drafts` grant. Draft
+creation uses Ramesh's confirmation flow; no send operation is exposed. Gmail
+setup is disabled by default and requires each employee to connect their account.
+See [Gmail setup and boundaries](docs/gmail-drafts.md).
 
 The API uses the dashboard and CRM Automations' existing shared Supabase data, with live Twenty CRM reads to verify employee identity, creation, and assignment. Organisational Markdown and its metadata live in the private PostgreSQL table `context_engine_private.knowledge_pages`; no company wiki content is bundled with the source or deployment. Employee context keys are separate credentials with narrower permissions. Source-system tokens stay on the server and are never forwarded to agents.
 

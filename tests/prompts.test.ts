@@ -52,7 +52,7 @@ describe('persistent prompt editing', () => {
     const { client, query } = setup([], false);
     const result = await readPrompts(client);
     expect(result.storageReady).toBe(false);
-    expect(result.prompts).toHaveLength(23);
+    expect(result.prompts).toHaveLength(27);
     expect(result.prompts.every(prompt => prompt.body === prompt.defaultBody && prompt.revision === null && !prompt.customized)).toBe(true);
     expect(query).toHaveBeenCalledOnce();
   });

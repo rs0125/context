@@ -70,6 +70,12 @@ export async function withSessionWriteTransaction<T>(operation: (client: PoolCli
   return withTransaction(operation, pool, false);
 }
 
+/** Private Gmail credentials/receipts only; never hold this transaction during Google I/O. */
+export async function withGmailWriteTransaction<T>(operation: (client: PoolClient) => Promise<T>, pool?: Pool): Promise<T> {
+  if (process.env.CONTEXT_GMAIL_ENABLED !== 'true') throw new HttpError(503, 'GMAIL_DISABLED', 'Gmail drafts are not enabled.');
+  return withTransaction(operation, pool ?? getPool(), false);
+}
+
 async function withTransaction<T>(operation: (client: PoolClient) => Promise<T>, pool: Pool, readOnly: boolean): Promise<T> {
   if (pool.waitingCount >= 4) {
     throw new HttpError(503, 'DATABASE_BUSY', 'The read service is busy. Retry shortly.');

@@ -7,12 +7,15 @@ import type { ToolPromptName } from './prompt-definitions';
 export const MCP_READ_CONTRACT_KEY = 'wareongo/context-read-v1';
 type ReadContract = {
   requiredScopes: Scope[];
-  sourceFamily: 'context' | 'knowledge' | 'warehouses' | 'crm' | 'analytics';
+  sourceFamily: 'context' | 'knowledge' | 'warehouses' | 'crm' | 'analytics' | 'mail';
 };
 
 /** Minimum discovery scopes. Individual arguments can require additional live permissions. */
-export type ReadToolName = Exclude<ToolPromptName, 'create_gis_poi' | 'rollback_gis_poi'>;
+export type ReadToolName = Exclude<ToolPromptName, 'create_gis_poi' | 'rollback_gis_poi' | 'create_email_draft'>;
 export const MCP_READ_CONTRACTS: Record<ReadToolName, ReadContract> = {
+  get_email_connection: { requiredScopes: ['mail:drafts'], sourceFamily: 'mail' },
+  list_email_drafts: { requiredScopes: ['mail:drafts'], sourceFamily: 'mail' },
+  read_email_draft: { requiredScopes: ['mail:drafts'], sourceFamily: 'mail' },
   get_context: { requiredScopes: [], sourceFamily: 'context' },
   resolve_location: { requiredScopes: [], sourceFamily: 'context' },
   analytics_capabilities: { requiredScopes: ['analytics:read'], sourceFamily: 'analytics' },

@@ -7,6 +7,7 @@ import { SCOPES } from "./auth";
 import { ga4ToolInput, searchConsoleToolInput, analyticsQueryParameters, analyticsReportOutput, analyticsCapabilitiesOutput } from "./analytics-tooling";
 import { shortlistAssessmentQuerySchema, shortlistAssessmentOutput } from "./shortlist-assessment";
 import { locationOutputSchema } from "./location-resolver";
+import { emailConnectionOutputSchema, emailDraftReadOutputSchema, emailDraftListOutputSchema } from "./gmail-tools";
 
 const errorResponses = Object.fromEntries(Object.entries({
   "400": { description: "Invalid query parameters or record identifier." },
@@ -432,6 +433,24 @@ export function getOpenApiDocument() {
       { name: "Analytics", description: "Read-only GA4 and Google Search Console aggregates. Requires analytics:read on the credential AND current Analyst access, inherited by roster administrators. Twenty administrator status alone does not grant analytics access. Sources are pinned by server configuration; clients cannot choose another property or supply Google credentials." },
     ],
     paths: {
+      "/mail/connection": {
+        get: { summary: "Check your Gmail draft connection", description: "Requires explicit mail:drafts scope and enabled Gmail integration. Returns only the current employee mailbox, frozen connection identity/version, and the browser connection page. Never returns tokens.",
+          operationId: "get_email_connection", security: [{ bearerAuth: [] }],
+          responses: jsonResponses("Your Gmail connection status.", false, z.toJSONSchema(emailConnectionOutputSchema)) },
+      },
+      "/mail/drafts": {
+        get: { summary: "Recover your saved draft references", description: "Requires mail:drafts and an active matching mailbox connection. Lists only creation references from this application for the current connection. No historical bodies, subjects or recipients. Read a reference separately for current content and availability.",
+          operationId: "list_email_drafts", security: [{ bearerAuth: [] }],
+          parameters: [{ name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 20, default: 10 } },
+            { name: "cursor", in: "query", schema: { type: "string", format: "uuid" }, description: "Unchanged nextCursor from the same mailbox list." }],
+          responses: jsonResponses("Newest creation references and nextCursor.", false, z.toJSONSchema(emailDraftListOutputSchema)) },
+      },
+      "/mail/drafts/{draft_ref}": {
+        get: { summary: "Read your saved Gmail draft", description: "Requires mail:drafts and the same active connection used to create the draft. Reads only a draft created through this service. Missing does not establish whether it was sent or deleted. Never creates, updates or sends mail.",
+          operationId: "read_email_draft", security: [{ bearerAuth: [] }],
+          parameters: [{ name: "draft_ref", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+          responses: jsonResponses("Current bounded plain-text draft content.", false, z.toJSONSchema(emailDraftReadOutputSchema)) },
+      },
       "/locations/resolve": {
         get: {
           operationId: "resolveLocation", tags: ["Context"], summary: "Resolve user-supplied coordinates or a Google Maps link without writing data",

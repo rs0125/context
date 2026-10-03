@@ -22,6 +22,7 @@
     "keys:create": "node scripts/create-key.mjs",
     "keys:revoke": "node scripts/revoke-key.mjs",
     "knowledge:migrate": "node scripts/migrate-knowledge.mjs",
+    "gmail:migrate": "node scripts/migrate-gmail.mjs",
     "test:knowledge:live": "node scripts/verify-knowledge.mjs",
     "test:smoke": "node scripts/smoke.mjs",
     "test:agent": "node scripts/agent-harness.mjs",

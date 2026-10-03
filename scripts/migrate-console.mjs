@@ -94,7 +94,7 @@ export async function migrateConsoleStorage(client) {
       if (table.marker !== `${TABLE_MARKER}${table.signature}`) fail('CONSOLE_RELATION_COLLISION');
       // Upgrade only our verified, locked table. Existing keys keep their
       // scopes; an administrator must explicitly replace their key to opt in.
-      if (!table.constraints.find(value => value.name === 'employee_api_keys_scopes_check').definition.includes("'gis:write'")) {
+      if (!['gis:write', 'mail:drafts'].every(scope => table.constraints.find(value => value.name === 'employee_api_keys_scopes_check').definition.includes(`'${scope}'`))) {
         await client.query(`ALTER TABLE context_auth_private.employee_api_keys
           DROP CONSTRAINT employee_api_keys_scopes_check,
           ADD CONSTRAINT employee_api_keys_scopes_check CHECK (${CONSOLE_CREDENTIAL_SCOPE_CHECK})`);

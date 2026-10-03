@@ -67,6 +67,13 @@ function assertFailure(response: Response, code: string, clearFlow = true) {
 }
 
 describe('Google console authorization request', () => {
+  it('signs only the literal mail return destination; callers cannot supply an arbitrary redirect', async () => {
+    const response = await handleGoogleLogin(new Request(`${origin}/api/mail/login`), { limit: vi.fn(), now: () => now, returnTo: '/mail' });
+    const saved = readSignedConsoleValue(response.headers.getSetCookie()[0].split(';')[0].split('=')[1], 'google-oauth');
+    expect(saved.returnTo).toBe('/mail');
+    const rejected = await handleGoogleLogin(new Request(`${origin}/api/mail/login`), { limit: vi.fn(), returnTo: 'https://evil.example' as '/mail' });
+    assertFailure(rejected, 'google_invalid', false);
+  });
   it('starts code + PKCE S256 with distinct random state/nonce and a purpose-signed ten-minute cookie', async () => {
     const limit = vi.fn();
     const response = await handleGoogleLogin(new Request(`${origin}/api/auth/login`), { limit, now: () => now });
@@ -169,6 +176,13 @@ describe('signed Google ID-token verification', () => {
 });
 
 describe('Google callback browser binding, transport, and roster checks', () => {
+  it('returns to mailbox setup only when that literal destination was signed into the login flow', async () => {
+    const deps = await dependencies();
+    const response = await handleGoogleCallback(callbackRequest({}, flowCookie({ returnTo: '/mail' })), deps);
+    expect(response.headers.get('location')).toBe(`${origin}/mail`);
+    const forged = await handleGoogleCallback(callbackRequest({}, flowCookie({ returnTo: 'https://evil.example' })), await dependencies());
+    assertFailure(forged, 'google_invalid', false);
+  });
   it('exchanges the code and verifies identity before opening a read transaction, then returns only the console session', async () => {
     const deps = await dependencies();
     const response = await handleGoogleCallback(callbackRequest({ scope: 'openid email', authuser: '0', hd: 'wareongo.com' }), deps);

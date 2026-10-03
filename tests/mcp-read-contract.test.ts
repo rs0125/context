@@ -12,6 +12,7 @@ const origin = 'https://context.example.test';
 const meta = { requestId: 'synthetic-contract', generatedAt: '2026-10-03T00:00:00.000Z' };
 const expected: Record<string, { requiredScopes: Scope[]; sourceFamily: string }> = {
   get_context: { requiredScopes: [], sourceFamily: 'context' },
+  resolve_location: { requiredScopes: [], sourceFamily: 'context' },
   analytics_capabilities: { requiredScopes: ['analytics:read'], sourceFamily: 'analytics' },
   ga4_report: { requiredScopes: ['analytics:read'], sourceFamily: 'analytics' },
   search_console_report: { requiredScopes: ['analytics:read'], sourceFamily: 'analytics' },
