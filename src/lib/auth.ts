@@ -7,7 +7,7 @@ import { hasAnalystAccess, readRosterEmployees } from './employee-access';
 
 export const READ_SCOPES = ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read'] as const;
 /** Supported permissions are not defaults: writes always need an explicit credential grant. */
-export const SCOPES = [...READ_SCOPES, 'gis:write'] as const;
+export const SCOPES = [...READ_SCOPES, 'gis:write', 'crm.rfq:write'] as const;
 export type Scope = typeof SCOPES[number];
 export type Principal = { employeeId: number; email: string; scopes: Scope[]; keyId: string; twentyUserId?: string | null; isAnalyst: boolean };
 const registration = z.object({
@@ -39,6 +39,7 @@ export function rosterReadScopes(employee: RosterAccess): Scope[] {
 export function rosterScopes(employee: RosterAccess): Scope[] {
   const scopes = rosterReadScopes(employee);
   if (employee.dashboardAccess === true || employee.adminAccess === true) scopes.push('gis:write');
+  if (rosterTwentyUserId(employee)) scopes.push('crm.rfq:write');
   return scopes;
 }
 

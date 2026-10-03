@@ -11,7 +11,7 @@ type ReadContract = {
 };
 
 /** Minimum discovery scopes. Individual arguments can require additional live permissions. */
-export type ReadToolName = Exclude<ToolPromptName, 'create_gis_poi' | 'rollback_gis_poi'>;
+export type ReadToolName = Exclude<ToolPromptName, 'create_gis_poi' | 'rollback_gis_poi' | 'create_crm_rfq'>;
 export const MCP_READ_CONTRACTS: Record<ReadToolName, ReadContract> = {
   get_context: { requiredScopes: [], sourceFamily: 'context' },
   resolve_location: { requiredScopes: [], sourceFamily: 'context' },

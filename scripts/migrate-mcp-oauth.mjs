@@ -132,7 +132,7 @@ export async function migrateMcpOAuthStorage(client) {
         if (['oauth_clients', 'oauth_grants'].includes(name)) {
           const constraint = table.constraints.find(value => value.name === `${name}_scopes_check` && value.type === 'c');
           if (!constraint) fail('MCP_RELATION_INCOMPATIBLE');
-          if (!constraint.definition.includes("'gis:write'")) {
+          if (!constraint.definition.includes("'crm.rfq:write'")) {
             // This only expands valid scope syntax. Stored registrations and
             // grants are never widened, reissued, or reauthorized by migration.
             await client.query(`ALTER TABLE context_mcp_private.${name}

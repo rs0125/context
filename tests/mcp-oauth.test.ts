@@ -371,16 +371,31 @@ describe('MCP OAuth token lifecycle and employee isolation', () => {
     }
   });
 
-  it('advertises supported reads and explicit GIS writes while defaulting to reads', () => {
-    const scopes = [...key.scopes, 'analytics:read', 'gis:write'];
+  it('advertises supported reads and explicit writes while defaulting to reads', () => {
+    const scopes = [...key.scopes, 'analytics:read', 'gis:write', 'crm.rfq:write'];
     expect(oauthScopes(undefined)).toEqual([...key.scopes, 'analytics:read']);
     expect(oauthScopes(null)).not.toContain('gis:write');
+    expect(oauthScopes(null)).not.toContain('crm.rfq:write');
     expect(authorizationServerMetadata().scopes_supported).toEqual(scopes);
     expect(protectedResourceMetadata().scopes_supported).toEqual(scopes);
     expect(oauthScopes(scopes.join(' '))).toEqual(scopes);
     for (const scope of ['analytics:write', 'analytics:read analytics:read', `${scopes.join(' ')} knowledge:read`]) {
       expect(() => oauthScopes(scope)).toThrowError(expect.objectContaining({ error: 'invalid_scope' }));
     }
+  });
+
+  it('keeps RFQ creation opt-in and removes it when the CRM identity is unlinked', async () => {
+    vi.stubEnv('CONTEXT_API_KEYS_JSON', JSON.stringify([{ ...key, scopes: ['knowledge:read', 'crm.rfq:write'] }]));
+    const db = database();
+    const auth = await authorized(db, 'knowledge:read crm.rfq:write', 'knowledge:read crm.rfq:write');
+    const issued = await (await exchange(db, auth)).json();
+    expect(issued.scope).toBe('knowledge:read crm.rfq:write');
+    db.roster.twenty_user_id = null;
+    expect((await authenticateMcpRequest(accessRequest(issued.access_token), db.deps)).scopes).toEqual(['knowledge:read']);
+    const narrowed = await (await refresh(db, auth.client.client_id, issued.refresh_token)).json();
+    expect(narrowed.scope).toBe('knowledge:read');
+    db.roster.twenty_user_id = '10000000-0000-4000-8000-000000000019';
+    expect((await refresh(db, auth.client.client_id, narrowed.refresh_token, { scope: 'crm.rfq:write' })).status).toBe(400);
   });
 
   it('preserves an old client registration when reconnecting without an explicit scope', async () => {

@@ -89,8 +89,9 @@ describe.each([
     expect(alterations).toHaveLength(upgraded.length);
     for (const name of upgraded) {
       const alteration = alterations.find(sql => sql.includes(`.${name}`))!;
-      expect(alteration).toContain('BETWEEN 1 AND 5');
+      expect(alteration).toContain('BETWEEN 1 AND 6');
       expect(alteration).toContain("'gis:write'");
+      expect(alteration).toContain("'crm.rfq:write'");
       expect(alteration).toContain("'analytics:read'");
       expect(statements.findIndex(sql => sql.startsWith('LOCK TABLE'))).toBeLessThan(statements.indexOf(alteration));
       expect(catalog.find(table => table.name === name)!.constraints.find(constraint => constraint.name === `${name}_scopes_check`)!.definition).toContain('array_position(scopes, NULL) IS NULL');
