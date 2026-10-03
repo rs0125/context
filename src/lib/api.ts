@@ -13,6 +13,7 @@ import { getRelatedCrmContext } from './crm-related';
 import { parseCrmContextQuery } from './crm-context-query';
 import { analyticsCapabilities, ga4Report, searchConsoleReport, validateGa4Query, validateSearchConsoleQuery } from './analytics';
 import { parseShortlistAssessmentQuery, buildShortlistAssessment } from './shortlist-assessment';
+import { parseLocationQuery, resolveLocation } from './location-resolver';
 
 const ANALYTICS_GUIDANCE = 'Aggregate website analytics for Analysts: /api/v1/analytics/capabilities discovers supported reports; /api/v1/analytics/ga4 reports traffic and recorded events; /api/v1/analytics/search-console reports Google organic search. Analytics dates use the source timezone, not necessarily the India server clock. Preserve source_fetched_at, resolved dates, quality warnings and pagination. For form activity per session use ga4?report=form_performance with a landing_page_contains filter; its separate event ratios use matching entry sessions. For relative comparisons resolve period on the first group and reuse the returned dates for later groups. Recent data may change. Event counts are not unique CRM leads or a sequential conversion funnel; Search Console clicks are not GA sessions. Failed reads mean unavailable, never zero.';
 
@@ -27,6 +28,7 @@ type ApiDependencies = {
   analyticsCapabilities: typeof analyticsCapabilities;
   ga4Report: typeof ga4Report;
   searchConsoleReport: typeof searchConsoleReport;
+  resolveLocation: typeof resolveLocation;
   audit: (entry: Record<string, unknown>) => void;
 };
 const defaults: ApiDependencies = {
@@ -34,7 +36,7 @@ const defaults: ApiDependencies = {
   authenticate: request => authenticateRequestKey(request, hash => withReadOnlyTransaction(client => findDatabaseKey(client, hash))),
   liveCrmAccess: (principal, view, opportunityId) => getLiveCrmAccess(principal, { view, opportunityId }),
   relatedCrmContext: getRelatedCrmContext,
-  analyticsCapabilities, ga4Report, searchConsoleReport,
+  analyticsCapabilities, ga4Report, searchConsoleReport, resolveLocation,
   audit: entry => console.info(JSON.stringify(entry)),
 };
 
@@ -213,6 +215,21 @@ export async function handleApiRequest(request: Request, path: string[], depende
     let verifiedPrincipal: Principal | undefined;
     let relatedContext: Awaited<ReturnType<typeof getRelatedCrmContext>> | undefined;
     let analyticsValue: unknown;
+    let locationValue: Awaited<ReturnType<typeof resolveLocation>> | undefined;
+    if (path[0] === 'locations') {
+      if (path.join('/') !== 'locations/resolve') throw new HttpError(404, 'NOT_FOUND', 'Endpoint not found.');
+      const input = parseLocationQuery(new URL(request.url).searchParams);
+      // This utility resolves caller-supplied locations, not business records.
+      // Any active authenticated employee may use it without GIS write access.
+      verifiedPrincipal = await deps.transaction(async client => {
+        await deps.revalidateKey?.(client, key);
+        const principal = await resolvePrincipal(client, key);
+        employeeId = principal.employeeId;
+        return principal;
+      });
+      // Never hold a pooled database connection while following Maps redirects.
+      locationValue = await deps.resolveLocation(input, request.signal);
+    }
     if (path[0] === 'analytics') {
       const route = path.join('/');
       const query = new URL(request.url).searchParams;
@@ -286,6 +303,8 @@ export async function handleApiRequest(request: Request, path: string[], depende
         requireScope(principal, 'analytics:read');
         return { value: analyticsValue, markdown: undefined };
       }
+      // Recheck identity, grant expiry and revocation before releasing coordinates.
+      if (path[0] === 'locations') return { value: locationValue, markdown: undefined };
       return dispatch(client, principal, path, new URL(request.url).searchParams, crmAccess, relatedContext);
     });
     if (request.method === 'HEAD') return new Response(null, { headers });
@@ -306,7 +325,7 @@ export async function handleApiRequest(request: Request, path: string[], depende
     const route = path.join('/');
     const operation = ['context', 'context.md', 'wiki/pages', 'wiki/search', 'warehouses', 'warehouses/filters',
       'warehouses/summary', 'crm/opportunities', 'crm/summary', 'crm/filters', 'crm/my-briefing',
-      'analytics/capabilities', 'analytics/ga4', 'analytics/search-console', 'openapi.json'].includes(route)
+      'analytics/capabilities', 'analytics/ga4', 'analytics/search-console', 'locations/resolve', 'openapi.json'].includes(route)
       ? route : path.length === 2 && path[0] === 'warehouses' ? 'warehouses/read'
         : path.length === 3 && path[0] === 'wiki' && path[1] === 'pages' ? 'wiki/read'
           : path.length === 4 && path[0] === 'crm' && path[1] === 'opportunities' && path[3] === 'context' ? 'crm/context'

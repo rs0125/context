@@ -6,6 +6,7 @@ import { z } from "zod";
 import { SCOPES } from "./auth";
 import { ga4ToolInput, searchConsoleToolInput, analyticsQueryParameters, analyticsReportOutput, analyticsCapabilitiesOutput } from "./analytics-tooling";
 import { shortlistAssessmentQuerySchema, shortlistAssessmentOutput } from "./shortlist-assessment";
+import { locationOutputSchema } from "./location-resolver";
 
 const errorResponses = Object.fromEntries(Object.entries({
   "400": { description: "Invalid query parameters or record identifier." },
@@ -431,6 +432,18 @@ export function getOpenApiDocument() {
       { name: "Analytics", description: "Read-only GA4 and Google Search Console aggregates. Requires analytics:read on the credential AND current Analyst access, inherited by roster administrators. Twenty administrator status alone does not grant analytics access. Sources are pinned by server configuration; clients cannot choose another property or supply Google credentials." },
     ],
     paths: {
+      "/locations/resolve": {
+        get: {
+          operationId: "resolveLocation", tags: ["Context"], summary: "Resolve user-supplied coordinates or a Google Maps link without writing data",
+          description: "Requires an active authenticated employee. Supply either location or both latitude and longitude, never both forms. Returns source and resolution method. Ambiguous/viewport candidates need selection before a write; resolution does not grant GIS creation permission. Free-text address lookup is not supported. Do not log query values or include them in citations.",
+          parameters: [
+            { name: "location", in: "query", schema: { type: "string", minLength: 1, maxLength: 2048 }, description: "Google Maps link, latitude/longitude pair, DMS coordinates or geo URI." },
+            { name: "latitude", in: "query", schema: { type: "number", minimum: -90, maximum: 90 } },
+            { name: "longitude", in: "query", schema: { type: "number", minimum: -180, maximum: 180 } },
+          ],
+          responses: jsonResponses("Resolved coordinates, ambiguous candidates or an explicit unresolved result. No business data is written.", false, z.toJSONSchema(locationOutputSchema)),
+        },
+      },
       "/analytics/capabilities": {
         get: { operationId: "analyticsCapabilities", tags: ["Analytics"], summary: "Discover available website analytics reports",
           description: "Analyst access: report capabilities, event and metric definitions, and registered custom dimensions. Definitions distinguish recorded activity from individual journeys and CRM outcomes. Missing fields and source failures are reported as unavailable, never as zero traffic. Does not depend on the optional Analytics Admin API.",

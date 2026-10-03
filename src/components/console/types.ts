@@ -13,7 +13,7 @@ export const READ_SCOPE_OPTIONS = [
 /** Explicit OAuth consent vocabulary; console key issuance still defaults to reads only. */
 export const AGENT_SCOPE_OPTIONS = [
   ...READ_SCOPE_OPTIONS,
-  { value: 'gis:write', label: 'Create GIS points' },
+  { value: 'gis:write', label: 'Create and undo own GIS points' },
 ] as const;
 
 export type Employee = { email: string; name: string; isAdmin: boolean; isAnalyst: boolean; scopes: string[] };

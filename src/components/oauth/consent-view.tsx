@@ -18,7 +18,7 @@ const permissionLabels: Record<string, string> = {
   'warehouses:read': 'Warehouse listings',
   'crm:read': 'CRM records',
   'analytics:read': 'Website analytics (Analyst access)',
-  'gis:write': 'Create GIS points',
+  'gis:write': 'Create and undo own GIS points',
 };
 
 export function ConsentView({ details, loading, error, onRetry, onConnect, onCancel }: {

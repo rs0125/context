@@ -1,4 +1,4 @@
-/** Server-only GIS creation adapter. Writes go through the dashboard backend, never the read database. */
+/** Server-only GIS writes adapter. Writes go through the dashboard backend, never the read database. */
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { importJWK, SignJWT } from 'jose';
@@ -32,6 +32,11 @@ export const gisWriteOutputSchema = z.object({
   outcome: z.enum(['created', 'replayed', 'not_dispatched', 'rejected', 'outcome_unknown']),
   code: z.string(), message: z.string(), data: pointSchema.optional(),
 }).strict();
+export const gisRollbackInputSchema = z.object({ operation_id: z.string().uuid().describe('Stable UUID for this authorized compensation. Reuse on recovery.'), original_operation_id: z.string().uuid().describe('The same employee’s original create_gis_poi operation UUID.') }).strict();
+const rollbackDataSchema = z.object({ originalOperationId: z.string().uuid(), pointId: z.string().uuid(), before: pointSchema, after: z.null() }).strict();
+export const gisRollbackOutputSchema = z.object({ operation_id: z.string().uuid(), outcome: z.enum(['rolled_back', 'replayed', 'not_dispatched', 'rejected', 'outcome_unknown']), code: z.string(), message: z.string(), data: rollbackDataSchema.optional() }).strict();
+export type GisRollbackResult = z.infer<typeof gisRollbackOutputSchema>;
+type GisOperationResult = GisWriteResult | GisRollbackResult;
 export type GisWriteResult = z.infer<typeof gisWriteOutputSchema>;
 export type GisWriteDependencies = {
   transaction: <T>(work: (client: PoolClient) => Promise<T>) => Promise<T>;
@@ -96,32 +101,48 @@ async function readJson(response: Response): Promise<unknown> {
 }
 
 const rejectionCodes: Record<number, readonly string[]> = {
-  400: ['CONTEXT_GEO_INVALID_POINT'], 401: ['CONTEXT_GEO_UNAUTHORIZED'],
-  403: ['CONTEXT_GEO_FORBIDDEN'], 409: ['CONTEXT_GEO_IDEMPOTENCY_CONFLICT'],
+  400: ['CONTEXT_GEO_INVALID_POINT', 'CONTEXT_GEO_INVALID_ROLLBACK'], 401: ['CONTEXT_GEO_UNAUTHORIZED'],
+  403: ['CONTEXT_GEO_FORBIDDEN'], 404: ['CONTEXT_GEO_ORIGINAL_NOT_FOUND'], 409: ['CONTEXT_GEO_IDEMPOTENCY_CONFLICT', 'CONTEXT_GEO_POINT_CHANGED', 'CONTEXT_GEO_ALREADY_ROLLED_BACK'],
   413: ['CONTEXT_GEO_BODY_TOO_LARGE'], 415: ['CONTEXT_GEO_UNSUPPORTED_ENCODING'],
 };
+const backendRollbackSuccess = z.object({ success: z.literal(true), operationId: z.string().uuid(), replayed: z.boolean(), data: rollbackDataSchema }).strict();
 const backendSuccess = z.object({ success: z.literal(true), operationId: z.string().uuid(), replayed: z.boolean(), data: pointSchema }).strict();
 
 /** Exactly one HTTP attempt. The caller owns durable intent/idempotency across separate invocations. */
-export async function executeGisWrite(
+export async function executeGisWrite(args: unknown, key: KeyRegistration, requestSignal: AbortSignal,
+  revalidateKey: (client: PoolClient, key: KeyRegistration) => Promise<void>, overrides: Partial<GisWriteDependencies> = {}): Promise<GisWriteResult> {
+  return executeGisOperation(args, key, requestSignal, revalidateKey, overrides, false) as Promise<GisWriteResult>;
+}
+export async function executeGisRollback(args: unknown, key: KeyRegistration, requestSignal: AbortSignal,
+  revalidateKey: (client: PoolClient, key: KeyRegistration) => Promise<void>, overrides: Partial<GisWriteDependencies> = {}): Promise<GisRollbackResult> {
+  return executeGisOperation(args, key, requestSignal, revalidateKey, overrides, true) as Promise<GisRollbackResult>;
+}
+
+/** Exactly one HTTP attempt. The caller owns durable intent/idempotency across separate invocations. */
+async function executeGisOperation(
   args: unknown,
   key: KeyRegistration,
   requestSignal: AbortSignal,
   revalidateKey: (client: PoolClient, key: KeyRegistration) => Promise<void>,
-  overrides: Partial<GisWriteDependencies> = {},
-): Promise<GisWriteResult> {
-  const parsed = gisWriteInputSchema.safeParse(args);
+  overrides: Partial<GisWriteDependencies>,
+  rollback: boolean,
+): Promise<GisOperationResult> {
+  const parsed = (rollback ? gisRollbackInputSchema : gisWriteInputSchema).safeParse(args);
   if (!parsed.success) throw new HttpError(422, 'GIS_WRITE_INVALID_INPUT', 'Use a stable operation UUID and valid GIS point fields; caller identity fields are not accepted.');
-  const input = parsed.data, operationId = input.operation_id.toLowerCase();
+  const input = parsed.data as z.infer<typeof gisWriteInputSchema>;
+  const originalOperationId = rollback ? (parsed.data as z.infer<typeof gisRollbackInputSchema>).original_operation_id.toLowerCase() : undefined;
+  const operationId = input.operation_id.toLowerCase();
+  if (rollback && originalOperationId === operationId) throw new HttpError(422, 'GIS_WRITE_INVALID_INPUT', 'Use a separate operation UUID for compensation.');
   const deps: GisWriteDependencies = { transaction: withReadOnlyTransaction, principal: resolvePrincipal, fetch: globalThis.fetch,
     env: process.env, now: Date.now, timeoutMs: DEADLINE_MS, ...overrides };
-  const result = (outcome: GisWriteResult['outcome'], code: string, message: string): GisWriteResult => ({ operation_id: operationId, outcome, code, message });
+  const result = (outcome: GisOperationResult['outcome'], code: string, message: string): GisOperationResult => ({ operation_id: operationId, outcome, code, message });
   if (requestSignal.aborted) return result('not_dispatched', 'GIS_WRITE_CANCELLED', 'This attempt was cancelled before dispatch.');
-  if (deps.env.CONTEXT_GIS_WRITES_ENABLED !== 'true') return result('not_dispatched', 'GIS_WRITE_DISABLED', 'GIS creation is not enabled. No request was dispatched.');
+  if (deps.env.CONTEXT_GIS_WRITES_ENABLED !== 'true') return result('not_dispatched', 'GIS_WRITE_DISABLED', 'GIS writes are not enabled. No request was dispatched.');
   let config: ReturnType<typeof configuration>;
   try { config = configuration(deps.env); }
-  catch { return result('not_dispatched', 'GIS_WRITE_CONFIGURATION', 'GIS creation is not configured. No request was dispatched.'); }
-  const payload = { operationId, name: input.name, category: input.category, lat: input.latitude, lng: input.longitude,
+  catch { return result('not_dispatched', 'GIS_WRITE_CONFIGURATION', 'GIS writes are not configured. No request was dispatched.'); }
+  const endpoint = rollback ? `${config.endpoint}/rollback` : config.endpoint;
+  const payload = rollback ? { operationId, originalOperationId } : { operationId, name: input.name, category: input.category, lat: input.latitude, lng: input.longitude,
     ...(input.notes !== undefined ? { notes: input.notes } : {}), ...(input.city !== undefined ? { city: input.city } : {}) };
   const body = JSON.stringify(payload);
   if (Buffer.byteLength(body, 'utf8') > MAX_BYTES) return result('not_dispatched', 'GIS_WRITE_TOO_LARGE', 'The GIS request exceeds its UTF-8 size limit. No request was dispatched.');
@@ -138,7 +159,7 @@ export async function executeGisWrite(
   const stillEnabled = () => {
     controller.signal.throwIfAborted();
     if (deps.env.CONTEXT_GIS_WRITES_ENABLED !== 'true' || configuration(deps.env).fingerprint !== config.fingerprint)
-      throw new HttpError(503, 'GIS_WRITE_CONFIGURATION', 'GIS creation configuration changed.');
+      throw new HttpError(503, 'GIS_WRITE_CONFIGURATION', 'GIS writes configuration changed.');
   };
   const authorize = () => deps.transaction(async client => {
     controller.signal.throwIfAborted();
@@ -152,7 +173,7 @@ export async function executeGisWrite(
     return principal;
   });
   try {
-    return await Promise.race([cancelled, (async (): Promise<GisWriteResult> => {
+    return await Promise.race([cancelled, (async (): Promise<GisOperationResult> => {
       const signingKey = await importJWK(config.jwk, 'EdDSA');
       const principal = await authorize();
       stillEnabled();
@@ -162,13 +183,13 @@ export async function executeGisWrite(
       // Require at least one usable whole second after conservative expiry rounding.
       if (!Number.isFinite(expires) || expires * 1000 - nowMs < 1000)
         throw new HttpError(401, 'GIS_WRITE_UNAUTHORIZED', 'The authenticated grant has expired or is too close to expiry.');
-      const assertion = await new SignJWT({ iss: 'wareongo:context-engine', aud: config.endpoint, htu: config.endpoint,
-        htm: 'POST', sub: String(principal.employeeId), email: principal.email, scopes: ['geo:points:create'],
+      const assertion = await new SignJWT({ iss: 'wareongo:context-engine', aud: endpoint, htu: endpoint,
+        htm: 'POST', sub: String(principal.employeeId), email: principal.email, scopes: [rollback ? 'geo:points:rollback' : 'geo:points:create'],
         body_sha256: createHash('sha256').update(body, 'utf8').digest('base64url'), iat: now, exp: expires, jti: randomUUID(),
       }).setProtectedHeader({ alg: 'EdDSA', typ: 'context-geo-write+jwt', kid: config.kid }).sign(signingKey);
       stillEnabled();
       dispatched = true;
-      const response = await deps.fetch(config.endpoint, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `ContextEngine ${assertion}` },
+      const response = await deps.fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `ContextEngine ${assertion}` },
         body, redirect: 'error', cache: 'no-store', signal: controller.signal });
       const value = await readJson(response);
       if (response.status !== 200 && response.status !== 201) {
@@ -177,25 +198,35 @@ export async function executeGisWrite(
           return result('rejected', error.data.code, 'The backend rejected this attempt. Do not substitute a new operation ID. An earlier uncertain attempt, if any, remains unresolved.');
         throw new Error('GIS_RESPONSE_UNAVAILABLE');
       }
-      const verified = backendSuccess.parse(value);
-      const record = verified.data;
-      if (verified.operationId !== operationId || verified.replayed !== (response.status === 200)
-        || (!verified.replayed && record.createdBy !== principal.email) || record.createdBy !== record.createdBy.trim().toLowerCase()
-        || record.name !== input.name || record.category !== input.category
-        || record.lat !== input.latitude || record.lng !== input.longitude || record.notes !== (input.notes ?? null)
-        || record.city !== (input.city ?? null) || Date.parse(record.updatedAt) < Date.parse(record.createdAt)) throw new Error('GIS_RESPONSE_MISMATCH');
+      const verified = rollback ? backendRollbackSuccess.parse(value) : backendSuccess.parse(value);
+      if (verified.operationId !== operationId || verified.replayed !== (response.status === 200)) throw new Error('GIS_RESPONSE_MISMATCH');
+      if (rollback) {
+        const record = verified.data as z.infer<typeof rollbackDataSchema>;
+        if (record.originalOperationId !== originalOperationId || record.pointId !== record.before.id
+          || record.before.createdBy !== record.before.createdBy.trim().toLowerCase()
+          || Date.parse(record.before.updatedAt) < Date.parse(record.before.createdAt)) throw new Error('GIS_RESPONSE_MISMATCH');
+      } else {
+        const record = verified.data as z.infer<typeof pointSchema>;
+        if ((!verified.replayed && record.createdBy !== principal.email) || record.createdBy !== record.createdBy.trim().toLowerCase()
+          || record.name !== input.name || record.category !== input.category
+          || record.lat !== input.latitude || record.lng !== input.longitude || record.notes !== (input.notes ?? null)
+          || record.city !== (input.city ?? null) || Date.parse(record.updatedAt) < Date.parse(record.createdAt)) throw new Error('GIS_RESPONSE_MISMATCH');
+      }
       const current = await authorize();
       if (current.employeeId !== principal.employeeId || current.email !== principal.email) throw new Error('GIS_IDENTITY_CHANGED');
       stillEnabled();
+      if (rollback) return { operation_id: operationId, outcome: verified.replayed ? 'replayed' : 'rolled_back', code: 'GIS_ROLLBACK_CONFIRMED',
+        message: verified.replayed ? 'The original compensation receipt was recovered. No additional point was deleted; this is not a current-state read.' : 'The backend confirmed rollback of the unchanged GIS point created by your original operation.', data: verified.data as z.infer<typeof rollbackDataSchema> };
       return { operation_id: operationId, outcome: verified.replayed ? 'replayed' : 'created', code: 'GIS_WRITE_CONFIRMED',
-        message: verified.replayed ? 'The original creation receipt was recovered. No additional point was created; this is not a current-state read.' : 'The backend confirmed creation of this GIS point.', data: record };
+        message: verified.replayed ? 'The original creation receipt was recovered. No additional point was created; this is not a current-state read.' : 'The backend confirmed creation of this GIS point.', data: verified.data as z.infer<typeof pointSchema> };
+
     })()]);
   } catch (error) {
-    if (dispatched) return result('outcome_unknown', 'GIS_WRITE_OUTCOME_UNKNOWN', 'Creation may have committed, but no authorized verified receipt is available. Retry only with this same operation_id and unchanged point fields. Never claim failure, rollback or create a replacement operation.');
+    if (dispatched) return result('outcome_unknown', 'GIS_WRITE_OUTCOME_UNKNOWN', 'The action may have committed, but no authorized verified receipt is available. Retry only with this same operation_id and unchanged arguments. Never claim failure or create a replacement operation.');
     if (controller.signal.aborted) return result('not_dispatched', timedOut ? 'GIS_WRITE_TIMEOUT' : 'GIS_WRITE_CANCELLED', 'This attempt stopped before dispatch. No backend request was sent.');
     const code = error instanceof HttpError && error.status === 403 ? 'GIS_WRITE_FORBIDDEN'
       : error instanceof HttpError && error.status === 401 ? 'GIS_WRITE_UNAUTHORIZED' : 'GIS_WRITE_UNAVAILABLE';
-    return result('not_dispatched', code, 'GIS creation authorization or configuration could not be established. No backend request was sent.');
+    return result('not_dispatched', code, 'GIS writes authorization or configuration could not be established. No backend request was sent.');
   } finally {
     clearTimeout(timer); requestSignal.removeEventListener('abort', cancel);
     if (stopWaiting) controller.signal.removeEventListener('abort', stopWaiting);

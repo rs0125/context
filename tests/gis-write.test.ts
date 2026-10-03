@@ -4,7 +4,7 @@ import { exportJWK, generateKeyPair, jwtVerify, type CryptoKey } from 'jose';
 import type { PoolClient } from 'pg';
 import type { KeyRegistration, Principal } from '../src/lib/auth';
 import { HttpError } from '../src/lib/errors';
-import { executeGisWrite, gisWriteAvailability, gisWriteInputSchema, gisWriteOutputSchema, type GisWriteDependencies } from '../src/lib/gis-write';
+import { executeGisWrite, executeGisRollback, gisWriteAvailability, gisWriteInputSchema, gisWriteOutputSchema, type GisWriteDependencies } from '../src/lib/gis-write';
 
 const endpoint = 'https://dashboard.example.test/api/integrations/context-engine/geo/points';
 const input = { operation_id: '11111111-1111-4111-8111-111111111111', name: 'Synthetic site', category: 'POTENTIAL_WAREHOUSE', latitude: 0, longitude: 78.123456, notes: 'Synthetic scouting notes', city: 'Synthetic city' };
@@ -227,5 +227,32 @@ describe('GIS backend write contract', () => {
     expect(JSON.stringify(result)).not.toContain('secret'); expect(cancelled.fetch).toHaveBeenCalledTimes(1);
     const before = fixture();
     expect((await before.run(input, controller.signal)).outcome).toBe('not_dispatched'); expect(before.fetch).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('GIS owned compensation adapter', () => {
+  const rollback = { operation_id:'33333333-3333-4333-8333-333333333333', original_operation_id:input.operation_id };
+  const response = (replayed=false) => ({success:true,operationId:rollback.operation_id,replayed,data:{originalOperationId:input.operation_id,pointId:receipt().data.id,before:receipt().data,after:null}});
+  it.each([false,true])('signs exact rollback audience/action and verifies compensation receipt (replay=%s)',async replayed=>{
+    const ctx=fixture();ctx.fetch.mockResolvedValue(Response.json(response(replayed),{status:replayed?200:201}));
+    const result=await executeGisRollback(rollback,key,new AbortController().signal,ctx.revalidate,ctx.deps);
+    expect(result.outcome).toBe(replayed?'replayed':'rolled_back');expect(ctx.fetch).toHaveBeenCalledOnce();expect(ctx.revalidate).toHaveBeenCalledTimes(2);
+    const [url,init]=ctx.fetch.mock.calls[0];expect(url).toBe(`${endpoint}/rollback`);
+    const jwt=(init!.headers as Record<string,string>).authorization.slice('ContextEngine '.length);
+    const {payload}=await jwtVerify(jwt,publicKey,{audience:`${endpoint}/rollback`});expect(payload.scopes).toEqual(['geo:points:rollback']);expect(payload.htu).toBe(`${endpoint}/rollback`);
+    expect(JSON.parse(init!.body as string)).toEqual({operationId:rollback.operation_id,originalOperationId:input.operation_id});
+    expect(result.data).toMatchObject({pointId:receipt().data.id,after:null});
+  });
+  it.each(['original','point','unexpected'])('redacts mismatched %s rollback receipts',async change=>{
+    const ctx=fixture(), body=response();if(change==='original')body.data.originalOperationId=rollback.operation_id;if(change==='point')body.data.pointId=rollback.operation_id;if(change==='unexpected')Object.assign(body.data,{secret:'unapproved'});
+    ctx.fetch.mockResolvedValue(Response.json(body,{status:201}));const result=await executeGisRollback(rollback,key,new AbortController().signal,ctx.revalidate,ctx.deps);expect(result.outcome).toBe('outcome_unknown');expect(result.data).toBeUndefined();expect(ctx.fetch).toHaveBeenCalledOnce();
+  });
+  it.each(['CONTEXT_GEO_POINT_CHANGED','CONTEXT_GEO_ALREADY_ROLLED_BACK','CONTEXT_GEO_ORIGINAL_NOT_FOUND'])('keeps guarded rejection %s explicit without retry',async code=>{
+    const ctx=fixture();ctx.fetch.mockResolvedValue(Response.json({success:false,code},{status:code.endsWith('NOT_FOUND')?404:409}));
+    expect(await executeGisRollback(rollback,key,new AbortController().signal,ctx.revalidate,ctx.deps)).toMatchObject({outcome:'rejected',code});expect(ctx.fetch).toHaveBeenCalledOnce();
+  });
+  it('rejects arbitrary point/actor identifiers and same operation IDs before dispatch',async()=>{
+    const ctx=fixture();for(const args of [{...rollback,point_id:receipt().data.id},{...rollback,employeeId:7},{...rollback,operation_id:input.operation_id}])await expect(executeGisRollback(args,key,new AbortController().signal,ctx.revalidate,ctx.deps)).rejects.toMatchObject({code:'GIS_WRITE_INVALID_INPUT'});expect(ctx.fetch).not.toHaveBeenCalled();
   });
 });

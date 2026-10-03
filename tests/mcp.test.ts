@@ -107,7 +107,7 @@ describe('MCP read-only protocol', () => {
   it('lists fourteen non-analytics read tools with warehouse catalogs and business output contracts', async () => {
     const response = await handleMcpRequest(rpc('tools/list'), { authenticate: async () => key() });
     const { result } = await wire(response);
-    expect(result.tools).toHaveLength(14);
+    expect(result.tools).toHaveLength(15);
     for (const tool of result.tools) {
       expect(tool.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
       expect(tool.outputSchema.required).toEqual(expect.arrayContaining(['source_path', 'status', 'data', 'meta']));
@@ -156,7 +156,7 @@ describe('MCP read-only protocol', () => {
     const read = vi.fn();
     const deps = { authenticate: async () => key(['knowledge:read']), read };
     const { result } = await wire(await handleMcpRequest(rpc('tools/list'), deps));
-    expect(result.tools.map((tool: { name: string }) => tool.name)).toEqual(['get_context', 'search_knowledge', 'read_knowledge']);
+    expect(result.tools.map((tool: { name: string }) => tool.name)).toEqual(['get_context', 'resolve_location', 'search_knowledge', 'read_knowledge']);
     for (const name of ['search_crm_leads', 'read_crm_lead_context', 'assess_shortlist', 'crm_summary', 'crm_filters', 'warehouse_summary', 'update_warehouse', 'fetch', 'execute_sql']) {
       const body = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: {} }), deps));
       expect(body.error ?? body.result?.isError).toBeTruthy();

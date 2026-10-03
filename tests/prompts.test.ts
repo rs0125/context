@@ -52,7 +52,7 @@ describe('persistent prompt editing', () => {
     const { client, query } = setup([], false);
     const result = await readPrompts(client);
     expect(result.storageReady).toBe(false);
-    expect(result.prompts).toHaveLength(21);
+    expect(result.prompts).toHaveLength(23);
     expect(result.prompts.every(prompt => prompt.body === prompt.defaultBody && prompt.revision === null && !prompt.customized)).toBe(true);
     expect(query).toHaveBeenCalledOnce();
   });
@@ -101,7 +101,7 @@ describe('persistent prompt editing', () => {
     expect(renderRestPrompt(`${origin}/api/v1/`, '{{apiBaseUrl}}/context {{apiBaseUrl}}/openapi.json ${secret}')).toBe(`${origin}/api/v1/context ${origin}/api/v1/openapi.json ${'${secret}'}`);
     expect(renderRestPrompt(`${origin}/api/v1`)).not.toContain('{{apiBaseUrl}}');
     expect(REST_PROMPT_TEMPLATE).toContain('{{apiBaseUrl}}');
-    expect(new Set(PROMPT_DEFINITIONS.map(prompt => prompt.id)).size).toBe(21);
+    expect(new Set(PROMPT_DEFINITIONS.map(prompt => prompt.id)).size).toBe(PROMPT_DEFINITIONS.length);
   });
   it('persists platform-only edits, preserves them for older editors, and restores defaults with revision protection', async () => {
     const { client, records } = setup();
@@ -204,7 +204,7 @@ describe('MCP uses the saved prompt configuration', () => {
     expect(search.description).toBe('Updated guidance search.');
     expect(search.inputSchema.properties.q.maxLength).toBe(120);
     expect(search.annotations.readOnlyHint).toBe(true);
-    expect(result.tools.map((tool: { name: string }) => tool.name)).toEqual(['get_context', 'search_knowledge', 'read_knowledge']);
+    expect(result.tools.map((tool: { name: string }) => tool.name)).toEqual(['get_context', 'resolve_location', 'search_knowledge', 'read_knowledge']);
     const next = await rpc('tools/list', {});
     expect(next.result.tools.find((tool: { name: string }) => tool.name === 'search_knowledge').description).toBe(promptText('tool.search_knowledge'));
   });

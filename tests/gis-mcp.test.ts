@@ -4,6 +4,7 @@ import type { KeyRegistration } from '../src/lib/auth';
 import { handleMcpRequest, type McpDependencies } from '../src/lib/mcp';
 import { clockContext } from '../src/lib/query-time';
 import { HttpError } from '../src/lib/errors';
+import { argumentsSha256 } from '../src/lib/mcp-read-contract';
 
 vi.mock('../src/lib/prompts', () => ({ loadPromptValues: async () => ({}) }));
 const origin = 'https://context.example.test';
@@ -48,7 +49,7 @@ describe('separately authorized GIS MCP write', () => {
     const { result } = await wire(await handleMcpRequest(rpc('tools/list'), { authenticate: async () => key(true), platform }));
     const tool = result.tools.find((item: { name: string }) => item.name === 'create_gis_poi');
     expect(tool.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: true });
-    expect(tool._meta['wareongo/context-write-v1']).toMatchObject({ requiredScopes: ['gis:write'], idempotencyArgument: 'operation_id' });
+    expect(tool._meta['wareongo/context-write-v1']).toMatchObject({ requiredScopes: ['gis:write'], idempotencyArgument: 'operation_id', auditHistory: 'actor_scoped' });
     expect(tool._meta['wareongo/context-read-v1']).toBeUndefined();
     expect(tool.inputSchema.additionalProperties).toBe(false);
     expect(tool.inputSchema.required).toEqual(expect.arrayContaining(['operation_id', 'name', 'category', 'latitude', 'longitude']));
@@ -68,7 +69,7 @@ describe('separately authorized GIS MCP write', () => {
       read_only: true, knowledge_discovery: { permitted: true, status: 'not_checked', index_path: '/wiki', search_path: '/wiki/search' },
       server_clock: clockContext() }, meta: { requestId: 'synthetic-context', generatedAt: new Date().toISOString() } });
     const result = await wire(await handleMcpRequest(rpc('tools/call', { name: 'get_context', arguments: {} }), { authenticate: async () => registration, read }));
-    expect(result.result.structuredContent.data).toMatchObject({ read_only: false, write_capabilities: ['create_gis_poi'] });
+    expect(result.result.structuredContent.data).toMatchObject({ read_only: false, write_capabilities: ['create_gis_poi', 'rollback_gis_poi'] });
     vi.stubEnv('CONTEXT_GIS_WRITES_ENABLED', 'false');
     const hidden = await wire(await handleMcpRequest(rpc('tools/call', { name: 'get_context', arguments: {} }), { authenticate: async () => registration, read }));
     expect(hidden.result.structuredContent.data).toMatchObject({ read_only: true, write_capabilities: [] });
@@ -83,7 +84,21 @@ describe('separately authorized GIS MCP write', () => {
     expect(write.mock.calls[0]?.[0]).toEqual(point);
     expect(read).not.toHaveBeenCalled();
     expect(result.result.isError).toBe(true);
-    expect(result.result.structuredContent).toMatchObject({ operation_id: point.operation_id, outcome: 'outcome_unknown' });
+    expect(result.result.structuredContent).toMatchObject({ operation_id: point.operation_id, outcome: 'outcome_unknown',
+      meta: { toolName: 'create_gis_poi', argumentsSha256: argumentsSha256(point), employeeId: 7 } });
+  });
+  it('publishes guarded compensation metadata and binds its typed result without a read call', async () => {
+    const registration=key(true);
+    const {result:catalog}=await wire(await handleMcpRequest(rpc('tools/list'),{authenticate:async()=>registration}));
+    const tool=catalog.tools.find((t:{name:string})=>t.name==='rollback_gis_poi');
+    expect(tool.annotations).toMatchObject({readOnlyHint:false,destructiveHint:true,idempotentHint:true});
+    expect(tool._meta['wareongo/context-write-v1']).toMatchObject({effect:'compensate',auditHistory:'actor_scoped',compensates:'create_gis_poi',originalOperationArgument:'original_operation_id'});
+    const args={operation_id:randomUUID(),original_operation_id:point.operation_id};
+    const rollback=vi.fn(async()=>({operation_id:args.operation_id,outcome:'rolled_back' as const,code:'GIS_ROLLBACK_CONFIRMED',message:'The unchanged original point was removed.'}));
+    const read=vi.fn();
+    const value=await wire(await handleMcpRequest(rpc('tools/call',{name:'rollback_gis_poi',arguments:args}),{authenticate:async()=>registration,gisRollback:rollback,read}));
+    expect(rollback).toHaveBeenCalledOnce();expect(read).not.toHaveBeenCalled();expect(value.result.isError).not.toBe(true);
+    expect(value.result.structuredContent).toMatchObject({outcome:'rolled_back',meta:{toolName:'rollback_gis_poi',argumentsSha256:argumentsSha256(args),employeeId:7}});
   });
   it('rejects missing operation identity and model-supplied identity before dispatch', async () => {
     const write = vi.fn();
