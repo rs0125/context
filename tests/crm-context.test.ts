@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Principal } from '../src/lib/auth';
 import type { CrmAccess } from '../src/lib/crm-live';
 import { CRM_CONTEXT_SECTIONS, parseCrmContextQuery } from '../src/lib/crm-context-query';
-import { getCrmStageHistory } from '../src/lib/data';
+import { getCrmStageHistory, getOpportunity, searchOpportunities } from '../src/lib/data';
 
 const leadId = '00000000-0000-4000-8000-000000000001';
 const otherId = '00000000-0000-4000-8000-000000000002';
@@ -14,7 +14,7 @@ function database(rows: Record<string, unknown>[] = []) {
   return { query, client: { query } as unknown as PoolClient };
 }
 const observation = (id: string) => ({ id, from_stage: 'NEW_LEAD', to_stage: 'SITE_VISIT',
-  changed_at: '2026-09-20T12:00:00.000Z', detected_at: '2026-09-20T12:02:00.000Z' });
+  changed_at: '2026-09-20T12:00:00.000Z' });
 
 describe('CRM context query validation', () => {
   it.each(CRM_CONTEXT_SECTIONS)('requires one explicit %s section and defaults to ten records', section => {
@@ -30,8 +30,8 @@ describe('CRM context query validation', () => {
 });
 
 describe('scoped observed CRM stage history', () => {
-  it('binds the lead and live permissions, orders observations by log ID, and retains both clocks', async () => {
-    const db = database([observation('7')]);
+  it('binds live permissions and returns one stage-change timestamp for TAT', async () => {
+    const db = database([{ ...observation('7'), detected_at: '2026-09-20T12:15:00.000Z' }]);
     const result = await getCrmStageHistory(db.client, principal, leadId, access, 10);
     expect(db.query).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('JOIN public.opportunities o ON o.opportunity_id = t.opportunity_id'), [leadId, '0', 11, [leadId]]);
     const sql = db.query.mock.calls[0][0] as string;
@@ -41,7 +41,19 @@ describe('scoped observed CRM stage history', () => {
     expect(sql).not.toContain('o.data');
     expect(result).toMatchObject({ section: 'stage_history', items: [observation('7')], nextCursor: null,
       freshness_basis: 'observed_mirror_history', coverage: { has_more: false, history_complete: false } });
-    expect(result.text_guidance).toContain('Earlier or intermediate changes may be missing');
+    expect(result.items[0]).toEqual(observation('7'));
+    expect(sql).not.toContain('detected_at');
+    expect(result.text_guidance).toContain('Use changed_at as the stage-change timestamp for TAT');
+  });
+
+  it('preserves each re-entry into a stage so TAT does not merge separate visits', async () => {
+    const transitions = [
+      { ...observation('7'), changed_at: '2026-09-20T12:00:00.000Z' },
+      { ...observation('8'), from_stage: 'SITE_VISIT', to_stage: 'FOLLOW_UP', changed_at: '2026-09-21T12:00:00.000Z' },
+      { ...observation('9'), from_stage: 'FOLLOW_UP', to_stage: 'SITE_VISIT', changed_at: '2026-09-23T12:00:00.000Z' },
+    ];
+    const result = await getCrmStageHistory(database(transitions).client, principal, leadId, access, 10);
+    expect(result.items).toEqual(transitions);
   });
 
   it('allows verified admins without weakening deletion checks and binds empty scopes as empty', async () => {
@@ -93,8 +105,21 @@ describe('scoped observed CRM stage history', () => {
     expect(result.items[0].to_stage).toContain('omitted');
   });
 
-  it.each([{ id: 'bad' }, { changed_at: 'not-a-date' }, { detected_at: null }])('fails closed when an observation lacks a valid ID or clock: %j', async changes => {
+  it.each([{ id: 'bad' }, { changed_at: 'not-a-date' }, { changed_at: null }])('fails closed when an observation lacks a valid ID or clock: %j', async changes => {
     const db = database([{ ...observation('7'), ...changes }]);
     await expect(getCrmStageHistory(db.client, principal, leadId, access, 10)).rejects.toMatchObject({ status: 503, code: 'CRM_CONTEXT_UNAVAILABLE' });
+  });
+});
+
+describe('current-stage TAT timestamp', () => {
+  it.each(['2026-09-20T12:00:00.000Z', null])('preserves stage entry %s independently of later lead edits', async enteredAt => {
+    const db = database([{ opportunity_id: leadId, stage: 'SITE_VISIT', stage_entered_at: enteredAt,
+      twenty_updated_at: '2026-09-23T12:00:00.000Z', last_polled_at: '2026-09-23T12:15:00.000Z' }]);
+    const detail = await getOpportunity(db.client, principal, leadId, access);
+    const search = await searchOpportunities(db.client, principal, new URLSearchParams(), access);
+    for (const lead of [detail, search.items[0]]) {
+      expect(lead).toMatchObject({ stage: 'SITE_VISIT', stage_entered_at: enteredAt,
+        source_updated_at: '2026-09-23T12:00:00.000Z' });
+    }
   });
 });

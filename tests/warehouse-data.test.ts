@@ -18,6 +18,23 @@ function row(sources: Record<string, string | null> = {}) {
 }
 
 describe('warehouse candidate evidence', () => {
+  it.each([true, false])('includes supply QA in search and detail without exposing source media (maps=%s)', async maps => {
+    const db = database([{ ...row(), has_valid_google_maps_id: maps,
+      qa_media: { images: ['https://private.example/photo.jpg'], videos: ['https://private.example/tour.mp4'] },
+      qa_photos: 'https://private.example/legacy.jpg',
+    }]);
+    const search = await searchWarehouses(db.client, new URLSearchParams());
+    const detail = await getWarehouse(db.client, 18);
+    for (const item of [search.items[0], detail]) {
+      expect(item).toMatchObject({ id: 18, image_count: 1, video_count: 1, has_valid_google_maps_id: maps });
+      expect(JSON.stringify(item)).not.toMatch(/private\.example|qa_media|qa_photos|latitude|longitude/);
+    }
+    for (const [sql] of db.query.mock.calls) {
+      expect(sql).toContain('w.media AS qa_media, w.photos AS qa_photos');
+      expect(sql).toContain('(wd.latitude IS NOT NULL AND wd.longitude IS NOT NULL) AS has_valid_google_maps_id');
+    }
+  });
+
   it('returns uncertain numeric evidence without pretending it is an exact specification', async () => {
     const { client } = database([row({ dock_count: 'approx 4', clear_height_ft: '25–30 ft', asking_rate_per_sqft: '22 negotiable', power_kva: '15 kVA' })]);
     const output = await searchWarehouses(client, new URLSearchParams('docks_min=4&clear_height_min_ft=28'));
@@ -103,7 +120,7 @@ describe('warehouse query boundary', () => {
     expect(where).toContain('ORDER BY w.id ASC');
     expect(sql).not.toContain("King's Road");
     expect(values).toEqual(['Bangalore', "King's Road", 4, 6, 12, 11]);
-    expect(sql).not.toMatch(/contactPerson|contactNumber|address|googleLocation|uploadedBy|scoutNotes|photos/);
+    expect(sql).not.toMatch(/contactPerson|contactNumber|address|googleLocation|uploadedBy|scoutNotes/);
   });
 
   it('keeps strict and unknown controls independent for each numeric constraint', async () => {

@@ -3,6 +3,7 @@ import { HttpError } from './errors';
 import { sanitizeLabel } from './privacy';
 import { addDateConditions, resolveDateQuery } from './query-time';
 import { buildPagination } from './query-pagination';
+import { warehouseMediaCounts } from './warehouse-qa';
 import {
   WAREHOUSE_BOOLEAN_FIELDS, WAREHOUSE_CATEGORY_FIELDS, WAREHOUSE_FILTER_CATALOG,
   WAREHOUSE_NUMERIC_FIELDS, WAREHOUSE_SUMMARY_CATALOG, WAREHOUSE_SUMMARY_GROUPS,
@@ -94,6 +95,8 @@ const COLUMNS = `w.id, w.city, w.state, w.zone, w."warehouseType" AS warehouse_t
   w.availability, w.status, w."wogVerified" AS verified, w."flooringType" AS flooring_type,
   w.listing_type, w."waterSupply"::text AS water_supply, w."liftAccess" AS lift_access,
   wd."fireNocAvailable" AS fire_noc_available, wd."landType" AS land_type, wd."pollutionZone" AS pollution_zone,
+  w.media AS qa_media, w.photos AS qa_photos,
+  (wd.latitude IS NOT NULL AND wd.longitude IS NOT NULL) AS has_valid_google_maps_id,
   w."handoverDate"::text AS handover_date, ${CREATED_AT} AS created_at, ${UPDATED_AT} AS updated_at,
   ${EVIDENCE_SELECT}`;
 const BASE_FROM = 'FROM public."Warehouse" w LEFT JOIN public."WarehouseData" wd ON wd."warehouseId" = w.id';
@@ -134,6 +137,8 @@ function warehouse(row: Row, constrainedFields: readonly string[] = []) {
   const areas = validAreas(row.total_space_sqft);
   return {
     id: row.id as number,
+    ...warehouseMediaCounts(row.qa_media, row.qa_photos),
+    has_valid_google_maps_id: row.has_valid_google_maps_id === true,
     city: sanitizeLabel(row.city), state: sanitizeLabel(row.state), zone: sanitizeLabel(row.zone),
     warehouse_type: sanitizeLabel(row.warehouse_type), total_space_sqft: areas,
     dock_count: exact('dock_count'),

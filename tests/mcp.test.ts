@@ -32,7 +32,7 @@ const missingText = { state: 'missing', text: null, redacted: false, truncated: 
 const ownership = { assigned_to: { state: 'missing', values: null, redacted: false }, supply_owners: { state: 'missing', values: null, redacted: false }, owner_workspace_member_id: null, created_by: { workspace_member_id: null, name: missingText, source: missingText }, updated_by: { workspace_member_id: null, name: missingText, source: missingText } };
 const richLead = {
   close_date: null, ownership, verification_required: true,
-  id: '77777777-7777-4777-8777-777777777777', name: 'Synthetic Logistics', stage: 'NEW_LEAD', source_created_at: now.toISOString(),
+  id: '77777777-7777-4777-8777-777777777777', name: 'Synthetic Logistics', stage: 'NEW_LEAD', stage_entered_at: now.toISOString(), source_created_at: now.toISOString(),
   lead_source: 'WEBSITE_SEO', lease_duration: 'LONG_TERM', industry_verticals: ['FMCG'], occupancy_timelines: null, preferred_languages: ['ENGLISH'], repeat_client: false,
   budget: { kind: 'exact', value: 25, min: null, max: null, currency: null, period: null, area_basis: null, verification_required: true },
   recorded_value: { amount_micros: '0', amount: '0', currency_code: null, verification_required: true },
@@ -119,6 +119,8 @@ describe('MCP read-only protocol', () => {
     expect(Object.keys(warehouse.inputSchema.properties).sort()).toEqual([...WAREHOUSE_FILTER_CATALOG.map(field => field.name), 'response_format'].sort());
     expect(warehouse.inputSchema.properties.cursor.maxLength).toBe(1024);
     expect(warehouse.outputSchema.properties.data.required).toEqual(expect.arrayContaining(['items', 'nextCursor', 'query_context', 'matching_policy']));
+    expect(warehouse.outputSchema.properties.data.properties.items.items.required)
+      .toEqual(expect.arrayContaining(['image_count', 'video_count', 'has_valid_google_maps_id']));
     const crm = result.tools.find((tool: { name: string }) => tool.name === 'search_crm_leads');
     expect(crm.inputSchema.properties.date_field.enum).toContain('created');
     expect(crm.inputSchema.properties.period.enum).toContain('this_month');
@@ -131,6 +133,7 @@ describe('MCP read-only protocol', () => {
     expect(crm.inputSchema.properties).not.toHaveProperty('budget_min');
     expect(crm.inputSchema.properties).not.toHaveProperty('amount_min');
     expect(crm.description).toContain('view=created, date_field=created, period=this_month');
+    expect(crm.outputSchema.properties.data.properties.items.items.required).toContain('stage_entered_at');
     const summary = result.tools.find((tool: { name: string }) => tool.name === 'crm_summary');
     expect(summary.inputSchema.properties).not.toHaveProperty('cursor');
     expect(summary.inputSchema.properties.group_by.enum).toEqual(expect.arrayContaining(['lead_source', 'lease_duration']));
@@ -139,6 +142,9 @@ describe('MCP read-only protocol', () => {
     expect(related.inputSchema.required).toEqual(['id', 'section']);
     expect(related.inputSchema.properties.section.enum).toEqual(['notes', 'tasks', 'company', 'stage_history']);
     expect(related.inputSchema.properties.limit.maximum).toBe(10);
+    const history = related.outputSchema.properties.data.oneOf.find((section: { properties: { section: { const: string } } }) => section.properties.section.const === 'stage_history');
+    expect(history.properties.items.items.properties.changed_at.description).toContain('TAT');
+    expect(history.properties.items.items.properties).not.toHaveProperty('detected_at');
     const assessment = result.tools.find((tool: { name: string }) => tool.name === 'assess_shortlist');
     expect(assessment.inputSchema.required).toEqual(['lead_id']);
     expect(assessment.inputSchema.additionalProperties).toBe(false);
@@ -200,7 +206,7 @@ describe('MCP read-only protocol', () => {
       expect(path).toEqual(['warehouses']);
       expect(await dependencies!.authenticate!(request)).toEqual(registration);
       expect(new URL(request.url).searchParams.get('docks_min')).toBe('5');
-      return Response.json({ data: { items: [{ id: 11, verification_required: true, field_evidence: { dock_count: { kind: 'range', lower: 4, upper: 8 } } }], nextCursor: '11', matching_policy: matchingPolicy, query_context: queryContext }, meta });
+      return Response.json({ data: { items: [{ id: 11, image_count: 2, video_count: 1, has_valid_google_maps_id: true, verification_required: true, field_evidence: { dock_count: { kind: 'range', lower: 4, upper: 8 } } }], nextCursor: '11', matching_policy: matchingPolicy, query_context: queryContext }, meta });
     });
     const body = await wire(await handleMcpRequest(rpc('tools/call', { name: 'search_warehouses', arguments: { city: 'Bengaluru', docks_min: 5, limit: 2 } }), { authenticate: async () => registration, read }));
     expect(body.result.structuredContent).toMatchObject({ source_path: '/api/v1/warehouses?city=Bengaluru&docks_min=5&limit=2', meta });
@@ -208,7 +214,7 @@ describe('MCP read-only protocol', () => {
     expect(read).toHaveBeenCalledOnce();
   });
   it('keeps concise candidates small without hiding requested unknowns or uncertain measurements', async () => {
-    const item = { id: 12, city: 'Bengaluru', created_at: now.toISOString(), updated_at: now.toISOString(),
+    const item = { id: 12, city: 'Bengaluru', image_count: 3, video_count: 0, has_valid_google_maps_id: false, created_at: now.toISOString(), updated_at: now.toISOString(),
       dock_count: null, clear_height_ft: 30, power_kva: null, washroom_count: 8, land_type: 'Industrial',
       verification_required: true, field_evidence: {
         dock_count: { kind: 'range', lower: 2, upper: 6 }, clear_height_ft: { kind: 'exact', value: 30 },
@@ -224,7 +230,7 @@ describe('MCP read-only protocol', () => {
     expect(concise.result.isError).not.toBe(true);
     const data = concise.result.structuredContent.data;
     expect(data.response_format).toBe('concise');
-    expect(data.items[0]).toMatchObject({ id: 12, created_at: now.toISOString(), verification_required: true, power_kva: null,
+    expect(data.items[0]).toMatchObject({ id: 12, image_count: 3, video_count: 0, has_valid_google_maps_id: false, created_at: now.toISOString(), verification_required: true, power_kva: null,
       field_evidence: { dock_count: { kind: 'range', lower: 2, upper: 6 }, power_kva: { kind: 'unknown' }, gate_size_ft: { kind: 'approximate', value: 20 } } });
     expect(data.items[0]).not.toHaveProperty('land_type');
     expect(data.items[0].field_evidence).not.toHaveProperty('washroom_count');
@@ -340,7 +346,7 @@ describe('MCP read-only protocol', () => {
     const narrative = { id: richLead.id, title: text, body: text, source_created_at: now.toISOString(), source_updated_at: now.toISOString() };
     const item = section === 'notes' ? narrative : section === 'tasks' ? { ...narrative, status: 'TODO', due_at: null, assignee: null, assignee_status: 'unassigned' }
       : section === 'company' ? { id: richLead.id, name: text, employees: null, ideal_customer_profile: null, city: null, state: null, country: null, source_created_at: now.toISOString(), source_updated_at: now.toISOString() }
-        : { id: 'synthetic-transition', from_stage: 'NEW_LEAD', to_stage: 'SITE_VISIT', changed_at: now.toISOString(), detected_at: now.toISOString() };
+        : { id: 'synthetic-transition', from_stage: 'NEW_LEAD', to_stage: 'SITE_VISIT', changed_at: now.toISOString() };
     const data = { ...crmAccess, section, items: [item], nextCursor: null,
       read_consistency: { ...crmAccess.read_consistency, related_sources_atomic: false },
       source_fetched_at: now.toISOString(), source_opportunity_updated_at: now.toISOString(), mirror_source_updated_at: '2026-09-24T00:00:00.000Z', lead_version_matches_mirror: false,

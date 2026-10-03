@@ -39,6 +39,7 @@ const uuid = n => `${String(n).repeat(8)}-${String(n).repeat(4)}-4${String(n).re
 const warehouse = (id, city, created_at, docks, height) => ({
   id, city, state: city === 'Pune' ? 'Maharashtra' : 'Karnataka', created_at, updated_at: FIXTURE_NOW,
   total_space_sqft: [50_000], asking_rate_per_sqft: 25, warehouse_type: 'RCC', verified: false,
+  image_count: 3, video_count: 1, has_valid_google_maps_id: true,
   dock_count: docks.kind === 'exact' ? docks.value : null, clear_height_ft: height.kind === 'exact' ? height.value : null,
   field_evidence: { dock_count: docks, clear_height_ft: height },
   verification_required: [docks, height].some(value => value.kind !== 'exact'),
@@ -290,7 +291,7 @@ export function fixtureResult(name, args = {}, catalog = [], options = {}) {
       city: lead.city, state: null, country: 'India', source_created_at: FIXTURE_NOW, source_updated_at: FIXTURE_NOW }], nextCursor: null,
       coverage: { scanned: 1, returned: 1, withheld: 0, has_more: false, relationship_policy: 'linked_company_only', link_status: 'available' } };
     else {
-      const records = args.section === 'stage_history' ? [{ id: 'synthetic-transition-1', from_stage: 'NEW_LEAD', to_stage: 'SITE_VISIT', changed_at: FIXTURE_NOW, detected_at: FIXTURE_NOW }]
+      const records = args.section === 'stage_history' ? [{ id: 'synthetic-transition-1', from_stage: 'NEW_LEAD', to_stage: 'SITE_VISIT', changed_at: FIXTURE_NOW }]
         : [6, 7].map(number => ({ id: uuid(number), title: maskedText('Synthetic follow-up'), body: maskedText('Confirm the recorded requirement. Contact [phone omitted].'), source_created_at: FIXTURE_NOW, source_updated_at: FIXTURE_NOW,
           ...(args.section === 'tasks' ? { status: 'TODO', due_at: '2026-09-16T04:00:00.000Z', assignee: null, assignee_status: 'unassigned' } : {}) }));
       const page = fixturePage(records, args, 10), items = options.withholdRelated ? [] : page.items;
@@ -336,7 +337,10 @@ export function fixtureResult(name, args = {}, catalog = [], options = {}) {
     Object.values(value).forEach(clean);
   } };
   data = clone(data); clean(data);
-  const result = { source_path: resultPath(name, args), status: 200, data, meta: { requestId: 'synthetic-tooling-eval', generatedAt: FIXTURE_NOW } };
+  // These fixture tools accept flat arguments; match the server's sorted-key
+  // request binding so fixtures validate against the current MCP envelope.
+  const argumentsSha256 = createHash('sha256').update(JSON.stringify(Object.fromEntries(Object.entries(args).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)))).digest('hex');
+  const result = { source_path: resultPath(name, args), status: 200, data, meta: { requestId: 'synthetic-tooling-eval', generatedAt: FIXTURE_NOW, toolName: name, argumentsSha256 } };
   if (tool?.outputSchema && !matchesSchema(result, tool.outputSchema)) fail('FIXTURE_OUTPUT_SCHEMA_MISMATCH');
   return result;
 }

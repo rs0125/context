@@ -2,6 +2,7 @@ import { WAREHOUSE_NUMERIC_FIELDS } from './warehouse-fields';
 
 const SUMMARY_FIELDS = ['id', 'city', 'state', 'micromarkets', 'warehouse_type', 'total_space_sqft',
   'asking_rate_per_sqft', 'dock_count', 'clear_height_ft', 'availability', 'verified',
+  'image_count', 'video_count', 'has_valid_google_maps_id',
   'created_at', 'updated_at', 'verification_required'] as const;
 const SUMMARY_EVIDENCE = new Set(['asking_rate_per_sqft', 'dock_count', 'clear_height_ft']);
 
