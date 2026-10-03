@@ -26,10 +26,11 @@ describe('employee-bound encrypted console keys', () => {
       return { rows: [{ id, employee_id, employee_email, token_hash, encrypted_token, scopes, expires_at }] };
     });
     const result = await rotateOwnConsoleKey({ query } as unknown as PoolClient,
-      { ...identity, scopes: [...identity.scopes, 'gis:write', 'mail:drafts'] }, now);
+      { ...identity, scopes: [...identity.scopes, 'gis:write', 'mail:drafts', 'crm.rfq:write'] }, now);
     expect(result.scopes).toEqual(identity.scopes);
     expect(query.mock.calls[0][1][5]).not.toContain('gis:write');
     expect(query.mock.calls[0][1][5]).not.toContain('mail:drafts');
+    expect(query.mock.calls[0][1][5]).not.toContain('crm.rfq:write');
   });
 
   it.each([{ adminAccess: true, analystAccess: false }, { adminAccess: false, analystAccess: true }, { adminAccess: false, analystAccess: false }])('issues analytics only with current Analyst access (%j)', async ({ adminAccess, analystAccess }) => {

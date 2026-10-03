@@ -47,6 +47,14 @@ async function signed(options: { claims?: Record<string, unknown>; header?: Reco
 }
 
 describe('Ramesh signed request authentication', () => {
+  it('requires an explicit RFQ issuer grant and current linked CRM identity', async () => {
+    registration.scopes = ['crm.rfq:write'];
+    vi.stubEnv('CONTEXT_RAMESH_PUBLIC_KEYS_JSON', JSON.stringify([registration]));
+    const key = await authenticateRameshRequest(await signed({ claims: { scopes: ['crm.rfq:write'] } }), deps);
+    expect(key.scopes).toEqual(['crm.rfq:write']);
+    rows[0].twenty_user_id = '';
+    await expect(authenticateRameshRequest(await signed({ claims: { scopes: ['crm.rfq:write'] } }), deps)).rejects.toMatchObject({ code: 'RAMESH_UNAUTHORIZED' });
+  });
   it('binds the employee and intersects requested scopes with current roster permissions', async () => {
     rows[0].dashboardAccess = false;
     const key = await authenticateRameshRequest(await signed(), deps);
@@ -70,6 +78,7 @@ describe('Ramesh signed request authentication', () => {
     ['method', { htm: 'DELETE' }], ['group', { chat_type: 'group' }], ['other employee', { sub: '24' }],
     ['unknown number', { phone: '+919999999999' }], ['unregistered analytics scope', { scopes: ['analytics:read'] }],
     ['unregistered draft scope', { scopes: ['mail:drafts'] }], ['unsupported mail sending', { scopes: ['mail:send'] }],
+    ['unregistered RFQ scope', { scopes: ['crm.rfq:write'] }], ['unrestricted CRM write', { scopes: ['crm:write'] }],
     ['duplicate scope', { scopes: ['crm:read', 'crm:read'] }], ['unknown claim', { admin: true }],
     ['long expiry', { exp: Math.floor(Date.now() / 1000) + 900 }],
     ['expired', { iat: Math.floor(Date.now() / 1000) - 80, exp: Math.floor(Date.now() / 1000) - 20 }],
