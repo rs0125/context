@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PoolClient } from 'pg';
 import type { KeyRegistration, Principal } from '../src/lib/auth';
 import { executeCrmRfq, type CrmRfqDependencies } from '../src/lib/crm-writes/execute';
@@ -18,10 +18,15 @@ function fixture() {
   const transaction = async <T,>(work: (c: PoolClient) => Promise<T>) => work(client);
   const crm = { creator: vi.fn(async () => ({ id: principal.twentyUserId!, name: 'Synthetic' })),
     create: vi.fn<CrmRfqDependencies['crm']['create']>(async () => ({ outcome: 'created', id })) };
-  const deps: CrmRfqDependencies = { readTransaction: transaction, writeTransaction: transaction, principal: vi.fn(async () => actor), crm,
+  function checkStored(p: Principal, hash: string) {
+    if (stored && (stored.request_hash !== hash || stored.member_id !== p.twentyUserId || stored.employee_email !== p.email)) throw new HttpError(409, 'CRM_OPERATION_CONFLICT', 'Operation conflict.');
+    return stored ? structuredClone(stored) : null;
+  }
+  const deps: CrmRfqDependencies = { readTransaction: transaction, writeTransaction: transaction, principal: vi.fn(async () => structuredClone(actor)), crm,
     env: { CONTEXT_CRM_RFQ_WRITES_ENABLED: 'true', TWENTY_CRM_BASE_URL: 'https://crm.example.test', CONTEXT_CRM_WRITE_API_KEY: 'synthetic' },
+    find: vi.fn(async (_c, p, _operation, hash) => checkStored(p, hash)),
     claim: vi.fn(async (_c, p, operation, hash) => {
-      if (stored && stored.request_hash !== hash) throw new HttpError(409, 'CRM_OPERATION_CONFLICT', 'Operation conflict.');
+      checkStored(p, hash);
       const fresh = !stored;
       stored ??= { employee_id: p.employeeId, employee_email: p.email, member_id: p.twentyUserId!, operation_id: operation,
         action: 'create_crm_rfq', request_hash: hash, state: 'dispatching', resource_id: null };
@@ -35,13 +40,45 @@ function fixture() {
   return { deps, actor, crm, stored: () => stored, call: (input: unknown = args, signal = new AbortController().signal, revalidate = async () => {}) => executeCrmRfq(input, key, signal, revalidate, deps) };
 }
 describe('RFQ dispatch and recovery boundary', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
   it('commits a receipt and preserves raw description; retries only replay the receipt', async () => {
     const f = fixture();
     expect(await f.call()).toMatchObject({ outcome: 'created', data: { id, stage: 'RFQ_RECEIVED' } });
     expect(f.crm.create.mock.calls[0][0]).toMatchObject({ description: args.raw_text, stage: 'RFQ_RECEIVED' });
     expect(await f.call()).toMatchObject({ outcome: 'replayed', data: { id } });
     expect(f.crm.create).toHaveBeenCalledOnce();
+    expect(f.crm.creator).toHaveBeenCalledOnce();
     expect(vi.mocked(f.deps.claim).mock.invocationCallOrder[0]).toBeLessThan(f.crm.create.mock.invocationCallOrder[0]);
+  });
+  it.each(['created', 'rejected', 'outcome_unknown'] as const)('recovers %s without contacting CRM or writing another receipt', async outcome => {
+    const f = fixture(); f.crm.create.mockResolvedValue(outcome === 'created' ? { outcome, id } : { outcome });
+    await f.call();
+    f.crm.creator.mockRejectedValue(new Error('CRM is offline'));
+    f.deps.writeTransaction = async () => { throw new Error('Recovery must be read-only'); };
+    expect(await f.call()).toMatchObject({ outcome: outcome === 'created' ? 'replayed' : outcome });
+    expect(f.crm.creator).toHaveBeenCalledOnce();
+    expect(f.crm.create).toHaveBeenCalledOnce();
+  });
+  it('does not replay a receipt for a changed CRM identity', async () => {
+    const f = fixture(); await f.call();
+    f.actor.twentyUserId = id;
+    expect(await f.call()).toMatchObject({ outcome: 'not_dispatched', code: 'CRM_OPERATION_CONFLICT' });
+    expect(f.crm.creator).toHaveBeenCalledOnce();
+    expect(f.crm.create).toHaveBeenCalledOnce();
+  });
+  it('uses the injected environment for the default HTTP adapter', async () => {
+    const f = fixture();
+    const fetcher = vi.fn<typeof fetch>(async (_url, init) => init?.method === 'GET'
+      ? Response.json({ data: { workspaceMembers: [{ id: principal.twentyUserId, userEmail: principal.email, deletedAt: null, name: { firstName: 'Synthetic', lastName: '' } }] }, pageInfo: { hasNextPage: false } })
+      : Response.json({ data: { createOpportunity: { ...JSON.parse(init!.body as string), id, deletedAt: null } } }, { status: 201 }));
+    vi.stubGlobal('fetch', fetcher);
+    const { crm: _crm, ...deps } = f.deps;
+    expect(await executeCrmRfq(args, key, new AbortController().signal, undefined, deps)).toMatchObject({ outcome: 'created' });
+    expect(fetcher.mock.calls).toHaveLength(2);
+    for (const [url, init] of fetcher.mock.calls) {
+      expect(new URL(String(url)).origin).toBe('https://crm.example.test');
+      expect(init!.headers).toMatchObject({ Authorization: 'Bearer synthetic' });
+    }
   });
   it('admits only one concurrent dispatch for the same operation', async () => {
     const f = fixture();
@@ -55,7 +92,7 @@ describe('RFQ dispatch and recovery boundary', () => {
   });
   it.each(['raw_text', 'location', 'requirement'])('rejects missing critical %s before authorization or network', async field => {
     const f = fixture(); const input = { ...args, [field]: undefined };
-    expect(await f.call(input)).toMatchObject({ outcome: 'not_dispatched' });
+    expect(await f.call(input)).toMatchObject({ outcome: 'not_dispatched', operation_id: args.operation_id });
     expect(f.deps.claim).not.toHaveBeenCalled(); expect(f.crm.create).not.toHaveBeenCalled();
   });
   it('provides actionable missing-field errors before any write', async () => {

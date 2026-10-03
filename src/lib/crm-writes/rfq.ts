@@ -10,7 +10,7 @@ export const rfqInputSchema = z.object({
   operation_id: z.string().uuid().describe('Stable operation UUID. Persist before dispatch and reuse unchanged on recovery. Never replace an uncertain operation.'),
   raw_text: z.string().min(1).max(3000).regex(/^[^\x00]+$/).describe('Entire original user RFQ message, verbatim, including whitespace and #twenty tags. This becomes the CRM description; never summarize or rewrite it. For multiple selected messages join their complete texts with two newlines in source order.'),
   location: text(160).describe('Exact location excerpt from raw_text: a city, locality, corridor or alternatives. Required. Never infer a city from a locality.'),
-  requirement: text(120).describe('Exact quantified space/capacity excerpt including its unit, e.g. 25,000-35,000 sqft or 100 pallets. Required; do not turn ranges into a single value.'),
+  requirement: text(120).describe('Exact quantified space/capacity excerpt including its unit, e.g. 25,000-35,000 sqft or 100 pallets. Required; preserve ranges, bounds and approximation words instead of extracting a single exact value.'),
   city: text(120).optional().describe('City explicitly supplied in raw_text; omit if only a locality/corridor is known.'),
   micro_market: text(160).optional().describe('Explicit locality/corridor excerpt from raw_text.'),
   company_name: text(120).optional(),
@@ -32,14 +32,20 @@ export type RfqResult = z.infer<typeof rfqOutputSchema>;
 export type CrmCreator = { id: string; name: string };
 
 const placeholder = /^(?:tbd|tbc|unknown|not\s+(?:known|available|provided|mentioned|specified)|n\/?a|none|nil|anywhere|any\s+(?:city|location)|india|pan[ -]?india|[-?]+)$/i;
-const capacityUnit = `(?:${CRM_SQFT_PATTERN}|sq\\.?\\s*m\\.?|sqm|m²|square\\s*met(?:er|re)s?|acres?|pallets?|(?:metric\\s*)?ton(?:ne)?s?|mt|cbm|m³|cubic\\s*met(?:er|re)s?|containers?)`;
-const capacity = new RegExp(`^(?:(?:~|≈|approx(?:imately)?\\.?|around|about)\\s*)?(${CRM_NUMBER_PATTERN})\\s*(${CRM_MAGNITUDE_PATTERN})?(?:\\s*(?:-|–|—|to)\\s*(${CRM_NUMBER_PATTERN})\\s*(${CRM_MAGNITUDE_PATTERN})?)?\\s*(${capacityUnit})$`, 'i');
+const capacityUnits = [CRM_SQFT_PATTERN, 'sq\\.?\\s*m\\.?|sqm|m²|square\\s*met(?:er|re)s?',
+  'acres?', 'pallets?', '(?:metric\\s*)?ton(?:ne)?s?|mt', 'cbm|m³|cubic\\s*met(?:er|re)s?', 'containers?'];
+const capacityUnit = `(?:${capacityUnits.join('|')})`;
+const unitFamilies = capacityUnits.map(pattern => new RegExp(`^(?:${pattern})$`, 'i'));
+const capacity = new RegExp(`^(?:(?:~|≈|approx(?:imately)?\\.?|around|about|circa|at least|at most|up to|over|above|under|below|[<>]=?)\\s*)?(${CRM_NUMBER_PATTERN})\\s*(${CRM_MAGNITUDE_PATTERN})?(?:\\s*(${capacityUnit})?\\s*(?:-|–|—|to)\\s*(${CRM_NUMBER_PATTERN})\\s*(${CRM_MAGNITUDE_PATTERN})?)?\\s*(${capacityUnit})$`, 'i');
 function capacityValid(value: string) {
   const match = capacity.exec(value);
   if (!match) return false;
   const quantity = (raw: string, magnitude?: string) => Number(raw.replaceAll(',', '')) * (magnitude ? CRM_MAGNITUDE_MULTIPLIERS[magnitude.toLowerCase()] : 1);
-  const first = quantity(match[1], match[2] ?? match[4]);
-  const second = match[3] ? quantity(match[3], match[4]) : first;
+  // Repeated units must agree. An explicit left unit also prevents borrowing
+  // the right magnitude: "5 sqft - 10k sqft" starts at five, not five thousand.
+  if (match[3] && !unitFamilies.some(unit => unit.test(match[3]) && unit.test(match[6]))) return false;
+  const first = quantity(match[1], match[2] ?? (match[3] ? undefined : match[5]));
+  const second = match[4] ? quantity(match[4], match[5]) : first;
   return Number.isFinite(first) && Number.isFinite(second) && first > 0 && second >= first && second <= 1_000_000_000;
 }
 

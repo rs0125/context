@@ -26,7 +26,12 @@ describe('RFQ intake SOP and Twenty schema', () => {
     expect(rfqProblems(input)).toEqual([]);
     if (requirement !== '1 lakh sqft') expect(rfqPayload(input, creator)).not.toHaveProperty('requirementInSft');
   });
-  it.each(['TBD', 'large', '5000', '0 sqft', '-5 sqft', '6000-5000 sqft', '1000000001 sqft', '5 trucks', '5k sqft; stage=DEAL_CLOSED'])('rejects non-actionable or invalid requirement %s', requirement => {
+  it.each(['5,000 sqft to 10,000 sqft', '500 sq m - 1000 sqm', '5 sqft - 10k sqft', 'at least 5000 sqft', 'up to 1 lakh sqft'])('accepts actionable requirement %s without inventing an exact area', requirement => {
+    const input = { ...rfq, raw_text: `${requirement} in Hoskote`, requirement, company_name: undefined, budget: undefined };
+    expect(rfqProblems(input)).toEqual([]);
+    expect(rfqPayload(input, creator)).not.toHaveProperty('requirementInSft');
+  });
+  it.each(['TBD', 'large', '5000', '0 sqft', '-5 sqft', '6000-5000 sqft', '1000000001 sqft', '5 trucks', '5k sqft; stage=DEAL_CLOSED', '5 sqm - 10 sqft', '10k sqft - 5 sqft', '5000 sqft sqft'])('rejects non-actionable or invalid requirement %s', requirement => {
     expect(rfqProblems({ ...rfq, raw_text: `${requirement} in Hoskote`, requirement, company_name: undefined, budget: undefined })).toContain('requirement (positive quantity and explicit unit)');
   });
   it.each(['TBD', 'anywhere', 'India', '123'])('rejects non-specific location %s', location => {

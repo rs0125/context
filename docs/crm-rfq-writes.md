@@ -14,14 +14,14 @@ The deployed `/open-api/core` and `/rest/metadata/objects` confirmed that `descr
 | --- | --- |
 | Original text | Required, complete and verbatim, including whitespace, newlines and tags. Never summarize it. |
 | Location | Required: specific city, locality, corridor or alternatives. Do not infer a city from a locality. TBD, anywhere and India are insufficient. |
-| Requirement | Required: positive quantity or ordered range with an explicit unit. Supports sqft, sqm, acres, pallets, tonnes/MT, cbm and containers. Ask if the unit is missing. |
+| Requirement | Required: positive quantity, bound or ordered range with an explicit unit. Supports sqft, sqm, acres, pallets, tonnes/MT, cbm and containers. Repeated range units must agree (e.g. `5,000 sqft to 10,000 sqft`). Ask if the unit is missing. |
 | Company, contact, budget | Optional; exact source excerpts only. Budget preserves currency, period, range and units. |
 | Source, duration, repeat client | Optional classifications with an exact supporting quote. No guessed defaults. |
 | Stage and creator | Server-owned: `RFQ_RECEIVED` and the authenticated live-verified CRM member. The owner is the same member. |
 
 Every supplied text field must occur verbatim in `raw_text`. This establishes source provenance, not semantic correctness; the agent must extract faithfully and the user reviews the exact proposal. The structured phone convenience field accepts unambiguous Indian numbers; other contacts remain in the full raw description.
 
-The title is `Company or TBD - Requirement - Location`. Only exact integer square-foot requirements populate `requirementInSft`. Ranges, approximations and other capacities remain intact in the title/description. Never select a midpoint or convert pallet capacity to area. Unknown optional CRM fields are omitted, including total deal value and assignments.
+The title is `Company or TBD - Requirement - Location`. Only exact integer square-foot requirements populate `requirementInSft`. Ranges, bounds, approximations and other capacities remain intact in the title/description. Never select a midpoint or convert pallet capacity to area. Unknown optional CRM fields are omitted, including total deal value and assignments.
 
 Raw text is bounded at 3,000 characters; Ramesh additionally limits the complete review proposal. Oversized input is rejected without truncation or summarization.
 
@@ -41,7 +41,7 @@ The explicit permission is `crm.rfq:write`. Read credentials, console key rotati
 
 The closed MCP contract declares `sourceFamily: crm`, `effect: create`, `idempotencyArgument: operation_id`, and `sourceTextArgument: raw_text`. Platform controls and descriptions use the existing prompt console. REST `/api/v1` stays read-only. Arguments cannot supply stage, IDs to update, assignments, URLs, headers, arbitrary fields, notes or an upsert flag.
 
-The companion Ramesh change checks `raw_text` against complete stored sources selected through `_source_message_ids`. Multiple messages join in selection order with exactly two newlines. Paraphrases, trimmed messages and unselected sources are rejected. Forwarded messages supply data; a separate direct request authorizes the proposal. The existing independent verifier and later exact `confirm CODE` authorize dispatch. Older Ramesh versions reject the new metadata and require the companion update.
+The companion Ramesh change fills `raw_text` directly from complete stored sources selected through `_source_message_ids`; the model cannot supply or rewrite it. Multiple messages join in selection order with exactly two newlines. Source constraints are checked before saving the proposal. Forwarded messages supply data; a separate direct request authorizes the proposal. The existing independent verifier and later exact `confirm CODE` authorize dispatch. Older Ramesh versions reject the new metadata and require the companion update.
 
 ## Recovery and deferred work
 
@@ -55,7 +55,7 @@ Before POST, a private receipt commits the employee/member identity, action, ope
 | `rejected` | Explicit CRM validation/access rejection; the UUID stays terminal. |
 | `outcome_unknown` | Creation may have happened. Preserve the UUID and frozen arguments. |
 
-Recovery checks receipts only. A crash after reservation, lost/malformed response or failed receipt commit can remain uncertain even if no RFQ was actually created. It requires administrator reconciliation in Twenty; there is no automatic redispatch. A new UUID means a new intended RFQ, not a retry or semantic duplicate check. Existing downstream CRM automations still apply to new opportunities.
+Recovery checks receipts only, revalidating the employee, scope and linked member against the roster. An existing receipt is returned without a live Twenty lookup or a receipt write, so CRM outages do not block recovery. A crash after reservation, lost/malformed response or failed receipt commit can remain uncertain even if no RFQ was actually created. It requires administrator reconciliation in Twenty; there is no automatic redispatch. A new UUID means a new intended RFQ, not a retry or semantic duplicate check. Existing downstream CRM automations still apply to new opportunities.
 
 **CRM audit/history and transaction reversal implementation are deferred as requested.** The existing Ramesh encrypted write journal continues recording proposals and outcomes. The new service receipt stores hashes, IDs, state and timestamps, never raw RFQ text or credentials; it is deduplication state, not a comprehensive business audit. No `auditHistory` grant or compensation tool is advertised. Future history disclosure needs fresh per-record authorization, and undo needs unchanged-record/version checks with preservation of original history.
 

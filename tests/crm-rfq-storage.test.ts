@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Principal } from '../src/lib/auth';
-import { claimCrmRfq, finishCrmRfq } from '../src/lib/crm-writes/storage';
+import { claimCrmRfq, findCrmRfq, finishCrmRfq } from '../src/lib/crm-writes/storage';
 const modulePath = '../scripts/migrate-crm-writes.mjs';
 const { migrateCrmWrites } = await import(modulePath);
 const connection = process.env.CONTEXT_CRM_TEST_DATABASE_URL;
@@ -41,20 +41,28 @@ describe.skipIf(!connection)('isolated RFQ receipt migration and concurrency', (
     expect(claims.every(c => c.receipt.state === 'dispatching')).toBe(true);
     await expect(tx(runtime, c => claimCrmRfq(c, actor, operation, 'b'.repeat(64)))).rejects.toMatchObject({ code: 'CRM_OPERATION_CONFLICT' });
     await expect(tx(runtime, c => claimCrmRfq(c, { ...actor, twentyUserId: randomUUID() }, operation, hash))).rejects.toMatchObject({ code: 'CRM_OPERATION_CONFLICT' });
+    await expect(tx(runtime, c => findCrmRfq(c, actor, operation, 'b'.repeat(64)))).rejects.toMatchObject({ code: 'CRM_OPERATION_CONFLICT' });
+    await expect(tx(runtime, c => findCrmRfq(c, { ...actor, twentyUserId: randomUUID() }, operation, hash))).rejects.toMatchObject({ code: 'CRM_OPERATION_CONFLICT' });
     const id = randomUUID();
     await tx(runtime, c => finishCrmRfq(c, actor, operation, hash, { outcome: 'created', id }));
     expect(await tx(runtime, c => claimCrmRfq(c, actor, operation, hash))).toMatchObject({ fresh: false, receipt: { state: 'created', resource_id: id } });
     // Migration reruns grant narrowly and preserve existing operations.
     expect(await migrate()).toMatchObject({ verified: true });
     expect(await tx(runtime, c => claimCrmRfq(c, actor, operation, hash))).toMatchObject({ fresh: false, receipt: { resource_id: id } });
+    expect(await tx(runtime, async c => {
+      await c.query('SET TRANSACTION READ ONLY');
+      return findCrmRfq(c, actor, operation, hash);
+    })).toMatchObject({ state: 'created', resource_id: id });
   });
   it('makes claim rollback atomic and isolates operation IDs by employee', async () => {
     const operation = randomUUID();
+    expect(await tx(runtime, c => findCrmRfq(c, actor, operation, hash))).toBeNull();
     await expect(tx(runtime, async c => { await claimCrmRfq(c, actor, operation, hash); throw new Error('abort'); })).rejects.toThrow('abort');
     expect(await tx(runtime, c => claimCrmRfq(c, actor, operation, hash))).toMatchObject({ fresh: true });
     const other = { ...actor, employeeId: 8, email: 'other@wareongo.com' };
     expect(await tx(runtime, c => claimCrmRfq(c, other, operation, hash))).toMatchObject({ fresh: true, receipt: { employee_id: 8, state: 'dispatching', resource_id: null } });
     await expect(tx(runtime, c => finishCrmRfq(c, { ...actor, email: 'rebound@wareongo.com' }, operation, hash, { outcome: 'rejected' }))).rejects.toMatchObject({ code: 'CRM_RECEIPT_UNAVAILABLE' });
+    await expect(tx(runtime, c => finishCrmRfq(c, { ...actor, twentyUserId: randomUUID() }, operation, hash, { outcome: 'rejected' }))).rejects.toMatchObject({ code: 'CRM_RECEIPT_UNAVAILABLE' });
   });
   it('unknown/rejected claims are terminal and cannot be reclaimed or overwritten', async () => {
     for (const outcome of ['outcome_unknown', 'rejected'] as const) {
