@@ -155,7 +155,7 @@ describe('analytics MCP contract', () => {
     });
   });
   it('retains Search Console discovery when GA4 is unavailable', async () => {
-    const partial = { read_only: true, access: 'admins_only',
+    const partial = { read_only: true, access: 'analysts_only',
       ga4: { status: 'unavailable', property: '123', timezone: null, source_fetched_at: null,
         error_code: 'ANALYTICS_SOURCE_DENIED', custom_dimensions: [], reports: [], event_definitions: [], metric_definitions: [
           { name: 'averageEngagementTimePerSession', unit: 'seconds', definition: 'Average recorded engagement per session.', calculation: 'userEngagementDuration / sessions' },

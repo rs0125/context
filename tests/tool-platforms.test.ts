@@ -2,8 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey } from 'jose';
 import type { PoolClient } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { KeyRegistration } from '../src/lib/auth';
-import { RAMESH_SCOPES } from '../src/lib/ramesh-auth';
+import { READ_SCOPES, type KeyRegistration } from '../src/lib/auth';
 import { handleMcpRequest } from '../src/lib/mcp';
 import { handleRameshMcpRequest } from '../src/lib/ramesh-mcp';
 import { TOOL_DEFAULT_PLATFORMS, TOOL_PROMPTS, type PromptValues, type ToolPlatform } from '../src/lib/prompt-definitions';
@@ -23,14 +22,14 @@ const read = vi.fn(async () => Response.json({ data: { items: [], nextCursor: nu
 beforeEach(async () => {
   const pair = await generateKeyPair('EdDSA'); privateKey = pair.privateKey;
   key = { id: randomUUID(), hash: 'a'.repeat(64), employeeId: employee.id, employeeEmail: employee.email,
-    scopes: [...RAMESH_SCOPES], expiresAt: '2099-01-01T00:00:00Z' };
+    scopes: [...READ_SCOPES], expiresAt: '2099-01-01T00:00:00Z' };
   prompts = {};
   read.mockClear();
   vi.stubEnv('CONTEXT_CONSOLE_ORIGIN', origin);
   vi.stubEnv('CONTEXT_MCP_ENABLED', 'true');
   vi.stubEnv('CONTEXT_RAMESH_AUTH_ENABLED', 'true');
   vi.stubEnv('CONTEXT_RAMESH_PUBLIC_KEYS_JSON', JSON.stringify([{ kid: 'platform-test', publicKey: await exportJWK(pair.publicKey),
-    scopes: [...RAMESH_SCOPES], expiresAt: '2099-01-01T00:00:00Z' }]));
+    scopes: [...READ_SCOPES], expiresAt: '2099-01-01T00:00:00Z' }]));
 });
 afterEach(() => vi.unstubAllEnvs());
 
@@ -57,9 +56,10 @@ async function rpc(platform: ToolPlatform, method: string, params: Record<string
 const names = (result: { tools: { name: string }[] }) => result.tools.map(tool => tool.name);
 
 describe('platform-specific MCP tool availability', () => {
-  it('keeps existing tools on both harnesses by default within granted scopes', async () => {
-    const expected = Object.keys(TOOL_PROMPTS).filter(name => key.scopes.includes('analytics:read')
-      || !['analytics_capabilities', 'ga4_report', 'search_console_report'].includes(name));
+  it('keeps existing read tools on both harnesses by default within granted scopes', async () => {
+    expect(key.scopes).not.toContain('gis:write');
+    const expected = Object.keys(TOOL_PROMPTS).filter(name => name !== 'create_gis_poi'
+      && (key.scopes.includes('analytics:read') || !['analytics_capabilities', 'ga4_report', 'search_console_report'].includes(name)));
     for (const platform of ['claude', 'whatsapp'] as const) {
       expect(names((await rpc(platform, 'tools/list')).result)).toEqual(expected);
     }

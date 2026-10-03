@@ -36,7 +36,7 @@ export const analyticsInterpretationOutput = z.object({
   event_definitions: z.array(eventDefinition), limits: z.array(z.string()),
 });
 export const analyticsCapabilitiesOutput = z.object({
-  read_only: z.literal(true), access: z.literal('admins_only'),
+  read_only: z.literal(true), access: z.literal('analysts_only'),
   ga4: z.object({ status: z.enum(['available', 'not_configured', 'unavailable']), property: nullableText, timezone: nullableText,
     custom_dimensions: z.array(z.string()), source_fetched_at: z.string().datetime().nullable(), error_code: nullableText,
     event_definitions: z.array(eventDefinition),

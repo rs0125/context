@@ -515,7 +515,7 @@ export async function analyticsCapabilities() {
     catch (error) { errorCode = error instanceof HttpError ? error.code : 'ANALYTICS_SOURCE_UNAVAILABLE'; }
     let site: string | null = null;
     try { site = searchConsoleSite(); } catch { /* GA reporting remains useful without Search Console configuration. */ }
-    return { read_only: true, access: 'admins_only', ga4: { status: config ? 'available' : errorCode === 'ANALYTICS_CONFIGURATION' ? 'not_configured' : 'unavailable', property,
+    return { read_only: true, access: 'analysts_only', ga4: { status: config ? 'available' : errorCode === 'ANALYTICS_CONFIGURATION' ? 'not_configured' : 'unavailable', property,
       timezone: config?.timezone ?? null, custom_dimensions: config?.custom.map(x => x.replace('customEvent:', '')) ?? [],
       source_fetched_at: config?.source_fetched_at ?? null, error_code: errorCode,
       event_definitions: ANALYTICS_EVENT_DEFINITIONS,
