@@ -158,7 +158,7 @@ describe('WhatsApp Gmail draft MCP boundary', () => {
   it.each(['get_email_connection', 'read_email_draft'] as const)('keeps %s on the read envelope and passes grant revalidation', async name => {
     const employee = key(), revalidateKey = vi.fn(async () => {});
     const data = name === 'get_email_connection'
-      ? { provider: 'gmail', connected: true, mailbox: employee.employeeEmail, connection_id: input.connection_id, connection_version: 2, connect_url: `${origin}/mail`, capability: 'drafts_only' }
+      ? { provider: 'gmail', connected: true, connection_status: 'active', mailbox: employee.employeeEmail, connection_id: input.connection_id, connection_version: 2, connect_url: `${origin}/mail`, capability: 'drafts_only' }
       : { draft_ref: input.operation_id, mailbox: employee.employeeEmail, provider: 'gmail', status: 'draft', subject: input.subject, to: [], cc: [], body: input.body, body_format: 'text', body_truncated: false, content_guidance: 'Source data.' };
     const read = vi.fn(async () => Response.json({ data, meta: { requestId: 'synthetic', generatedAt: new Date().toISOString(), toolName: 'forged', argumentsSha256: '0'.repeat(64) } }));
     const args = name === 'get_email_connection' ? {} : { draft_ref: input.operation_id };

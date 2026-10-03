@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { KeyRegistration, Principal } from '../src/lib/auth';
 import { HttpError } from '../src/lib/errors';
 import { GmailClientError, GMAIL_COMPOSE_SCOPE, type GmailDraft } from '../src/lib/gmail-client';
@@ -38,13 +38,19 @@ function fixture() {
   const connection = vi.fn(async () => state.connection ? { ...state.connection } : null);
   const refresh = vi.fn(async () => 'synthetic-access-token');
   const claim = vi.fn<GmailToolDependencies['claim']>(async (_client, owner, requested) => {
+    if (state.connection?.status !== 'active' || state.connection.id !== requested.connectionId || state.connection.version !== requested.connectionVersion)
+      throw new HttpError(409, 'GMAIL_CONNECTION_CHANGED', 'Connection changed');
     const previous = operations.get(requested.operationId);
     if (previous) {
       if (previous.requestHash !== requested.requestHash) throw new HttpError(409, 'GMAIL_OPERATION_CONFLICT', 'Different content');
+      if (previous.state === 'retryable' && previous.retryAt && Date.parse(previous.retryAt) <= Date.now()) {
+        Object.assign(previous, { state: 'dispatching', retryAt: null });
+        return { claimed: true, operation: { ...previous } };
+      }
       return { claimed: false, operation: { ...previous } };
     }
     const operation: GmailDraftOperation = { ...owner, operationId: requested.operationId, connectionId: requested.connectionId,
-      connectionVersion: requested.connectionVersion, requestHash: requested.requestHash, encryptedContent: requested.encryptedContent ?? null,
+      connectionVersion: requested.connectionVersion, requestHash: requested.requestHash, googleSub: state.connection.googleSub, retryAt: null,
       state: 'dispatching', draftId: null, messageId: null, reason: null, createdAt: now, updatedAt: now };
     operations.set(requested.operationId, operation);
     return { claimed: true, operation: { ...operation } };
@@ -52,7 +58,8 @@ function fixture() {
   const finish = vi.fn<GmailToolDependencies['finish']>(async (_client, _owner, id, outcome) => {
     const previous = operations.get(id)!;
     if (previous.state === 'dispatching' || (previous.state === 'unknown' && outcome.state === 'created')) {
-      Object.assign(previous, { state: outcome.state, draftId: outcome.draftId ?? null, messageId: outcome.messageId ?? null, reason: outcome.reason ?? null });
+      Object.assign(previous, { state: outcome.state, draftId: outcome.draftId ?? null, messageId: outcome.messageId ?? null, reason: outcome.reason ?? null,
+        retryAt: outcome.state === 'retryable' ? new Date(Date.now() + outcome.retryAfterMs!).toISOString() : null });
     }
     return { ...previous };
   });
@@ -71,13 +78,20 @@ function fixture() {
   const deps: GmailToolDependencies = {
     readTransaction: async work => work(db),
     writeTransaction: async work => {
-      const result = await work(db);
+      const before = structuredClone(operations);
+      let result;
+      try { result = await work(db); }
+      catch (error) { operations.clear(); for (const [id, value] of before) operations.set(id, value); throw error; }
       for (const id of operations.keys()) committed.add(id);
       if (state.commitAmbiguous) { state.commitAmbiguous = false; throw new Error('Lost connection after commit with private driver details'); }
       return result;
     },
     principal: vi.fn(async () => ({ ...state.principal, scopes: [...state.principal.scopes] })),
     connection, claim, finish, operation, gmail, refresh, env,
+    needsReauth: vi.fn(async (_client, _owner, binding) => {
+      if (state.connection?.status !== 'active' || state.connection.id !== binding.id || state.connection.version !== binding.version) return false;
+      state.connection.status = 'needs_reauth'; return true;
+    }),
     references: vi.fn<GmailToolDependencies['references']>(async () => { throw new Error('Unexpected draft listing in create/read test'); }),
   };
   return { deps, state, operations, revalidate, gmail, refresh, connection, claim, finish, operation,
@@ -87,9 +101,10 @@ function fixture() {
 }
 
 describe('employee-bound Gmail draft tools', () => {
+  afterEach(() => vi.useRealTimers());
   it('returns a bounded connection receipt without exposing encrypted credentials or Gmail provider IDs', async () => {
     const ctx = fixture();
-    expect(await ctx.status()).toEqual({ provider: 'gmail', connected: true, mailbox: principal.email, connection_id: connectionId,
+    expect(await ctx.status()).toEqual({ provider: 'gmail', connected: true, connection_status: 'active', mailbox: principal.email, connection_id: connectionId,
       connection_version: 1, connect_url: 'https://context.example.test/mail', capability: 'drafts_only' });
     ctx.state.connection = null;
     expect(await ctx.status()).toMatchObject({ connected: false, connection_id: null, connection_version: null });
@@ -108,7 +123,8 @@ describe('employee-bound Gmail draft tools', () => {
     expect(ctx.claim.mock.calls[0][1]).toEqual({ employeeId: 7, employeeEmail: principal.email });
     expect(ctx.claim.mock.calls[0][2]).toMatchObject({ connectionId, connectionVersion: 1, operationId, requestHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
     expect(JSON.stringify(result)).not.toMatch(/synthetic-(?:access|refresh)-token|draft_123|message_456|encryptedRefreshToken|mail\.google\.com/);
-    expect(ctx.revalidate.mock.calls.length).toBeGreaterThanOrEqual(5);
+    expect(ctx.revalidate).toHaveBeenCalledTimes(5);
+    expect(ctx.claim.mock.calls[0][2]).not.toHaveProperty('encryptedContent');
   });
 
   it.each(['disabled', 'no_scope', 'revoked', 'unconnected', 'wrong_mailbox', 'no_compose', 'aborted'] as const)
@@ -161,9 +177,9 @@ describe('employee-bound Gmail draft tools', () => {
     expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
   });
 
-  it.each(['unknown', 'created'] as const)('preserves %s prior-create ambiguity when refresh access is lost', async previousState => {
+  it('preserves unknown prior-create ambiguity when refresh access is lost', async () => {
     const ctx = fixture();
-    if (previousState === 'unknown') ctx.gmail.createDraft.mockRejectedValueOnce(new GmailClientError('GMAIL_TIMEOUT', { operationMayHaveSucceeded: true }));
+    ctx.gmail.createDraft.mockRejectedValueOnce(new GmailClientError('GMAIL_TIMEOUT', { operationMayHaveSucceeded: true }));
     await ctx.run();
     ctx.refresh.mockRejectedValueOnce(new HttpError(401, 'GMAIL_RECONNECT_REQUIRED', 'Reconnect the mailbox.'));
     const result = await ctx.run();
@@ -172,12 +188,12 @@ describe('employee-bound Gmail draft tools', () => {
     expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
   });
 
-  it.each(['disconnected', 'new_connection'] as const)('does not report a prior uncertain create as absent after %s', async change => {
+  it.each(['disconnected', 'different_account'] as const)('does not report a prior uncertain create as absent after %s', async change => {
     const ctx = fixture();
     ctx.gmail.createDraft.mockRejectedValueOnce(new GmailClientError('GMAIL_TIMEOUT', { operationMayHaveSucceeded: true }));
     await ctx.run();
     if (change === 'disconnected') ctx.state.connection = null;
-    else ctx.state.connection!.version = 2;
+    else { ctx.state.connection!.version = 2; ctx.state.connection!.googleSub = 'different-google-sub'; }
     expect(await ctx.run()).toMatchObject({ outcome: 'outcome_unknown' });
     expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
     expect(ctx.gmail.findDraftByOperation).not.toHaveBeenCalled();
@@ -218,19 +234,144 @@ describe('employee-bound Gmail draft tools', () => {
     expect(ctx.gmail.findDraftByOperation).not.toHaveBeenCalled();
   });
 
-  it.each(['before_refresh', 'during_refresh', 'after_claim', 'after_provider'] as const)
+  it('retries a definitive quota rejection with the same operation only after its persisted delay, once under contention', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const ctx = fixture();
+    ctx.gmail.createDraft.mockRejectedValueOnce(new GmailClientError('GMAIL_RATE_LIMITED', { status: 429, retryAfterMs: 5000 }));
+    expect(await ctx.run()).toMatchObject({ outcome: 'not_dispatched', code: 'GMAIL_RATE_LIMITED' });
+    expect(ctx.operations.get(operationId)).toMatchObject({ state: 'retryable', retryAt: new Date(Date.now() + 5000).toISOString() });
+    expect(await ctx.run()).toMatchObject({ outcome: 'not_dispatched', code: 'GMAIL_RETRY_LATER' });
+    expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
+    vi.setSystemTime(Date.now() + 5001);
+    const results = await Promise.all([ctx.run(), ctx.run()]);
+    expect(results.some(result => result.outcome === 'created')).toBe(true);
+    expect(ctx.gmail.createDraft).toHaveBeenCalledTimes(2);
+    expect(ctx.operations.get(operationId)?.state).toBe('created');
+    expect(ctx.claim.mock.calls.every(([, , args]) => args.operationId === operationId)).toBe(true);
+  });
+
+  it('marks only a definitive invalid_grant as needs_reauth without consuming a draft operation', async () => {
+    const ctx = fixture();
+    ctx.refresh.mockRejectedValueOnce(new HttpError(401, 'GMAIL_RECONNECT_REQUIRED', 'Reconnect.'));
+    expect(await ctx.run()).toMatchObject({ outcome: 'not_dispatched', code: 'GMAIL_RECONNECT_REQUIRED' });
+    expect(await ctx.status()).toMatchObject({ connected: false, connection_status: 'needs_reauth', connect_url: 'https://context.example.test/mail' });
+    expect(ctx.deps.needsReauth).toHaveBeenCalledExactlyOnceWith(expect.anything(), { employeeId: 7, employeeEmail: principal.email }, { id: connectionId, version: 1 });
+    expect(ctx.state.connection!.encryptedRefreshToken).not.toBeNull();
+    expect(ctx.operations.size).toBe(0);
+    expect(ctx.gmail.createDraft).not.toHaveBeenCalled();
+  });
+
+  it('does not mark a newer connection invalid when an old refresh fails', async () => {
+    const ctx = fixture();
+    ctx.refresh.mockImplementationOnce(async () => {
+      ctx.state.connection!.version++;
+      throw new HttpError(401, 'GMAIL_RECONNECT_REQUIRED', 'Reconnect.');
+    });
+    await ctx.run();
+    expect(ctx.state.connection!.status).toBe('active');
+    expect(ctx.state.connection!.version).toBe(2);
+    expect(ctx.gmail.createDraft).not.toHaveBeenCalled();
+  });
+
+  it('keeps a connection active after a temporary refresh outage', async () => {
+    const ctx = fixture(); ctx.refresh.mockRejectedValueOnce(new HttpError(503, 'GMAIL_OAUTH_UNAVAILABLE', 'Unavailable.'));
+    expect(await ctx.run()).toMatchObject({ outcome: 'not_dispatched' });
+    expect(ctx.deps.needsReauth).not.toHaveBeenCalled();
+    expect(ctx.state.connection!.status).toBe('active');
+  });
+
+  it('replays and reads a historical draft after same-account reauthorization without resending', async () => {
+    const ctx = fixture(); await ctx.run();
+    ctx.state.connection!.version++;
+    expect(await ctx.run()).toMatchObject({ outcome: 'replayed' });
+    expect(await ctx.read()).toMatchObject({ draft_ref: operationId, body: input.body });
+    expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
+    expect(ctx.refresh).toHaveBeenCalledTimes(2); // create and current read, not receipt replay
+  });
+
+  it('reconciles an uncertain original operation after same-account reauthorization using GET only', async () => {
+    const ctx = fixture();
+    ctx.gmail.createDraft.mockRejectedValueOnce(new GmailClientError('GMAIL_TIMEOUT', { operationMayHaveSucceeded: true }));
+    await ctx.run(); ctx.state.connection!.version++;
+    ctx.gmail.findDraftByOperation.mockResolvedValueOnce({ draft: savedDraft, complete: true, checked: 1 });
+    expect(await ctx.run()).toMatchObject({ outcome: 'replayed' });
+    expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
+    expect(ctx.gmail.findDraftByOperation).toHaveBeenCalledOnce();
+    expect(ctx.operations.get(operationId)?.connectionVersion).toBe(1);
+  });
+
+  it.each(['revoking', 'needs_reauth'] as const)('returns actionable %s for a new proposal without claiming or calling Google', async status => {
+    const ctx = fixture(); ctx.state.connection!.status = status;
+    expect(await ctx.run()).toMatchObject({ outcome: 'not_dispatched', code: status === 'revoking' ? 'GMAIL_REVOCATION_PENDING' : 'GMAIL_RECONNECT_REQUIRED' });
+    expect(ctx.claim).not.toHaveBeenCalled(); expect(ctx.refresh).not.toHaveBeenCalled();
+    expect(ctx.gmail.createDraft).not.toHaveBeenCalled();
+  });
+
+  it('withholds a historical receipt if mailbox identity changes while the operation is loaded', async () => {
+    const ctx = fixture(); await ctx.run();
+    const lookup = ctx.operation.getMockImplementation()!;
+    ctx.operation.mockImplementationOnce(async (...args) => {
+      const prior = await lookup(...args);
+      ctx.state.connection!.version++;
+      ctx.state.connection!.googleSub = 'different-google-sub';
+      return prior;
+    });
+    const result = await ctx.run();
+    expect(result).toMatchObject({ outcome: 'outcome_unknown' });
+    expect(result).not.toHaveProperty('data');
+    expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
+  });
+
+  it('withholds a provider result across reconnect, then recovers the same operation using the new token generation', async () => {
+    const ctx = fixture();
+    ctx.gmail.createDraft.mockImplementationOnce(async () => {
+      ctx.state.connection!.version++;
+      // A reconnect atomically invalidates in-flight storage claims.
+      ctx.operations.get(operationId)!.state = 'unknown';
+      return savedDraft;
+    });
+    const first = await ctx.run();
+    expect(first).toMatchObject({ outcome: 'outcome_unknown' });
+    expect(first).not.toHaveProperty('data');
+    expect(ctx.operations.get(operationId)!.state).toBe('unknown');
+    ctx.gmail.findDraftByOperation.mockResolvedValueOnce({ draft: savedDraft, complete: true, checked: 1 });
+    expect(await ctx.run()).toMatchObject({ outcome: 'replayed' });
+    expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
+    expect(ctx.gmail.findDraftByOperation).toHaveBeenCalledOnce();
+  });
+
+  it('rolls a claim back if credentials are revoked while acquiring the mailbox lock', async () => {
+    const ctx = fixture();
+    const claim = ctx.claim.getMockImplementation()!;
+    ctx.claim.mockImplementationOnce(async (...args) => {
+      const result = await claim(...args); ctx.state.revoked = true; return result;
+    });
+    const result = await ctx.run();
+    expect(result).not.toHaveProperty('data');
+    expect(ctx.operations.size).toBe(0);
+    expect(ctx.gmail.createDraft).not.toHaveBeenCalled();
+  });
+
+  it('rolls receipt persistence back if credentials are revoked while finishing the operation', async () => {
+    const ctx = fixture();
+    const finish = ctx.finish.getMockImplementation()!;
+    ctx.finish.mockImplementationOnce(async (...args) => {
+      const result = await finish(...args); ctx.state.revoked = true; return result;
+    });
+    expect(await ctx.run()).toMatchObject({ outcome: 'outcome_unknown' });
+    expect(ctx.operations.get(operationId)?.state).toBe('dispatching');
+    expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
+  });
+
+  it.each(['before_refresh', 'during_refresh', 'after_provider'] as const)
     ('freezes connection identity/version across %s', async moment => {
       const ctx = fixture();
       if (moment === 'before_refresh') ctx.state.connection!.version = 2;
       if (moment === 'during_refresh') ctx.refresh.mockImplementationOnce(async () => { ctx.state.connection!.version = 2; return 'access'; });
-      if (moment === 'after_claim') ctx.connection.mockImplementation(async () => {
-        if (ctx.claim.mock.calls.length) ctx.state.connection!.version = 2;
-        return { ...ctx.state.connection! };
-      });
       if (moment === 'after_provider') ctx.gmail.createDraft.mockImplementationOnce(async () => { ctx.state.connection!.version = 2; return savedDraft; });
       expect(await ctx.run()).toMatchObject({ outcome: ['before_refresh', 'during_refresh'].includes(moment) ? 'not_dispatched' : 'outcome_unknown' });
       expect(ctx.gmail.createDraft).toHaveBeenCalledTimes(moment === 'after_provider' ? 1 : 0);
-      expect(ctx.finish).not.toHaveBeenCalled();
+      expect(ctx.operations.get(operationId)?.state).not.toBe('created');
     });
 
   it('withholds a receipt if access is revoked or reassigned during provider work', async () => {
@@ -258,12 +399,12 @@ describe('employee-bound Gmail draft tools', () => {
     expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
   });
 
-  it.each(['unknown', 'other_owner', 'connection_changed', 'revoked_during_read'] as const)
+  it.each(['unknown', 'other_owner', 'different_account', 'revoked_during_read'] as const)
     ('withholds draft content for %s', async mode => {
       const ctx = fixture(); await ctx.run();
       if (mode === 'unknown') ctx.operations.get(operationId)!.state = 'unknown';
       if (mode === 'other_owner') ctx.operations.get(operationId)!.employeeId = 8;
-      if (mode === 'connection_changed') ctx.state.connection!.version = 2;
+      if (mode === 'different_account') ctx.state.connection!.googleSub = 'different-google-sub';
       if (mode === 'revoked_during_read') ctx.gmail.getDraft.mockImplementationOnce(async () => { ctx.state.revoked = true; return savedDraft; });
       await expect(ctx.read()).rejects.toMatchObject({ status: mode === 'revoked_during_read' ? 401 : 404 });
       expect(ctx.gmail.getDraft).toHaveBeenCalledTimes(mode === 'revoked_during_read' ? 1 : 0);

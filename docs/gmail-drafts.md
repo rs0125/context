@@ -15,10 +15,10 @@ configuration.
 
 | Tool | Behavior |
 | --- | --- |
-| `get_email_connection` | Returns the authenticated employee's connection status, mailbox, connection ID/version and `/mail` connection-page URL. |
+| `get_email_connection` | Returns the authenticated employee's connection status (`active`, `disconnected`, `needs_reauth` or `revoking`), mailbox, usable connection ID/version and `/mail` connection-page URL. |
 | `create_email_draft` | Saves one confirmed plain-text draft in that mailbox. Requires a durable operation UUID and the connection ID/version from the status tool. |
-| `list_email_drafts` | Recovers creation references and timestamps for follow-up reads on the current connection. Does not disclose historical mail content or confirm a draft's current Gmail status. |
-| `read_email_draft` | Reads the current content of a draft created by this service, using its opaque `draft_ref`. Requires the same active connection and current authorization. |
+| `list_email_drafts` | Recovers creation references and timestamps for follow-up reads in the same verified Google mailbox, including after reauthorization. Does not disclose historical mail content or confirm a draft's current Gmail status. |
+| `read_email_draft` | Reads the current content of a draft created by this service, using its opaque `draft_ref`. Requires an active connection to the original verified Google account and current authorization. |
 
 Each employee visits `/mail`, signs in with their active Wareongo work account,
 and connects that same account to Google. OAuth uses state, nonce and PKCE and is
@@ -27,6 +27,18 @@ A stale callback cannot undo a later reconnect or disconnect. There is no
 domain-wide delegation or caller-selectable mailbox. Refresh tokens remain on
 the Context Engine server, encrypted with a separate key; the bot sees no Google
 credentials.
+
+Console sign-in and Gmail connection share one fixed-endpoint OAuth transport
+for token exchange, refresh and revocation. Their identity checks and grants
+remain separate. The transport bounds response size and time, sanitizes errors
+and never retries automatically.
+
+An expired or revoked refresh token moves that exact connection generation to
+`needs_reauth`; an older failed refresh cannot invalidate a newer reconnect.
+The browser and bot then ask the employee to reconnect instead of reporting a
+healthy connection. If Google sign-in is blocked by WhatsApp's embedded browser,
+open `/mail` in Chrome or Safari. Actual mobile OAuth consent still requires
+device validation; the automated browser checks do not contact Google.
 
 Recipients can be left empty for a draft. Otherwise supply real email addresses,
 up to ten To and ten CC recipients. The subject is one line, 1–200 characters.
@@ -54,18 +66,45 @@ send tool, forwarding rule or scheduled-send worker is exposed.
 This is an application boundary, not a claim that a stolen Google token is
 incapable of sending. Keep the OAuth client secret and encryption key in the
 server secret store. Do not expose them through `NEXT_PUBLIC_*`, model arguments,
-logs or the WhatsApp bot's environment. Disconnect removes the stored refresh
-token and invalidates the connection version; it cannot cancel an HTTP request
-that Google has already accepted. Employees can also revoke the app in their
-Google account's connected-app settings.
+logs or the WhatsApp bot's environment.
+
+Disconnect first commits a disabled connection and advances its version, even
+if the account was never connected or was already disconnected. This prevents
+an older OAuth callback from restoring access. When a refresh token exists,
+the connection enters `revoking`, and the server asks Google to revoke it before
+erasing it. A failed or timed-out revocation leaves local draft access disabled,
+keeps the token encrypted solely to retry revocation, and shows **Retry
+disconnect**. Reconnection is blocked until revocation completes. This rare
+two-second provider request holds the owner lock to prevent revoking a token
+installed by a simultaneous reconnect. Disconnect cannot cancel a Gmail request
+that Google already accepted.
+
+Google revocation affects the user's grants for the entire Google Cloud
+project, including its other OAuth clients. A separate OAuth client inside a
+shared project does not isolate that effect. Use a dedicated company-owned
+project for this Gmail integration when other company integrations must retain
+their grants. The UI explains that disconnecting may require reconnecting other
+features sharing the Google app. Employees can also manage permissions at
+`https://myaccount.google.com/connections`. If the encryption key is lost, an
+administrator must recover it or coordinate manual Google revocation and
+connection repair; repeated disconnect cannot decrypt an unrecoverable token.
 
 ## Duplicate prevention and current state
 
 Gmail draft creation does not accept our operation UUID as an idempotency key.
-Context Engine commits an employee-scoped claim before the one permitted create
-request. The claim freezes the connection ID/version and a hash of the content.
-The same UUID with different content is rejected. Concurrent callers, process
-restarts and retries never issue another create for an existing claim.
+Context Engine commits an employee-scoped claim before a create request. The
+claim freezes the connection ID/version, verified Google subject and a hash of
+the content. The same UUID with different content is rejected. Concurrent
+callers, process restarts and retries cannot dispatch an uncertain operation
+again.
+
+There is one narrow retry exception: a definitive HTTP 429 or documented 403
+`rateLimitExceeded`/`userRateLimitExceeded` rejection. The server persists a
+retry deadline, respecting a bounded `Retry-After` value or a minimum delay.
+After that deadline, the same confirmed operation and unchanged arguments can
+claim one new attempt on the unchanged active connection. It does not sleep
+inside a tool request or automatically create a replacement operation. A
+timeout, network failure or ambiguous server response never enters this path.
 
 If the response is lost, recovery searches for a deterministic Message-ID and
 checks an exact operation header in matching drafts. A verified match can recover
@@ -79,13 +118,17 @@ Creation receipts are historical. A replay does not establish that the draft
 still exists or remains unsent. `read_email_draft` fetches current Gmail content
 and rechecks employee, credential and connection after the provider call. A
 missing draft does not prove it was sent. Reconnection invalidates pending
-proposals and access through older connection references; existing Gmail drafts
-remain in the mailbox and can still be reviewed there.
+proposals that would dispatch a new create, but historical list/read references
+remain usable after reauthorization to the same Google subject. Matching only
+the email address is insufficient: a different Google account reusing that
+address cannot inherit draft references. Existing Gmail drafts remain in the
+mailbox regardless of the app's connection state.
 
 ## Setup and rollout
 
-1. Create a dedicated Google OAuth **Web application** client in the company
-   Workspace project, enable the Gmail API, and configure the appropriate
+1. Create a dedicated Google OAuth **Web application** client in a company-owned
+   project. Prefer a separate project to isolate project-wide revocation from
+   other integrations. Enable the Gmail API and configure the appropriate
    internal-user consent audience and Workspace admin access controls. Register
    exactly `<CONTEXT_CONSOLE_ORIGIN>/api/mail/google/callback`. Existing console
    sign-in continues to use `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` and its own
@@ -94,10 +137,15 @@ remain in the mailbox and can still be reviewed there.
    `CONTEXT_GMAIL_ENCRYPTION_KEY`. The encryption key is an independent,
    cryptographically random 32-byte value encoded as unpadded base64url; retain it
    securely across deployments. Losing or replacing it makes existing encrypted
-   connections unreadable and requires reconnecting. Keep
+   connections unreadable and requires coordinated recovery, not simply a new
+   key and reconnect. Keep
    `CONTEXT_GMAIL_ENABLED=false` while preparing storage.
 3. Review `npm run gmail:migrate` (preview only). Apply with
    `npm run gmail:migrate -- --apply` using the existing migration-owner setup.
+   This is also required to upgrade the original Gmail schema to v2 **before
+   deploying this version of the code**. The upgrade validates the prior schema,
+   adds connection lifecycle and retry/account-binding support, and removes
+   the unused encrypted draft-content column.
    Re-run `npm run console:migrate -- --apply` and
    `npm run mcp:migrate -- --apply` to expand credential scope constraints.
    On an existing deployment, require the Gmail migration result to report
@@ -121,13 +169,18 @@ remain in the mailbox and can still be reviewed there.
 
 The private `context_gmail_private` tables use forced RLS and the existing narrow
 runtime role. Public/API roles have no access; runtime receives only
-SELECT/INSERT/UPDATE on these two tables. Refresh tokens and stored operation
-content use AES-256-GCM with employee, record ID and purpose binding. Operation
-claims must remain durable to preserve duplicate prevention; do not casually
-delete or restore them independently of mailbox operations.
+SELECT/INSERT/UPDATE on these two tables. Refresh tokens use AES-256-GCM with
+employee, record ID and purpose binding. The Context Engine operation journal
+stores metadata, a content hash and provider references; it no longer keeps a
+second copy of recipients, subject or body. The WhatsApp confirmation journal is
+separate. Operation claims must remain durable to preserve duplicate prevention;
+do not casually delete or restore them independently of mailbox operations.
 
-The private Gmail schema and console/MCP scope constraints were applied and
+The **original v1** private Gmail schema and console/MCP scope constraints were applied and
 verified in production on 4 October 2026, including restricted runtime grants.
+The v2 migration was applied and verified in production on 4 October 2026,
+including restricted runtime grants. The preflight confirmed zero connections
+and zero draft operations; the migration seeded neither.
 No connections, keys or credentials were seeded. Gmail remains disabled:
 configuring Google, setting the dedicated server secrets, granting the scope
 and connecting an employee are required before the tools can work. No live
@@ -135,13 +188,28 @@ Google draft or send was used for release validation.
 
 ## Validation and references
 
-Tests use synthetic employees, mocked Google HTTP, and isolated storage fixtures.
+Tests use synthetic employees, mocked Google HTTP, isolated storage fixtures,
+and an isolated PostgreSQL database for schema and concurrency validation.
 They cover fixed draft endpoints, header injection, encryption binding, OAuth
 session/state checks, scope/platform discovery, confirmation, ownership,
-revocation, reconnect races, duplicate recovery and sanitized receipts. Live
+revocation, in-flight callbacks racing disconnect, reauthorization history,
+quota retry deadlines, duplicate recovery and sanitized receipts. Live
 Google/WhatsApp/model calls are not needed for these checks.
+
+`tests/gmail-storage-live.test.ts` verifies fresh setup, the signed v1-to-v2
+upgrade, reruns, runtime permissions and concurrent operation claims against
+PostgreSQL. Set `CONTEXT_GMAIL_TEST_DATABASE_URL` to a disposable local database
+named `context_gmail_test` and run
+`npx vitest run tests/gmail-storage-live.test.ts`. The suite creates its synthetic
+roster/runtime role and an additional `context_gmail_upgrade_test` database;
+never use a shared or production database. The upgrade preserves credentials and
+operation receipts, removes the unused encrypted-content column, and backfills
+Google account identity only when the original connection version still matches.
+Older v1 records without provable identity remain inaccessible through the bot.
 
 - [Google Gmail scopes](https://developers.google.com/workspace/gmail/api/auth/scopes)
 - [Google draft lifecycle](https://developers.google.com/workspace/gmail/api/guides/drafts)
 - [Google server-side OAuth](https://developers.google.com/identity/protocols/oauth2/web-server)
+- [Google OAuth token handling policy](https://developers.google.com/identity/protocols/oauth2/policies)
+- [Google Gmail error handling](https://developers.google.com/workspace/gmail/api/guides/handle-errors)
 - [Ramesh draft wiring](../../baileys-ramesh/docs/mail-drafts.md)

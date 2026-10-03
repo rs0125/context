@@ -7,7 +7,7 @@ import { handleApiRequest } from '../src/lib/api';
 import { HttpError } from '../src/lib/errors';
 import { getEmailConnection, readEmailDraft, listEmailDrafts, type GmailToolDependencies } from '../src/lib/gmail-tools';
 import { encryptGmailSecret, type GmailConnection, type GmailDraftOperation } from '../src/lib/gmail-storage';
-import { GMAIL_COMPOSE_SCOPE, type GmailDraft } from '../src/lib/gmail-client';
+import { GmailClientError, GMAIL_COMPOSE_SCOPE, type GmailDraft } from '../src/lib/gmail-client';
 
 vi.mock('../src/lib/gmail-oauth', () => ({
   gmailAvailability: (env = process.env) => ({ available: env.CONTEXT_GMAIL_ENABLED === 'true' }),
@@ -29,7 +29,7 @@ function harness() {
     encryptedRefreshToken: null, grantedScopes: [GMAIL_COMPOSE_SCOPE], version: 3, status: 'active', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   connection.encryptedRefreshToken = encryptGmailSecret('synthetic-refresh-token', { purpose: 'refresh_token', employeeId: owner.employeeId, id: connection.id }, env);
   const operation: GmailDraftOperation = { ...owner, operationId: randomUUID(), connectionId: connection.id, connectionVersion: 3,
-    requestHash: 'a'.repeat(64), encryptedContent: null, state: 'created', draftId: 'synthetic-draft-id', messageId: 'synthetic-message-id', reason: null,
+    requestHash: 'a'.repeat(64), googleSub: connection.googleSub, retryAt: null, state: 'created', draftId: 'synthetic-draft-id', messageId: 'synthetic-message-id', reason: null,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   const key: KeyRegistration = { employeeId: owner.employeeId, employeeEmail: owner.employeeEmail, id: randomUUID(), hash: 'a'.repeat(64), scopes: ['mail:drafts'], expiresAt: '2099-01-01T00:00:00Z' };
   const client = { query: vi.fn(async () => ({ rows: [{ ...state.employee }] })) } as unknown as PoolClient;
@@ -65,7 +65,7 @@ describe('employee-owned Gmail draft REST reads', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toContain('no-store');
     const result = await response.json();
-    expect(result.data).toEqual({ provider: 'gmail', connected: true, mailbox: h.key.employeeEmail, connection_id: h.connection.id,
+    expect(result.data).toEqual({ provider: 'gmail', connected: true, connection_status: 'active', mailbox: h.key.employeeEmail, connection_id: h.connection.id,
       connection_version: 3, connect_url: `${origin}/mail`, capability: 'drafts_only' });
     expect(result.meta).toMatchObject({ requestId: expect.any(String), generatedAt: expect.any(String) });
     expect(JSON.stringify(result)).not.toMatch(/synthetic-refresh-token|encryptedRefreshToken|googleSub|grantedScopes/);
@@ -85,8 +85,45 @@ describe('employee-owned Gmail draft REST reads', () => {
     expect(result.data).not.toHaveProperty('source_fetched_at');
     expect(result.meta.generatedAt).toEqual(expect.any(String));
     expect(h.getDraft).toHaveBeenCalledWith('synthetic-access-token', 'synthetic-draft-id', expect.any(AbortSignal));
-    expect(h.deps.revalidateKey.mock.calls.length).toBeGreaterThanOrEqual(4);
+    expect(h.deps.revalidateKey).toHaveBeenCalledTimes(3);
     expect(h.state.sockets).toBe(0);
+  });
+
+  it.each([[12000, '12'], [1501, '2'], [86_400_000, '86400']])('preserves bounded provider quota delay %i in REST read errors', async (retryAfterMs, expected) => {
+    const h = harness();
+    h.getDraft.mockRejectedValueOnce(new GmailClientError('GMAIL_RATE_LIMITED', { status: 403, retryAfterMs: Number(retryAfterMs) }));
+    const response = await h.request(`mail/drafts/${h.operation.operationId}`);
+    expect(response.status).toBe(429);
+    expect(response.headers.get('Retry-After')).toBe(expected);
+    expect((await response.json()).error.code).toBe('GMAIL_RATE_LIMITED');
+  });
+
+  it('preserves the generic REST retry delay when a source has no specific delay', async () => {
+    const h = harness();
+    h.getDraft.mockRejectedValueOnce(new GmailClientError('GMAIL_UNAVAILABLE'));
+    const response = await h.request(`mail/drafts/${h.operation.operationId}`);
+    expect(response.status).toBe(503);
+    expect(response.headers.get('Retry-After')).toBe('10');
+  });
+
+  it.each([0, -1, 86401, NaN, Infinity, 1.5])('ignores an invalid generic error retry delay %s', async delay => {
+    const h = harness();
+    h.deps.revalidateKey.mockRejectedValueOnce(new HttpError(429, 'RATE_LIMITED', 'Rate limited.', { retryAfterSeconds: delay }));
+    const response = await h.request('mail/connection');
+    expect(response.status).toBe(429);
+    expect(response.headers.get('Retry-After')).toBe('60');
+  });
+
+  it.each([
+    ['revoking', 'GMAIL_REVOCATION_PENDING', 409],
+    ['needs_reauth', 'GMAIL_RECONNECT_REQUIRED', 401],
+  ] as const)('reports actionable %s state without provider access', async (status, code, httpStatus) => {
+    const h = harness(); h.connection.status = status;
+    const response = await h.request(`mail/drafts/${h.operation.operationId}`);
+    expect(response.status).toBe(httpStatus);
+    expect((await response.json()).error.code).toBe(code);
+    expect(h.getDraft).not.toHaveBeenCalled();
+    expect(h.refresh).not.toHaveBeenCalled();
   });
 
   it.each(['mail/connection', 'mail/drafts', 'draft'] as const)('rejects disabled, unscoped or inactive %s access before storage or Gmail', async route => {
@@ -117,7 +154,7 @@ describe('employee-owned Gmail draft REST reads', () => {
     expect(JSON.stringify(result)).not.toMatch(/Synthetic private draft body|Warehouse options|synthetic-draft-id|synthetic-message-id|synthetic-refresh-token|encryptedContent|encryptedRefreshToken|googleSub|grantedScopes/);
     expect(h.getDraft).not.toHaveBeenCalled();
     expect(h.refresh).not.toHaveBeenCalled();
-    expect(h.deps.revalidateKey.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(h.deps.revalidateKey).toHaveBeenCalledTimes(2);
     const read = await h.request(`mail/drafts/${result.data.items[0].draft_ref}`);
     expect(read.status).toBe(200);
     expect((await read.json()).data.body).toBe(body);
@@ -189,14 +226,23 @@ describe('employee-owned Gmail draft REST reads', () => {
     expect(h.getDraft).toHaveBeenCalledOnce();
   });
 
-  it.each(['not-created', 'other-connection', 'old-version'] as const)('refuses %s references before Gmail reads', async kind => {
+  it.each(['not-created', 'other-connection', 'different-account', 'unverified-account'] as const)('refuses %s references before Gmail reads', async kind => {
     const h = harness();
     if (kind === 'not-created') h.operation.state = 'unknown';
     if (kind === 'other-connection') h.operation.connectionId = randomUUID();
-    if (kind === 'old-version') h.operation.connectionVersion--;
+    if (kind === 'different-account') h.operation.googleSub = 'different-google-user';
+    if (kind === 'unverified-account') h.operation.googleSub = null;
     const response = await h.request(`mail/drafts/${h.operation.operationId}`);
     expect(response.status).toBe(404);
     expect(h.getDraft).not.toHaveBeenCalled();
+  });
+
+  it('reads historical drafts after reauthorizing the same verified Google account', async () => {
+    const h = harness(); h.connection.version++;
+    const response = await h.request(`mail/drafts/${h.operation.operationId}`);
+    expect(response.status).toBe(200);
+    expect((await response.json()).data.body).toBe(body);
+    expect(h.getDraft).toHaveBeenCalledOnce();
   });
 
   it('rejects hidden query arguments, unknown routes, invalid references and REST mutations', async () => {

@@ -7,10 +7,10 @@ import {
 } from './console-auth';
 import { withReadOnlyTransaction } from './db';
 import { HttpError } from './errors';
+import { googleOAuthPost, GoogleOAuthTransportError } from './google-oauth-transport';
 import { anonymousRequestLimit } from './rate-limit';
 
 const AUTHORIZATION_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
-const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
 export const GOOGLE_CALLBACK_PATH = '/api/auth/google/callback';
 export const GOOGLE_FLOW_SECONDS = 10 * 60;
@@ -192,31 +192,14 @@ function callbackCode(params: URLSearchParams) {
 
 async function exchangeCode(code: string, verifier: string, config: ReturnType<typeof googleConfiguration>, requestFetch: typeof fetch) {
   try {
-    const response = await requestFetch(TOKEN_URL, { method: 'POST', redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(5_000),
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-      body: new URLSearchParams({ client_id: config.clientId, client_secret: config.clientSecret,
-        redirect_uri: config.redirectUri, grant_type: 'authorization_code', code, code_verifier: verifier }) });
-    if (!response.ok) {
-      if (response.status === 400 || response.status === 401) {
-        // Read only the bounded, enumerated OAuth error code. Descriptions and
-        // other provider content are neither returned nor logged. A bad client
-        // credential is an operator issue, not an expired employee sign-in.
-        let body: unknown;
-        try { body = JSON.parse(await boundedBody(response, 8 * 1024)); }
-        catch { throw unavailable(); }
-        if (body && typeof body === 'object' && !Array.isArray(body) && 'error' in body
-          && body.error === 'invalid_grant') throw invalid();
-        // Includes invalid_client, unauthorized_client, and unknown failures.
-        throw unavailable();
-      }
-      await response.body?.cancel();
-      throw unavailable();
-    }
-    const body: unknown = JSON.parse(await boundedBody(response, 32 * 1024));
-    if (!body || typeof body !== 'object' || Array.isArray(body) || !('id_token' in body)
-      || typeof body.id_token !== 'string' || body.id_token.length > 16_384) throw unavailable();
+    const body = await googleOAuthPost('token', new URLSearchParams({
+      client_id: config.clientId, client_secret: config.clientSecret, redirect_uri: config.redirectUri,
+      grant_type: 'authorization_code', code, code_verifier: verifier,
+    }), { fetch: requestFetch });
+    if (typeof body.id_token !== 'string' || body.id_token.length > 16_384) throw unavailable();
     return body.id_token;
   } catch (error) {
+    if (error instanceof GoogleOAuthTransportError && error.code === 'invalid_grant') throw invalid();
     if (error instanceof HttpError) throw error;
     throw unavailable();
   }

@@ -4,9 +4,10 @@ import {
   getConsoleIdentity, readConsoleSession, readSignedConsoleValue, requireConsoleOrigin, signedConsoleValue,
 } from './console-auth';
 import { verifyGoogleIdToken } from './console-google';
+import { googleOAuthPost, GoogleOAuthTransportError } from './google-oauth-transport';
 import { withGmailWriteTransaction, withReadOnlyTransaction, withSessionWriteTransaction } from './db';
 import { GMAIL_COMPOSE_SCOPE } from './gmail-client';
-import { disconnectGmailConnection, getGmailConnection, saveGmailConnection, type GmailConnection } from './gmail-storage';
+import { completeGmailDisconnect, decryptGmailSecret, disconnectGmailConnection, getGmailConnection, saveGmailConnection, type GmailConnection } from './gmail-storage';
 import { HttpError } from './errors';
 import { anonymousRequestLimit } from './rate-limit';
 
@@ -14,7 +15,6 @@ export const GMAIL_CALLBACK_PATH = '/api/mail/google/callback';
 const FLOW_SECONDS = 600;
 const RANDOM = /^[A-Za-z0-9_-]{43}$/;
 const TOKEN = /^[\x21-\x7e]{1,8192}$/;
-const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const ALLOWED_SCOPES = new Set(['openid', 'email', 'https://www.googleapis.com/auth/userinfo.email', GMAIL_COMPOSE_SCOPE]);
 type Flow = {
   kind: 'gmail-connect'; state: string; nonce: string; verifier: string; clientId: string;
@@ -75,7 +75,7 @@ function failure(error: unknown, clear = false) {
     const code = error instanceof HttpError && error.code === 'GMAIL_OAUTH_CANCELLED' ? 'cancelled'
       : error instanceof HttpError && error.code === 'GMAIL_SCOPE_REQUIRED' ? 'scope'
         : error instanceof HttpError && error.code === 'GMAIL_SCOPE_UNSUPPORTED' ? 'scope_excess'
-        : error instanceof HttpError && error.code === 'GMAIL_DISCONNECT_PENDING' ? 'disconnect_pending'
+        : error instanceof HttpError && ['GMAIL_DISCONNECT_PENDING', 'GMAIL_REVOCATION_PENDING'].includes(error.code) ? 'disconnect_pending'
         : error instanceof HttpError && error.code === 'GMAIL_CONNECTION_CHANGED' ? 'changed'
           : error instanceof HttpError && error.status === 403 ? 'denied'
             : error instanceof HttpError && [400, 401].includes(error.status) ? 'expired' : 'unavailable';
@@ -86,64 +86,31 @@ function failure(error: unknown, clear = false) {
 }
 function owner(identity: { employeeId: number; email: string }) { return { employeeId: identity.employeeId, employeeEmail: identity.email }; }
 function summary(connection: GmailConnection | null) {
-  return connection ? { connected: connection.status === 'active', accountEmail: connection.accountEmail, updatedAt: connection.updatedAt }
-    : { connected: false, accountEmail: null, updatedAt: null };
+  return connection ? { connected: connection.status === 'active', status: connection.status, accountEmail: connection.accountEmail, updatedAt: connection.updatedAt }
+    : { connected: false, status: 'disconnected' as const, accountEmail: null, updatedAt: null };
 }
 function sameConnection(connection: GmailConnection | null, flow: Flow) {
   if ((connection?.id ?? null) !== flow.connectionId || (connection?.version ?? null) !== flow.connectionVersion) throw changed();
 }
 
-/** Fixed Google OAuth endpoints; never return provider descriptions.
- * The deadline also covers a body stream that ignores fetch cancellation. */
-async function googlePost(parameters: URLSearchParams, requestFetch: typeof fetch, signal?: AbortSignal): Promise<Record<string, unknown>> {
-  if (signal?.aborted) throw new HttpError(499, 'GMAIL_ABORTED', 'Gmail connection was cancelled.');
-  const controller = new AbortController();
-  const cancel = () => controller.abort();
-  signal?.addEventListener('abort', cancel, { once: true });
-  const timer = setTimeout(cancel, 5_000);
-  let rejectAbort: (() => void) | undefined;
-  const aborted = new Promise<never>((_resolve, reject) => {
-    rejectAbort = () => reject(unavailable());
-    controller.signal.addEventListener('abort', rejectAbort, { once: true });
-  });
-  let response: Response | undefined, reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-  try {
-    response = await Promise.race([requestFetch(TOKEN_URL, {
-      method: 'POST', redirect: 'error', cache: 'no-store', signal: controller.signal,
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }, body: parameters,
-    }), aborted]);
-    if (response.redirected || (response.ok && response.status !== 200)
-      || !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') ?? '')) throw unavailable();
-    const declared = response.headers.get('content-length');
-    if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > 32_768)) throw unavailable();
-    if (!response.body) throw unavailable();
-    reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    for (;;) {
-      const { done, value } = await Promise.race([reader.read(), aborted]);
-      if (done) break;
-      size += value.byteLength;
-      if (size > 32_768) throw unavailable();
-      chunks.push(value);
-    }
-    const data: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
-    if (!data || typeof data !== 'object' || Array.isArray(data)) throw unavailable();
-    if (!response.ok) {
-      if ('error' in data && data.error === 'invalid_grant') throw new HttpError(401, 'GMAIL_RECONNECT_REQUIRED', 'Reconnect your Gmail account to continue.');
-      throw unavailable();
-    }
-    return data as Record<string, unknown>;
-  } catch (error) {
-    if (error instanceof HttpError) throw error;
+async function googlePost(parameters: URLSearchParams, requestFetch: typeof fetch, signal?: AbortSignal, operation: 'token' | 'revoke' = 'token') {
+  try { return await googleOAuthPost(operation, parameters, { fetch: requestFetch, signal }); }
+  catch (error) {
+    if (error instanceof GoogleOAuthTransportError && error.code === 'invalid_grant')
+      throw new HttpError(401, 'GMAIL_RECONNECT_REQUIRED', 'Reconnect your Gmail account to continue.');
+    if (error instanceof GoogleOAuthTransportError && error.code === 'aborted')
+      throw new HttpError(499, 'GMAIL_ABORTED', 'Gmail connection was cancelled.');
     throw unavailable();
-  } finally {
-    clearTimeout(timer); signal?.removeEventListener('abort', cancel);
-    if (rejectAbort) controller.signal.removeEventListener('abort', rejectAbort);
-    if (reader) void reader.cancel().catch(() => {});
-    else if (response?.body) void response.body.cancel().catch(() => {});
-    controller.abort();
   }
+}
+async function revokeGmailRefreshToken(connection: GmailConnection, requestFetch: typeof fetch, signal?: AbortSignal) {
+  if (!connection.encryptedRefreshToken) throw unavailable();
+  const token = decryptGmailSecret(connection.encryptedRefreshToken, {
+    purpose: 'refresh_token', employeeId: connection.employeeId, id: connection.id,
+  });
+  if (!TOKEN.test(token)) throw unavailable();
+  // Revocation deliberately works even if drafting or OAuth client config is disabled.
+  await googlePost(new URLSearchParams({ token }), requestFetch, signal, 'revoke');
 }
 function grantedScopes(value: unknown): string[] {
   if (typeof value !== 'string' || value.length > 4096) throw scopeRequired();
@@ -175,6 +142,7 @@ export async function handleGmailConnect(request: Request, dependencies: Partial
       const identity = await getConsoleIdentity(request, client);
       return { identity, connection: await getGmailConnection(client, owner(identity)) };
     });
+    if (connection?.status === 'revoking') throw new HttpError(409, 'GMAIL_DISCONNECT_PENDING', 'Finish disconnecting Gmail before reconnecting.');
     const iat = Math.floor(deps.now() / 1000);
     const flow: Flow = {
       kind: 'gmail-connect', state: randomBytes(32).toString('base64url'), nonce: randomBytes(32).toString('base64url'),
@@ -284,14 +252,26 @@ export async function handleGmailDisconnect(request: Request, dependencies: Part
     requireConsoleOrigin(request);
     readConsoleSession(request);
     deps.limit(request, 'gmail:disconnect', 20);
-    await deps.disconnectTransaction(async client => {
+    const connection = await deps.disconnectTransaction(async client => {
       const identity = await getConsoleIdentity(request, client), employee = owner(identity);
-      await disconnectGmailConnection(client, employee);
+      return disconnectGmailConnection(client, employee);
     });
-    // Do not revoke at Google after releasing the lock: grant-wide revocation
-    // could disable a concurrent reconnect's new token. This removes our local
-    // credential; the employee can separately remove the Google account grant.
-    const response = consoleJson({ disconnected: true, googleGrantRevoked: false });
+    let googleGrantRevoked = false, revocationPending = false;
+    if (connection?.status === 'revoking') {
+      try {
+        await deps.disconnectTransaction(async client => {
+          const identity = await getConsoleIdentity(request, client);
+          // A deliberately bounded exception to ordinary no-I/O transactions:
+          // the owner lock serializes Google's project-wide revocation with
+          // reconnect. Local access was durably disabled in the earlier commit.
+          await completeGmailDisconnect(client, owner(identity), async current => {
+            await revokeGmailRefreshToken(current, deps.fetch, request.signal);
+            googleGrantRevoked = true;
+          });
+        });
+      } catch { googleGrantRevoked = false; revocationPending = true; }
+    }
+    const response = consoleJson({ disconnected: true, googleGrantRevoked, revocationPending }, revocationPending ? 202 : 200);
     response.headers.append('Set-Cookie', flowCookie('', 0));
     return response;
   } catch (error) { return consoleErrorResponse(error); }

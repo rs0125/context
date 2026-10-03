@@ -341,7 +341,7 @@ export async function handleApiRequest(request: Request, path: string[], depende
     status = safeError.status;
     errorCode = safeError.code;
     if (status === 401) headers.set('WWW-Authenticate', 'Bearer realm="wareongo-context"');
-    if (status === 429 || status === 503) headers.set('Retry-After', status === 429 ? '60' : '10');
+    if (status === 429 || status === 503) headers.set('Retry-After', String(safeError.retryAfterSeconds ?? (status === 429 ? 60 : 10)));
     return Response.json({ error: { code: safeError.code, message: safeError.message }, meta }, { status, headers });
   } finally {
     // Do not log tokens, query values, record payloads, or raw database errors.

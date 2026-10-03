@@ -4,13 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { consoleCookie, createConsoleSession, readSignedConsoleValue, signedConsoleValue, type ConsoleIdentity } from '../src/lib/console-auth';
 import { GMAIL_COMPOSE_SCOPE } from '../src/lib/gmail-client';
 import { GMAIL_CALLBACK_PATH, gmailAvailability, handleGmailCallback, handleGmailConnect, handleGmailConnection, handleGmailDisconnect, refreshGmailAccessToken } from '../src/lib/gmail-oauth';
-import { getGmailConnection, saveGmailConnection, disconnectGmailConnection, type GmailConnection } from '../src/lib/gmail-storage';
+import { completeGmailDisconnect, encryptGmailSecret, getGmailConnection, saveGmailConnection, disconnectGmailConnection, type GmailConnection } from '../src/lib/gmail-storage';
 import { HttpError } from '../src/lib/errors';
 import type { withReadOnlyTransaction } from '../src/lib/db';
 
 vi.mock('../src/lib/gmail-storage', async importOriginal => {
   const original = await importOriginal<typeof import('../src/lib/gmail-storage')>();
-  return { ...original, getGmailConnection: vi.fn(), saveGmailConnection: vi.fn(), disconnectGmailConnection: vi.fn() };
+  return { ...original, getGmailConnection: vi.fn(), saveGmailConnection: vi.fn(), disconnectGmailConnection: vi.fn(), completeGmailDisconnect: vi.fn() };
 });
 const origin = 'https://context.example.test';
 const clientId = 'draft-client.apps.googleusercontent.com';
@@ -34,9 +34,14 @@ beforeEach(() => {
   vi.stubEnv('CONTEXT_GMAIL_CLIENT_SECRET', clientSecret);
   vi.stubEnv('CONTEXT_GMAIL_ENCRYPTION_KEY', Buffer.alloc(32, 2).toString('base64url'));
   vi.stubEnv('CONTEXT_GMAIL_ENABLED', 'true');
+  connection.encryptedRefreshToken = encryptGmailSecret(refreshToken, { purpose: 'refresh_token', employeeId: 7, id: connection.id });
   vi.mocked(getGmailConnection).mockReset().mockResolvedValue(null);
   vi.mocked(saveGmailConnection).mockReset().mockResolvedValue(connection);
-  vi.mocked(disconnectGmailConnection).mockReset().mockResolvedValue(null);
+  vi.mocked(disconnectGmailConnection).mockReset().mockResolvedValue({ ...connection, version: 5, status: 'disconnected', encryptedRefreshToken: null });
+  vi.mocked(completeGmailDisconnect).mockReset().mockImplementation(async (_client, _owner, revoke) => {
+    await revoke({ ...connection, version: 5, status: 'revoking' });
+    return { ...connection, version: 5, status: 'disconnected', encryptedRefreshToken: null };
+  });
 });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 function sessionCookie(account = identity, subject = googleSub) {
@@ -101,6 +106,7 @@ describe('Gmail configuration and refresh tokens', () => {
   });
   it.each([
     [{ error: 'invalid_grant', error_description: `${refreshToken} sensitive` }, 400, 'GMAIL_RECONNECT_REQUIRED'],
+    [{ error: 'invalid_grant', error_description: refreshToken }, 500, 'GMAIL_OAUTH_UNAVAILABLE'],
     [{ error: 'invalid_client', error_description: clientSecret }, 401, 'GMAIL_OAUTH_UNAVAILABLE'],
     [{ access_token: accessToken, token_type: 'Bearer', expires_in: 3600, scope: 'openid email' }, 200, 'GMAIL_SCOPE_REQUIRED'],
     [{ access_token: accessToken, token_type: 'Bearer', expires_in: 3600, scope: `${GMAIL_COMPOSE_SCOPE} https://www.googleapis.com/auth/gmail.modify` }, 200, 'GMAIL_SCOPE_UNSUPPORTED'],
@@ -170,6 +176,12 @@ describe('per-employee Gmail OAuth flow', () => {
     expect(d.fetch).not.toHaveBeenCalled();
     const revoked = deps(); revoked.revoke();
     expectFailure(await handleGmailConnect(request('/api/mail/google/connect', 'POST'), revoked), 'expired', false);
+  });
+  it('does not start consent while a Google revocation is pending', async () => {
+    vi.mocked(getGmailConnection).mockResolvedValue({ ...connection, status: 'revoking' });
+    const d = deps();
+    expectFailure(await handleGmailConnect(request('/api/mail/google/connect', 'POST'), d), 'disconnect_pending', false);
+    expect(d.fetch).not.toHaveBeenCalled();
   });
   it('verifies Google identity and scopes, rechecks live employee/session and atomically binds refresh tokens', async () => {
     const { callback, flow, dependencies: d } = await start();
@@ -249,29 +261,75 @@ describe('mailbox connection visibility and disconnect', () => {
     const response = await handleGmailConnection(request('/api/mail/connection'), d);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ employee: { email, name: 'Employee' }, connection: {
-      connected: true, accountEmail: email, updatedAt: connection.updatedAt,
+      connected: true, status: 'active', accountEmail: email, updatedAt: connection.updatedAt,
     }, availability: { enabled: true, configured: true, available: true } });
     expect(response.headers.get('cache-control')).toContain('no-store');
   });
-  it('disconnects locally with the feature disabled without risking a concurrent reconnect via Google grant revocation', async () => {
-    vi.mocked(getGmailConnection).mockResolvedValue(connection);
+  it.each(['needs_reauth', 'revoking'] as const)('reports %s as unavailable, without treating stored credentials as a healthy connection', async status => {
+    vi.mocked(getGmailConnection).mockResolvedValue({ ...connection, status });
+    const response = await handleGmailConnection(request('/api/mail/connection'), deps());
+    expect(await response.json()).toMatchObject({ connection: { connected: false, status } });
+  });
+  it('durably disables locally, then revokes through a bounded fixed endpoint even with drafting and OAuth config disabled', async () => {
+    vi.mocked(disconnectGmailConnection).mockResolvedValue({ ...connection, status: 'revoking', version: 5 });
     vi.stubEnv('CONTEXT_GMAIL_ENABLED', 'false');
+    vi.stubEnv('CONTEXT_GMAIL_CLIENT_SECRET', '');
     const d = deps(); d.fetch.mockResolvedValue(new Response(''));
     const response = await handleGmailDisconnect(request('/api/mail/connection', 'POST'), d);
-    expect(await response.json()).toEqual({ disconnected: true, googleGrantRevoked: false });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ disconnected: true, googleGrantRevoked: true, revocationPending: false });
     expect(d.writeTransaction).not.toHaveBeenCalled();
-    expect(d.disconnectTransaction).toHaveBeenCalledTimes(1);
+    expect(d.disconnectTransaction).toHaveBeenCalledTimes(2);
     expect(disconnectGmailConnection).toHaveBeenCalledWith(expect.anything(), { employeeId: 7, employeeEmail: email });
-    expect(d.fetch).not.toHaveBeenCalled();
+    expect(completeGmailDisconnect).toHaveBeenCalledWith(expect.anything(), { employeeId: 7, employeeEmail: email }, expect.any(Function));
+    const [url, options] = d.fetch.mock.calls[0];
+    expect(url).toBe('https://oauth2.googleapis.com/revoke');
+    expect(options).toMatchObject({ method: 'POST', redirect: 'error', cache: 'no-store' });
+    expect(Object.fromEntries(options!.body as URLSearchParams)).toEqual({ token: refreshToken });
     expect(response.headers.getSetCookie()[0]).toContain('Max-Age=0');
   });
-  it('still removes local access if encryption and OAuth client configuration are lost', async () => {
-    vi.mocked(getGmailConnection).mockResolvedValue(connection);
+  it('leaves a retryable local disable if the token cannot be decrypted', async () => {
+    vi.mocked(disconnectGmailConnection).mockResolvedValue({ ...connection, status: 'revoking', version: 5 });
     vi.stubEnv('CONTEXT_GMAIL_ENCRYPTION_KEY', '');
     vi.stubEnv('CONTEXT_GMAIL_CLIENT_SECRET', '');
     const d = deps();
-    expect(await (await handleGmailDisconnect(request('/api/mail/connection', 'POST'), d)).json()).toEqual({ disconnected: true, googleGrantRevoked: false });
+    const response = await handleGmailDisconnect(request('/api/mail/connection', 'POST'), d);
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ disconnected: true, googleGrantRevoked: false, revocationPending: true });
     expect(d.fetch).not.toHaveBeenCalled();
+  });
+  it('does not claim Google revocation when no stored token remains', async () => {
+    const d = deps();
+    const response = await handleGmailDisconnect(request('/api/mail/connection', 'POST'), d);
+    expect(await response.json()).toEqual({ disconnected: true, googleGrantRevoked: false, revocationPending: false });
+    expect(d.disconnectTransaction).toHaveBeenCalledTimes(1);
+    expect(completeGmailDisconnect).not.toHaveBeenCalled();
+    expect(d.fetch).not.toHaveBeenCalled();
+  });
+  it('accepts an already invalid token on revocation retry', async () => {
+    vi.mocked(disconnectGmailConnection).mockResolvedValue({ ...connection, status: 'revoking', version: 5 });
+    const d = deps(); d.fetch.mockResolvedValue(Response.json({ error: 'invalid_token' }, { status: 400 }));
+    const response = await handleGmailDisconnect(request('/api/mail/connection', 'POST'), d);
+    expect(await response.json()).toEqual({ disconnected: true, googleGrantRevoked: true, revocationPending: false });
+  });
+  it.each(['network', 'server', 'bad_error', 'redirect', 'wrong_success', 'stream'] as const)('keeps revocation retryable and sanitizes %s failures', async mode => {
+    vi.mocked(disconnectGmailConnection).mockResolvedValue({ ...connection, status: 'revoking', version: 5 });
+    const d = deps();
+    if (mode === 'network') d.fetch.mockRejectedValue(new Error(refreshToken));
+    if (mode === 'server') d.fetch.mockResolvedValue(Response.json({ error_description: refreshToken }, { status: 503 }));
+    if (mode === 'bad_error') d.fetch.mockResolvedValue(Response.json({ error: 'invalid_grant', error_description: refreshToken }, { status: 400 }));
+    if (mode === 'redirect') {
+      const redirected = new Response(''); Object.defineProperty(redirected, 'redirected', { value: true });
+      d.fetch.mockResolvedValue(redirected);
+    }
+    if (mode === 'wrong_success') d.fetch.mockResolvedValue(Response.json({}, { status: 201 }));
+    if (mode === 'stream') d.fetch.mockResolvedValue(new Response(new ReadableStream({ start() {} }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
+    const result = handleGmailDisconnect(request('/api/mail/connection', 'POST'), d);
+    if (mode === 'stream') await vi.advanceTimersByTimeAsync(2_001);
+    const response = await result;
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ disconnected: true, googleGrantRevoked: false, revocationPending: true });
+    expect(d.fetch).toHaveBeenCalledTimes(1);
   });
   it('rejects cross-origin disconnects without altering local or Google access', async () => {
     const d = deps();

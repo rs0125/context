@@ -186,6 +186,26 @@ describe('draft-only Gmail HTTP adapter', () => {
     }
   });
 
+  it.each(['rateLimitExceeded', 'userRateLimitExceeded'])('recognizes Google 403 %s as a definitive quota rejection with bounded Retry-After', async reason => {
+    const fetch = mockFetch(() => Response.json({ error: { errors: [{ reason, message: `private ${token}` }] } }, { status: 403, headers: { 'Retry-After': '12' } }));
+    const error = await new GmailClient({ fetch }).createDraft(token, input).catch(error => error);
+    expect(error).toMatchObject({ code: 'GMAIL_RATE_LIMITED', status: 403, retryAfterMs: 12000, operationMayHaveSucceeded: false });
+    expect(JSON.stringify(error)).not.toContain(token);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it('does not treat Google policy errors or oversized error bodies as quota permission to retry', async () => {
+    for (const errors of [[{ reason: 'domainPolicy' }], [{ reason: 'rateLimitExceeded', message: 'x'.repeat(20_000) }]]) {
+      const fetch = mockFetch(() => Response.json({ error: { errors } }, { status: 403 }));
+      await expect(new GmailClient({ fetch }).createDraft(token, input)).rejects.toMatchObject({ code: 'GMAIL_ACCESS_DENIED', operationMayHaveSucceeded: false });
+    }
+  });
+
+  it.each([['0', 1000], ['99999999', 86_400_000], ['invalid', 1000]])('bounds quota retry delay %s', async (header, expected) => {
+    const fetch = mockFetch(() => new Response(null, { status: 429, headers: { 'Retry-After': String(header) } }));
+    await expect(new GmailClient({ fetch }).createDraft(token, input)).rejects.toMatchObject({ code: 'GMAIL_RATE_LIMITED', retryAfterMs: expected });
+  });
+
   it('rejects oversized declared and streaming responses, cancelling streams', async () => {
     const cancelled = vi.fn();
     const declared = mockFetch(() => new Response('private', { headers: { 'Content-Length': '100', 'Content-Type': 'application/json' } }));

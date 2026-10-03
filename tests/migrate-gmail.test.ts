@@ -18,16 +18,16 @@ function database(options: Options = {}) {
       ['account_email', 'text'], ['encrypted_refresh_token', 'text'], ['granted_scopes', 'text[]'], ['version', 'integer'],
       ['status', 'text'], ['created_at', 'timestamp with time zone'], ['updated_at', 'timestamp with time zone']],
     draft_operations: [['employee_id', 'integer'], ['employee_email', 'text'], ['operation_id', 'uuid'], ['connection_id', 'uuid'],
-      ['connection_version', 'integer'], ['request_hash', 'text'], ['encrypted_content', 'text'], ['state', 'text'],
-      ['draft_id', 'text'], ['message_id', 'text'], ['reason', 'text'], ['created_at', 'timestamp with time zone'], ['updated_at', 'timestamp with time zone']],
+      ['connection_version', 'integer'], ['request_hash', 'text'], ['state', 'text'],
+      ['draft_id', 'text'], ['message_id', 'text'], ['reason', 'text'], ['created_at', 'timestamp with time zone'], ['updated_at', 'timestamp with time zone'], ['google_sub', 'text'], ['retry_at', 'timestamp with time zone']],
   };
-  const nullable = ['encrypted_refresh_token', 'encrypted_content', 'draft_id', 'message_id', 'reason'];
+  const nullable = ['encrypted_refresh_token', 'google_sub', 'retry_at', 'draft_id', 'message_id', 'reason'];
   const tableName = (oid: unknown) => oid === 10 ? 'connections' : 'draft_operations';
   const query = vi.fn(async (sql: string, values: unknown[] = []): Promise<{ rows: Row[] }> => {
     if (sql.includes('pg_try_advisory_xact_lock')) return { rows: [{ locked: options.locked !== false }] };
     if (sql.startsWith('SELECT rolsuper')) return { rows: [{ rolsuper: false, rolbypassrls: options.bypass !== false }] };
     if (sql.includes("obj_description(n.oid, 'pg_namespace')")) return { rows: options.collision || schemaCreated
-      ? [{ oid: 1, owned: true, marker: options.collision ? 'unrelated-schema' : 'context-gmail-schema-v1' }] : [] };
+      ? [{ oid: 1, owned: true, marker: options.collision ? 'unrelated-schema' : 'context-gmail-schema-v2' }] : [] };
     if (sql.startsWith('CREATE SCHEMA')) schemaCreated = true;
     if (sql.startsWith('CREATE TABLE')) {
       const name = /CREATE TABLE context_gmail_private\.(\w+)/.exec(sql)![1]; definitions.set(name, sql);
@@ -109,7 +109,7 @@ describe('Gmail private storage migration', () => {
     const joined = sql.join('\n');
     expect(joined).toContain('PRIMARY KEY (employee_id, operation_id)');
     expect(joined).toContain('FOREIGN KEY (connection_id, employee_id)');
-    expect(joined).toContain("state IN ('dispatching', 'created', 'unknown', 'rejected')");
+    expect(joined).toContain("state IN ('dispatching', 'created', 'unknown', 'rejected', 'retryable')");
     expect(joined).not.toMatch(/(?:INSERT INTO|UPDATE |DELETE FROM) public\.|GRANT ALL|GRANT .*DELETE|GRANT .*TO (?:PUBLIC|anon|authenticated|service_role)/);
   });
 
