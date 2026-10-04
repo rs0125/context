@@ -1,11 +1,11 @@
-/** Actor-bound dispatch receipts with encrypted before/after images for narrow RFQ undo. */
+/** Actor-bound dispatch receipts with encrypted before/after images for narrow CRM undo. */
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
 import type { Principal } from '../auth';
 import { HttpError } from '../errors';
 import { RFQ_ACTION } from './rfq';
 
-export const crmWriteActionSchema = z.enum(['create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq']);
+export const crmWriteActionSchema = z.enum(['create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq', 'create_crm_note', 'update_crm_note', 'undo_crm_note']);
 export type CrmWriteAction = z.infer<typeof crmWriteActionSchema>;
 const receipt = z.object({ employee_id: z.number().int().positive(), employee_email: z.string().email(),
   operation_id: z.string().uuid(), member_id: z.string().uuid(), action: crmWriteActionSchema, request_hash: z.string().regex(/^[a-f0-9]{64}$/),
@@ -14,7 +14,8 @@ const receipt = z.object({ employee_id: z.number().int().positive(), employee_em
 // Optional at the type boundary for legacy receipt fixtures; parsed database rows always contain null or ciphertext.
 export type CrmWriteReceipt = Omit<z.infer<typeof receipt>, 'encrypted_snapshot'> & { encrypted_snapshot?: string | null };
 const columns = 'employee_id, employee_email, operation_id, member_id, action, request_hash, state, resource_id, encrypted_snapshot';
-const successfulState = { create_crm_rfq: 'created', update_crm_rfq: 'updated', undo_crm_rfq: 'undone' } as const;
+const successfulState = { create_crm_rfq: 'created', update_crm_rfq: 'updated', undo_crm_rfq: 'undone',
+  create_crm_note: 'created', update_crm_note: 'updated', undo_crm_note: 'undone' } as const;
 function unavailable(): never { throw new HttpError(503, 'CRM_RECEIPT_UNAVAILABLE', 'The change receipt could not be verified.'); }
 function verifyReceipt(row: unknown, actor: Principal, operation?: string, hash?: string, action?: CrmWriteAction): CrmWriteReceipt {
   const stored = receipt.safeParse(row);
@@ -81,7 +82,26 @@ export async function listCrmChanges(client: PoolClient, actor: Principal, limit
   if (!Number.isInteger(limit) || limit < 1 || limit > 50) unavailable();
   const { rows } = await client.query(`SELECT ${columns} FROM context_crm_private.write_operations
     WHERE employee_id = $1 AND employee_email = $2 AND member_id = $3
+      AND action IN ('create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq')
     ORDER BY created_at DESC, operation_id DESC LIMIT $4`, [actor.employeeId, actor.email, actor.twentyUserId, limit]);
+  return rows.map(row => verifyReceipt(row, actor));
+}
+
+export async function findAgentCreatedNote(client: PoolClient, actor: Principal, noteId: string): Promise<CrmWriteReceipt | null> {
+  const { rows } = await client.query(`SELECT ${columns} FROM context_crm_private.write_operations
+    WHERE employee_id = $1 AND employee_email = $2 AND member_id = $3 AND resource_id = $4
+      AND action = 'create_crm_note' AND state = 'created' ORDER BY created_at DESC, operation_id DESC LIMIT 1`,
+  [actor.employeeId, actor.email, actor.twentyUserId, noteId]);
+  return rows.length ? verifyReceipt(rows[0], actor, undefined, undefined, 'create_crm_note') : null;
+}
+/** The caller decrypts target binding and reauthorizes current deal/note access before disclosure. */
+export async function listCrmNoteChanges(client: PoolClient, actor: Principal, limit = 10, noteId?: string): Promise<CrmWriteReceipt[]> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50 || (noteId !== undefined && !z.string().uuid().safeParse(noteId).success)) unavailable();
+  const { rows } = await client.query(`SELECT ${columns} FROM context_crm_private.write_operations
+    WHERE employee_id = $1 AND employee_email = $2 AND member_id = $3
+      AND action IN ('create_crm_note', 'update_crm_note', 'undo_crm_note') AND state IN ('created', 'updated', 'undone')
+      AND ($5::uuid IS NULL OR resource_id = $5)
+    ORDER BY created_at DESC, operation_id DESC LIMIT $4`, [actor.employeeId, actor.email, actor.twentyUserId, limit, noteId ?? null]);
   return rows.map(row => verifyReceipt(row, actor));
 }
 

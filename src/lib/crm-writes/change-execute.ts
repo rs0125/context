@@ -14,7 +14,7 @@ export const executeCrmRfqUpdate = (raw: unknown, key: KeyRegistration, signal: 
 export const executeCrmRfqUndo = (raw: unknown, key: KeyRegistration, signal: AbortSignal,
   revalidate: Revalidate = async () => {}, overrides: Partial<CrmChangeDependencies> = {}) => execute('undo_crm_rfq', raw, key, signal, revalidate, overrides);
 
-async function execute(action: Exclude<CrmWriteAction, 'create_crm_rfq'>, raw: unknown, key: KeyRegistration,
+async function execute(action: Extract<CrmWriteAction, 'update_crm_rfq' | 'undo_crm_rfq'>, raw: unknown, key: KeyRegistration,
   signal: AbortSignal, revalidate: Revalidate, overrides: Partial<CrmChangeDependencies>): Promise<RfqChangeResult> {
   const deps = changeDependencies(overrides);
   const submitted = rfqUpdateInputSchema.shape.operation_id.safeParse(raw && typeof raw === 'object' && 'operation_id' in raw ? raw.operation_id : undefined);

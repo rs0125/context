@@ -20,6 +20,9 @@ import { readCrmRfq, listCrmRfqChanges } from './crm-writes/change-read';
 import { crmWriteAvailability } from './crm-writes/client';
 import { RFQ_SCOPE } from './crm-writes/rfq';
 import { rfqReadInputSchema, rfqListChangesInputSchema } from './crm-writes/changes';
+import { readCrmNote, listCrmNoteChanges } from './crm-writes/notes-read';
+import { crmNotesAvailability } from './crm-writes/notes-client';
+import { CRM_NOTE_SCOPE, noteReadInputSchema, noteListInputSchema } from './crm-writes/notes';
 import { WAREHOUSE_RECORDED_FIELD_NAMES, type WarehouseRecordedFieldName } from './warehouse-recorded-context';
 
 const ANALYTICS_GUIDANCE = 'Aggregate website analytics for Analysts: /api/v1/analytics/capabilities discovers supported reports; /api/v1/analytics/ga4 reports traffic and recorded events; /api/v1/analytics/search-console reports Google organic search. Analytics dates use the source timezone, not necessarily the India server clock. Preserve source_fetched_at, resolved dates, quality warnings and pagination. For form activity per session use ga4?report=form_performance with a landing_page_contains filter; its separate event ratios use matching entry sessions. For relative comparisons resolve period on the first group and reuse the returned dates for later groups. Recent data may change. Event counts are not unique CRM leads or a sequential conversion funnel; Search Console clicks are not GA sessions. Failed reads mean unavailable, never zero.';
@@ -41,6 +44,8 @@ type ApiDependencies = {
   listEmailDrafts: typeof listEmailDrafts;
   readCrmRfq: typeof readCrmRfq;
   listCrmRfqChanges: typeof listCrmRfqChanges;
+  readCrmNote: typeof readCrmNote;
+  listCrmNoteChanges: typeof listCrmNoteChanges;
   audit: (entry: Record<string, unknown>) => void;
 };
 const defaults: ApiDependencies = {
@@ -48,7 +53,7 @@ const defaults: ApiDependencies = {
   authenticate: request => authenticateRequestKey(request, hash => withReadOnlyTransaction(client => findDatabaseKey(client, hash))),
   liveCrmAccess: (principal, view, opportunityId) => getLiveCrmAccess(principal, { view, opportunityId }),
   relatedCrmContext: getRelatedCrmContext,
-  analyticsCapabilities, ga4Report, searchConsoleReport, resolveLocation, getEmailConnection, readEmailDraft, listEmailDrafts, readCrmRfq, listCrmRfqChanges,
+  analyticsCapabilities, ga4Report, searchConsoleReport, resolveLocation, getEmailConnection, readEmailDraft, listEmailDrafts, readCrmRfq, listCrmRfqChanges, readCrmNote, listCrmNoteChanges,
   audit: entry => console.info(JSON.stringify(entry)),
 };
 
@@ -247,6 +252,29 @@ export async function handleApiRequest(request: Request, path: string[], depende
           : (() => { throw new HttpError(404, 'NOT_FOUND', 'Endpoint not found.'); })();
       return request.method === 'HEAD' ? new Response(null, { headers }) : Response.json({ data: value, meta }, { headers });
     }
+    if (path[0] === 'crm' && path[1] === 'deals') {
+      const listing = path.length === 4 && path[3] === 'note-changes';
+      if (!listing && !(path.length === 5 && path[3] === 'notes')) throw new HttpError(404, 'NOT_FOUND', 'Endpoint not found.');
+      if (!key.scopes.includes('crm:read') || !key.scopes.includes(CRM_NOTE_SCOPE)) throw new HttpError(403, 'FORBIDDEN', 'CRM read and note write permissions are required.');
+      if (!crmNotesAvailability().available) throw new HttpError(503, 'CRM_NOTES_DISABLED', 'CRM note tools are not enabled.');
+      const query = new URL(request.url).searchParams;
+      strictQuery(query, listing ? ['limit'] : []);
+      const revalidate = deps.revalidateKey ?? (async () => {});
+      employeeId = key.employeeId;
+      // Domain readers recheck live deal access and receipt ownership around provider I/O.
+      // General CRM reads and a past note receipt do not authorize note redisclosure.
+      let value: unknown;
+      if (listing) {
+        const parsed = noteListInputSchema.safeParse({ deal_id: path[2], ...(query.has('limit') ? { limit: /^\d+$/.test(query.get('limit')!) ? Number(query.get('limit')) : NaN } : {}) });
+        if (!parsed.success) throw new HttpError(422, 'INVALID_QUERY', 'Use a valid deal ID and a limit between 1 and 10.');
+        value = await deps.listCrmNoteChanges(parsed.data, key, request.signal, revalidate);
+      } else {
+        const parsed = noteReadInputSchema.safeParse({ deal_id: path[2], note_id: path[4] });
+        if (!parsed.success) throw new HttpError(422, 'INVALID_QUERY', 'Use valid deal and note IDs.');
+        value = await deps.readCrmNote(parsed.data, key, request.signal, revalidate);
+      }
+      return request.method === 'HEAD' ? new Response(null, { headers }) : Response.json({ data: value, meta }, { headers });
+    }
     if (path[0] === 'crm' && ['rfqs', 'rfq-changes'].includes(path[1])) {
       const listing = path.join('/') === 'crm/rfq-changes';
       if (!listing && !(path.length === 3 && path[1] === 'rfqs')) throw new HttpError(404, 'NOT_FOUND', 'Endpoint not found.');
@@ -387,6 +415,8 @@ export async function handleApiRequest(request: Request, path: string[], depende
       'warehouses/summary', 'crm/rfq-changes', 'crm/opportunities', 'crm/summary', 'crm/filters', 'crm/my-briefing',
       'analytics/capabilities', 'analytics/ga4', 'analytics/search-console', 'locations/resolve', 'mail/connection', 'mail/drafts', 'openapi.json'].includes(route)
       ? route : path.length === 3 && path[0] === 'crm' && path[1] === 'rfqs' ? 'crm/rfq/read'
+        : path.length === 5 && path[0] === 'crm' && path[1] === 'deals' && path[3] === 'notes' ? 'crm/note/read'
+        : path.length === 4 && path[0] === 'crm' && path[1] === 'deals' && path[3] === 'note-changes' ? 'crm/note-changes'
         : path.length === 2 && path[0] === 'warehouses' ? 'warehouses/read'
         : path.length === 3 && path[0] === 'mail' && path[1] === 'drafts' ? 'mail/draft/read'
         : path.length === 3 && path[0] === 'wiki' && path[1] === 'pages' ? 'wiki/read'

@@ -4,12 +4,12 @@ import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Principal } from '../src/lib/auth';
 import { claimCrmRfq, findCrmRfq, finishCrmRfq, claimCrmChange, findCrmChange, finishCrmChange,
-  loadCrmChange, findAgentCreatedRfq, listCrmChanges } from '../src/lib/crm-writes/storage';
+  loadCrmChange, findAgentCreatedRfq, listCrmChanges, findAgentCreatedNote, listCrmNoteChanges } from '../src/lib/crm-writes/storage';
 import { encryptCrmSnapshot, decryptCrmSnapshot, crmSnapshotContext } from '../src/lib/crm-writes/snapshots';
 const modulePath = '../scripts/migrate-crm-writes.mjs';
 const { migrateCrmWrites } = await import(modulePath);
 const connection = process.env.CONTEXT_CRM_TEST_DATABASE_URL;
-describe.skipIf(!connection)('isolated RFQ receipt migration and concurrency', () => {
+describe.skipIf(!connection)('isolated CRM receipt migration and concurrency', () => {
   let owner: pg.Pool, runtime: pg.Pool;
   const actor: Principal = { employeeId: 7, email: 'employee@wareongo.com', keyId: 'test', scopes: ['crm.rfq:write'],
     twentyUserId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', isAnalyst: false };
@@ -24,6 +24,16 @@ describe.skipIf(!connection)('isolated RFQ receipt migration and concurrency', (
   async function migrate() {
     const client = await owner.connect();
     try { return await migrateCrmWrites(client); } finally { client.release(); }
+  }
+  async function tableSignature() {
+    const oid = (await owner.query("SELECT 'context_crm_private.write_operations'::regclass::oid AS oid")).rows[0].oid;
+    const columns = (await owner.query(`SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, a.attnotnull AS not_null,
+      a.attidentity AS identity, a.attgenerated AS generated, a.attisdropped AS dropped, pg_get_expr(d.adbin, d.adrelid) AS default_expression
+      FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+      WHERE a.attrelid = $1 AND a.attnum > 0 ORDER BY a.attnum`, [oid])).rows;
+    const constraints = (await owner.query(`SELECT conname AS name, contype AS type, convalidated AS validated, pg_get_constraintdef(oid, true) AS definition
+      FROM pg_constraint WHERE conrelid = $1 ORDER BY conname`, [oid])).rows;
+    return createHash('sha256').update(JSON.stringify({ columns, constraints })).digest('hex');
   }
   beforeAll(async () => {
     const url = new URL(connection!);
@@ -49,14 +59,7 @@ describe.skipIf(!connection)('isolated RFQ receipt migration and concurrency', (
         CONSTRAINT write_operations_result_check CHECK ((state = 'created') = (resource_id IS NOT NULL))
       ); ALTER TABLE context_crm_private.write_operations ENABLE ROW LEVEL SECURITY;
       ALTER TABLE context_crm_private.write_operations FORCE ROW LEVEL SECURITY;`);
-    const oid = (await owner.query("SELECT 'context_crm_private.write_operations'::regclass::oid AS oid")).rows[0].oid;
-    const columns = (await owner.query(`SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, a.attnotnull AS not_null,
-      a.attidentity AS identity, a.attgenerated AS generated, a.attisdropped AS dropped, pg_get_expr(d.adbin, d.adrelid) AS default_expression
-      FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-      WHERE a.attrelid = $1 AND a.attnum > 0 ORDER BY a.attnum`, [oid])).rows;
-    const constraints = (await owner.query(`SELECT conname AS name, contype AS type, convalidated AS validated, pg_get_constraintdef(oid, true) AS definition
-      FROM pg_constraint WHERE conrelid = $1 ORDER BY conname`, [oid])).rows;
-    const signature = createHash('sha256').update(JSON.stringify({ columns, constraints })).digest('hex');
+    const signature = await tableSignature();
     await owner.query("COMMENT ON TABLE context_crm_private.write_operations IS 'context-crm-write-receipts-v1:wrong'");
     await expect(migrate()).rejects.toThrow('CRM_RELATION_COLLISION');
     await owner.query(`COMMENT ON TABLE context_crm_private.write_operations IS 'context-crm-write-receipts-v1:${signature}'`);
@@ -75,7 +78,35 @@ describe.skipIf(!connection)('isolated RFQ receipt migration and concurrency', (
     });
     expect(await tx(runtime, c => findAgentCreatedRfq(c, actor, legacyResource))).toMatchObject({ operation_id: legacyOperation });
     const marker = (await owner.query("SELECT obj_description('context_crm_private'::regnamespace, 'pg_namespace') AS marker")).rows[0].marker;
-    expect(marker).toBe('context-crm-write-schema-v2');
+    expect(marker).toBe('context-crm-write-schema-v3');
+  });
+  it('verifies and upgrades v2 without changing existing RFQ edits or encrypted snapshots', async () => {
+    const operation = randomUUID();
+    const ciphertext = encryptCrmSnapshot({ before: { budget: '20/month' }, after: { budget: '25/month' } }, {
+      employeeId: actor.employeeId!, email: actor.email!, memberId: actor.twentyUserId!, operationId: operation,
+      action: 'update_crm_rfq', requestHash: hash,
+    }, { CONTEXT_KEY_ENCRYPTION_SECRET: 'local-only-rfq-test-secret-over-32-characters' });
+    await tx(runtime, c => claimCrmChange(c, actor, operation, hash, 'update_crm_rfq', ciphertext));
+    await tx(runtime, c => finishCrmChange(c, actor, operation, hash, 'update_crm_rfq', { outcome: 'updated', id: legacyResource }));
+    const before = (await owner.query('SELECT * FROM context_crm_private.write_operations ORDER BY operation_id')).rows;
+    // Reproduce the deployed v2 table exactly, retaining its rows and runtime policy.
+    await owner.query(`ALTER TABLE context_crm_private.write_operations DROP CONSTRAINT write_operations_action_check,
+      ADD CONSTRAINT write_operations_action_check CHECK (action IN ('create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq'));
+      COMMENT ON SCHEMA context_crm_private IS 'context-crm-write-schema-v2';
+      COMMENT ON TABLE context_crm_private.write_operations IS 'context-crm-write-receipts-v2:wrong'`);
+    const signature = await tableSignature();
+    await expect(migrate()).rejects.toThrow('CRM_RELATION_COLLISION');
+    expect(await tableSignature()).toBe(signature);
+    await owner.query(`COMMENT ON TABLE context_crm_private.write_operations IS 'context-crm-write-receipts-v2:${signature}'`);
+    expect(await migrate()).toMatchObject({ verified: true, runtimeGranted: true, businessWrites: false });
+    expect((await owner.query('SELECT * FROM context_crm_private.write_operations ORDER BY operation_id')).rows).toEqual(before);
+    expect(await tx(runtime, c => loadCrmChange(c, actor, operation))).toMatchObject({
+      action: 'update_crm_rfq', state: 'updated', resource_id: legacyResource, encrypted_snapshot: ciphertext,
+    });
+    const upgradedSignature = await tableSignature();
+    expect(upgradedSignature).not.toBe(signature);
+    expect(await migrate()).toMatchObject({ verified: true });
+    expect(await tableSignature()).toBe(upgradedSignature);
   });
   it('admits one concurrent claim across connections and rejects payload or member rebinding', async () => {
     const operation = randomUUID();
@@ -154,6 +185,67 @@ describe.skipIf(!connection)('isolated RFQ receipt migration and concurrency', (
     await tx(runtime, c => finishCrmChange(c, actor, operation, hash, 'update_crm_rfq', { outcome: 'outcome_unknown' }));
     expect(await tx(runtime, c => loadCrmChange(c, actor, operation))).toMatchObject({ state: 'unknown', resource_id: null, encrypted_snapshot: 'test-ciphertext-placeholder' });
     await expect(tx(runtime, c => finishCrmChange(c, actor, operation, hash, 'update_crm_rfq', { outcome: 'updated', id: legacyResource }))).rejects.toMatchObject({ code: 'CRM_RECEIPT_UNAVAILABLE' });
+  });
+  it('admits a single note dispatch and binds provenance to the exact actor and action', async () => {
+    const operation = randomUUID(), noteId = randomUUID();
+    const claims = await Promise.all(Array.from({ length: 12 }, () => tx(runtime,
+      c => claimCrmChange(c, actor, operation, hash, 'create_crm_note', 'encrypted-note-before-image'))));
+    expect(claims.filter(c => c.fresh)).toHaveLength(1);
+    await expect(tx(runtime, c => claimCrmChange(c, actor, operation, hash, 'create_crm_rfq'))).rejects.toMatchObject({ code: 'CRM_OPERATION_CONFLICT' });
+    await expect(tx(runtime, c => claimCrmChange(c, actor, operation, 'b'.repeat(64), 'create_crm_note'))).rejects.toMatchObject({ code: 'CRM_OPERATION_CONFLICT' });
+    await expect(tx(runtime, c => finishCrmChange(c, actor, operation, hash, 'create_crm_note', { outcome: 'updated', id: noteId })))
+      .rejects.toMatchObject({ code: 'CRM_RECEIPT_UNAVAILABLE' });
+    await tx(runtime, c => finishCrmChange(c, actor, operation, hash, 'create_crm_note', { outcome: 'created', id: noteId, encryptedSnapshot: 'encrypted-note-after-image' }));
+    expect(await tx(runtime, c => findAgentCreatedNote(c, actor, noteId))).toMatchObject({
+      operation_id: operation, state: 'created', resource_id: noteId, encrypted_snapshot: 'encrypted-note-after-image',
+    });
+    expect(await tx(runtime, c => findAgentCreatedRfq(c, actor, noteId))).toBeNull();
+    expect(await tx(runtime, c => findAgentCreatedNote(c, actor, legacyResource))).toBeNull();
+    await expect(tx(runtime, c => findCrmRfq(c, actor, operation, hash))).rejects.toMatchObject({ code: 'CRM_OPERATION_CONFLICT' });
+    for (const other of [{ ...actor, employeeId: 99 }, { ...actor, email: 'other@wareongo.com' }, { ...actor, twentyUserId: randomUUID() }]) {
+      expect(await tx(runtime, c => findAgentCreatedNote(c, other, noteId))).toBeNull();
+      expect(await tx(runtime, c => listCrmNoteChanges(c, other))).toEqual([]);
+      await expect(tx(runtime, c => finishCrmChange(c, other, operation, hash, 'create_crm_note', { outcome: 'created', id: noteId })))
+        .rejects.toMatchObject({ code: 'CRM_RECEIPT_UNAVAILABLE' });
+    }
+  });
+  it('keeps note/RFQ histories separate, includes successful undo, and filters a note before applying its limit', async () => {
+    const noteId = randomUUID(), otherNote = randomUUID();
+    const changes = [
+      { action: 'create_crm_note', outcome: 'created', id: noteId },
+      { action: 'update_crm_note', outcome: 'updated', id: noteId },
+      { action: 'undo_crm_note', outcome: 'rolled_back', id: noteId },
+      { action: 'create_crm_note', outcome: 'created', id: otherNote },
+    ] as const;
+    const operations: string[] = [];
+    for (const [index, change] of changes.entries()) {
+      const operation = randomUUID(); operations.push(operation);
+      await tx(runtime, c => claimCrmChange(c, actor, operation, hash, change.action));
+      await tx(runtime, c => finishCrmChange(c, actor, operation, hash, change.action, { outcome: change.outcome, id: change.id }));
+      // Deterministic ordering, independent of clock precision or UUID ordering.
+      await owner.query("UPDATE context_crm_private.write_operations SET created_at = '2099-01-01T00:00:00Z'::timestamptz + $2 * interval '1 second' WHERE operation_id = $1", [operation, index]);
+    }
+    for (const outcome of ['rejected', 'outcome_unknown'] as const) {
+      const operation = randomUUID();
+      await tx(runtime, c => claimCrmChange(c, actor, operation, hash, 'update_crm_note'));
+      await tx(runtime, c => finishCrmChange(c, actor, operation, hash, 'update_crm_note', { outcome }));
+    }
+    const pending = randomUUID();
+    await tx(runtime, c => claimCrmChange(c, actor, pending, hash, 'update_crm_note'));
+    const notes = await tx(runtime, c => listCrmNoteChanges(c, actor, 50));
+    expect(notes.every(r => r.action.endsWith('_note') && ['created', 'updated', 'undone'].includes(r.state))).toBe(true);
+    expect(notes.slice(0, 4).map(r => r.operation_id)).toEqual([...operations].reverse());
+    expect(await tx(runtime, c => listCrmNoteChanges(c, actor, 1, noteId))).toMatchObject([
+      { operation_id: operations[2], action: 'undo_crm_note', state: 'undone' },
+    ]);
+    expect(await tx(runtime, c => listCrmNoteChanges(c, actor, 50, randomUUID()))).toEqual([]);
+    expect(await tx(runtime, c => findAgentCreatedNote(c, actor, noteId))).toMatchObject({ operation_id: operations[0] });
+    const rfqs = await tx(runtime, c => listCrmChanges(c, actor, 50));
+    expect(rfqs.length).toBeGreaterThan(0);
+    expect(rfqs.every(r => r.action.endsWith('_rfq'))).toBe(true);
+    expect((await tx(runtime, c => listCrmChanges(c, actor, 1)))[0].action.endsWith('_rfq')).toBe(true);
+    for (const limit of [0, 51, 1.5]) await expect(tx(runtime, c => listCrmNoteChanges(c, actor, limit))).rejects.toMatchObject({ code: 'CRM_RECEIPT_UNAVAILABLE' });
+    await expect(tx(runtime, c => listCrmNoteChanges(c, actor, 10, "' OR true --"))).rejects.toMatchObject({ code: 'CRM_RECEIPT_UNAVAILABLE' });
   });
   it('does not grant public/API access, receipt deletion or business-table writes', async () => {
     const privacy = (await owner.query(`SELECT rolname, has_schema_privilege(rolname, 'context_crm_private', 'USAGE') AS schema,

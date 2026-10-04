@@ -27,7 +27,7 @@ export function oauthFail(error = 'invalid_request', description = 'The authoriz
 }
 export function oauthScopes(value: unknown, fallback: readonly Scope[] = READ_SCOPES): Scope[] {
   if (value === undefined || value === null) return [...fallback];
-  if (typeof value !== 'string' || value.length > 100) oauthFail('invalid_scope', 'Only supported scopes are available.');
+  if (typeof value !== 'string' || value.length > SCOPES.join(' ').length) oauthFail('invalid_scope', 'Only supported scopes are available.');
   const scopes = value.split(' ');
   if (!scopes.length || scopes.length > SCOPES.length || new Set(scopes).size !== scopes.length || scopes.some(scope => !SCOPES.includes(scope as Scope))) {
     oauthFail('invalid_scope', 'Only supported scopes are available.');

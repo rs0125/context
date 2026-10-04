@@ -1,4 +1,4 @@
-/** Private RFQ undo images, bound to their employee, operation and exact request. */
+/** Private CRM undo images, bound to their employee, operation and exact request. */
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { HttpError } from '../errors';
@@ -8,7 +8,7 @@ const MAX_BYTES = 65_536;
 const contextSchema = z.object({
   employeeId: z.number().int().positive(), email: z.string().max(254).regex(/^[^\s@]+@wareongo\.com$/),
   memberId: z.string().uuid(), operationId: z.string().uuid(),
-  action: z.enum(['create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq']),
+  action: z.enum(['create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq', 'create_crm_note', 'update_crm_note', 'undo_crm_note']),
   requestHash: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
 export type CrmSnapshotContext = {
@@ -18,10 +18,11 @@ export function crmSnapshotContext(receipt: CrmWriteReceipt): CrmSnapshotContext
   return { employeeId: receipt.employee_id, email: receipt.employee_email, memberId: receipt.member_id,
     operationId: receipt.operation_id, action: receipt.action, requestHash: receipt.request_hash };
 }
-function unavailable(): never { throw new HttpError(503, 'CRM_SNAPSHOT_UNAVAILABLE', 'The saved RFQ change could not be verified.'); }
+function unavailable(): never { throw new HttpError(503, 'CRM_SNAPSHOT_UNAVAILABLE', 'The saved CRM change could not be verified.'); }
 function key(env: Partial<NodeJS.ProcessEnv>) {
   const secret = env.CONTEXT_KEY_ENCRYPTION_SECRET;
-  if (!secret || secret.length < 32) throw new HttpError(503, 'CRM_SNAPSHOT_CONFIGURATION', 'RFQ change encryption is not configured.');
+  if (!secret || secret.length < 32) throw new HttpError(503, 'CRM_SNAPSHOT_CONFIGURATION', 'CRM change encryption is not configured.');
+  // Retain the v1 purpose for existing RFQ ciphertext. Authenticated action binding separates notes.
   return Buffer.from(hkdfSync('sha256', secret, 'wareongo-context-engine', 'crm-rfq-snapshot-v1', 32));
 }
 function binding(context: CrmSnapshotContext) {
@@ -34,7 +35,7 @@ function record(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
-/** Callers validate the RFQ snapshot shape; this layer enforces encryption and size/binding. */
+/** Callers validate their CRM snapshot shape; this layer enforces encryption and size/binding. */
 export function encryptCrmSnapshot(value: Record<string, unknown>, context: CrmSnapshotContext, env: Partial<NodeJS.ProcessEnv> = process.env): string {
   const secret = key(env), aad = binding(context);
   try {

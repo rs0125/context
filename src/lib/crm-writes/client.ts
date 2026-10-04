@@ -7,6 +7,10 @@ import { RFQ_DETAIL_FIELDS, rfqLiveRecordSchema, type RfqLiveRecord } from './ch
 
 export function crmWriteConfiguration(env: Partial<NodeJS.ProcessEnv> = process.env) {
   if (env.CONTEXT_CRM_RFQ_WRITES_ENABLED !== 'true') throw new HttpError(503, 'CRM_WRITES_DISABLED', 'RFQ creation is not enabled.');
+  return crmWriteConnectionConfiguration(env);
+}
+/** Shared dedicated credential only; each action family applies its own feature gate. */
+export function crmWriteConnectionConfiguration(env: Partial<NodeJS.ProcessEnv> = process.env) {
   let url: URL;
   try { url = new URL(env.TWENTY_CRM_BASE_URL ?? ''); }
   catch { throw new HttpError(503, 'CRM_WRITE_CONFIGURATION', 'The CRM write connection is not configured.'); }
@@ -45,6 +49,29 @@ async function json(response: Response, limit: number): Promise<unknown> {
 const member = z.object({ id: z.string().uuid(), userEmail: z.string().email(), deletedAt: z.null(),
   name: z.object({ firstName: z.string().max(200), lastName: z.string().max(200) }) });
 
+/** Exact live member verification shared by independently gated CRM action families. */
+export async function verifyCrmCreator(principal: Principal, signal: AbortSignal,
+  env: Partial<NodeJS.ProcessEnv> = process.env, fetcher: typeof fetch = fetch): Promise<CrmCreator> {
+  const linked = z.string().uuid().safeParse(principal.twentyUserId);
+  if (!linked.success) throw new HttpError(403, 'CRM_IDENTITY_UNAVAILABLE', 'A current linked CRM member is required.');
+  const memberId = linked.data.toLowerCase();
+  try {
+    const { origin, key } = crmWriteConnectionConfiguration(env);
+    const query = new URLSearchParams({ limit: '1', depth: '0', filter: `id[eq]:"${memberId}",deletedAt[is]:NULL` });
+    const response = await fetcher(new URL(`/rest/workspaceMembers?${query}`, origin), { method: 'GET', redirect: 'error', cache: 'no-store',
+      signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]), headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' } });
+    if (!response.ok) { await response.body?.cancel(); throw new Error(); }
+    const page = z.object({ data: z.object({ workspaceMembers: z.array(member).length(1) }), pageInfo: z.object({ hasNextPage: z.literal(false) }) }).parse(await json(response, 64_000));
+    const current = page.data.workspaceMembers[0];
+    if (current.id.toLowerCase() !== memberId || current.userEmail.toLowerCase() !== principal.email.toLowerCase()) throw new Error();
+    const name = `${current.name.firstName} ${current.name.lastName}`.trim();
+    if (!name) throw new Error();
+    return { id: memberId, name };
+  } catch {
+    throw new HttpError(403, 'CRM_IDENTITY_UNAVAILABLE', 'The employee could not be uniquely verified as a current CRM member.');
+  }
+}
+
 export class CrmRfqClient {
   constructor(private readonly env: Partial<NodeJS.ProcessEnv> = process.env, private readonly fetcher: typeof fetch = fetch) {}
   private request(path: string, method: 'GET' | 'POST' | 'PATCH' | 'DELETE', signal: AbortSignal, body?: unknown) {
@@ -56,24 +83,8 @@ export class CrmRfqClient {
     });
   }
   async creator(principal: Principal, signal: AbortSignal): Promise<CrmCreator> {
-    const linked = z.string().uuid().safeParse(principal.twentyUserId);
-    if (!linked.success) throw new HttpError(403, 'CRM_IDENTITY_UNAVAILABLE', 'A current linked CRM member is required.');
-    const memberId = linked.data.toLowerCase();
-    try {
-      // The roster pins an exact member. Unrelated members and workspace size
-      // must not affect attribution or force a scan of the entire directory.
-      const query = new URLSearchParams({ limit: '1', depth: '0', filter: `id[eq]:"${memberId}",deletedAt[is]:NULL` });
-      const response = await this.request(`/rest/workspaceMembers?${query}`, 'GET', signal);
-      if (!response.ok) { await response.body?.cancel(); throw new Error(); }
-      const page = z.object({ data: z.object({ workspaceMembers: z.array(member).length(1) }), pageInfo: z.object({ hasNextPage: z.literal(false) }) }).parse(await json(response, 64_000));
-      const current = page.data.workspaceMembers[0];
-      if (current.id.toLowerCase() !== memberId || current.userEmail.toLowerCase() !== principal.email.toLowerCase()) throw new Error();
-      const name = `${current.name.firstName} ${current.name.lastName}`.trim();
-      if (!name) throw new Error();
-      return { id: memberId, name };
-    } catch {
-      throw new HttpError(403, 'CRM_IDENTITY_UNAVAILABLE', 'The employee could not be uniquely verified as a current CRM member.');
-    }
+    crmWriteConfiguration(this.env);
+    return verifyCrmCreator(principal, signal, this.env, this.fetcher);
   }
   async create(payload: Record<string, unknown>, signal: AbortSignal): Promise<{ outcome: 'created'; id: string; record?: RfqLiveRecord } | { outcome: 'rejected' | 'outcome_unknown' }> {
     try {

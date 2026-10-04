@@ -10,9 +10,11 @@ import { EXPECTED_RUNTIME_POLICY, RUNTIME_ROLE } from './runtime-policy.mjs';
 // Staged by default. Private undo snapshots are encrypted by the application before storage.
 const SCHEMA = 'context_crm_private';
 const TABLE = `${SCHEMA}.write_operations`;
-const MARKER = 'context-crm-write-schema-v2';
+const MARKER = 'context-crm-write-schema-v3';
+const PREVIOUS_MARKER = 'context-crm-write-schema-v2';
 const LEGACY_MARKER = 'context-crm-write-schema-v1';
-const TABLE_MARKER = 'context-crm-write-receipts-v2:';
+const TABLE_MARKER = 'context-crm-write-receipts-v3:';
+const PREVIOUS_TABLE_MARKER = 'context-crm-write-receipts-v2:';
 const LEGACY_TABLE_MARKER = 'context-crm-write-receipts-v1:';
 const LEGACY_COLUMNS = [['employee_id', 'integer'], ['employee_email', 'text'], ['operation_id', 'uuid'], ['member_id', 'uuid'],
   ['action', 'text'], ['request_hash', 'text'], ['state', 'text'], ['resource_id', 'uuid'],
@@ -28,7 +30,7 @@ export const CRM_WRITE_TABLE_SQL = `CREATE TABLE ${TABLE} (
   PRIMARY KEY (employee_id, operation_id),
   CONSTRAINT write_operations_employee_check CHECK (employee_id > 0),
   CONSTRAINT write_operations_email_check CHECK (employee_email = lower(employee_email) AND char_length(employee_email) <= 254 AND employee_email ~ '^[^[:space:]@]+@wareongo[.]com$'),
-  CONSTRAINT write_operations_action_check CHECK (action IN ('create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq')),
+  CONSTRAINT write_operations_action_check CHECK (action IN ('create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq', 'create_crm_note', 'update_crm_note', 'undo_crm_note')),
   CONSTRAINT write_operations_hash_check CHECK (request_hash ~ '^[a-f0-9]{64}$'),
   CONSTRAINT write_operations_state_check CHECK (state IN ('dispatching', 'created', 'updated', 'undone', 'unknown', 'rejected')),
   CONSTRAINT write_operations_result_check CHECK ((state IN ('created', 'updated', 'undone')) = (resource_id IS NOT NULL))
@@ -71,9 +73,9 @@ export async function migrateCrmWrites(client) {
     const schema = (await client.query(`SELECT n.oid, n.nspowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) AS owned,
       obj_description(n.oid, 'pg_namespace') AS marker FROM pg_namespace n WHERE n.nspname = $1`, [SCHEMA])).rows[0];
     if (schema) {
-      if (!schema.owned || ![MARKER, LEGACY_MARKER].includes(schema.marker)) fail('CRM_SCHEMA_COLLISION');
+      if (!schema.owned || ![MARKER, PREVIOUS_MARKER, LEGACY_MARKER].includes(schema.marker)) fail('CRM_SCHEMA_COLLISION');
       const legacy = schema.marker === LEGACY_MARKER;
-      const tableMarker = legacy ? LEGACY_TABLE_MARKER : TABLE_MARKER;
+      const tableMarker = legacy ? LEGACY_TABLE_MARKER : schema.marker === PREVIOUS_MARKER ? PREVIOUS_TABLE_MARKER : TABLE_MARKER;
       const extra = (await client.query(`SELECT
         (SELECT count(*)::integer FROM pg_class WHERE relnamespace = $1 AND relname NOT IN ('write_operations', 'write_operations_pkey')) AS relations,
         (SELECT count(*)::integer FROM pg_proc WHERE pronamespace = $1) AS routines`, [schema.oid])).rows[0];
@@ -87,11 +89,17 @@ export async function migrateCrmWrites(client) {
         await client.query(`ALTER TABLE ${TABLE}
           ADD COLUMN encrypted_snapshot text,
           DROP CONSTRAINT write_operations_action_check,
-          ADD CONSTRAINT write_operations_action_check CHECK (action IN ('create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq')),
+          ADD CONSTRAINT write_operations_action_check CHECK (action IN ('create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq', 'create_crm_note', 'update_crm_note', 'undo_crm_note')),
           DROP CONSTRAINT write_operations_state_check,
           ADD CONSTRAINT write_operations_state_check CHECK (state IN ('dispatching', 'created', 'updated', 'undone', 'unknown', 'rejected')),
           DROP CONSTRAINT write_operations_result_check,
           ADD CONSTRAINT write_operations_result_check CHECK ((state IN ('created', 'updated', 'undone')) = (resource_id IS NOT NULL))`);
+      } else if (schema.marker === PREVIOUS_MARKER) {
+        await client.query(`ALTER TABLE ${TABLE}
+          DROP CONSTRAINT write_operations_action_check,
+          ADD CONSTRAINT write_operations_action_check CHECK (action IN ('create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq', 'create_crm_note', 'update_crm_note', 'undo_crm_note'))`);
+      }
+      if (schema.marker !== MARKER) {
         const upgraded = await inspect(client);
         await client.query(`COMMENT ON TABLE ${TABLE} IS '${TABLE_MARKER}${upgraded.signature}'`);
         await client.query(`COMMENT ON SCHEMA ${SCHEMA} IS '${MARKER}'`);
