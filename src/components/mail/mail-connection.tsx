@@ -16,6 +16,7 @@ const errors: Record<string, string> = {
   disconnect_pending: 'Ramesh has stopped using this mailbox. Finish disconnecting from Google below before reconnecting.',
   cleanup_required: 'Google may still have granted this app access, but Ramesh could not safely finish cleanup. Open Manage Google account permissions below and remove this app’s access before retrying. This can also disconnect other features sharing the Google app.',
   denied: 'Connect the same authorized @wareongo.com account you used to sign in. If you approved Gmail access for a different account, use Manage Google account permissions below to review and remove this app’s access in that account.',
+  origin: 'This connection request could not be verified. Reload this page and try again. If you opened it inside WhatsApp, use Chrome or Safari.',
   expired: 'The connection link or sign-in session expired. Sign in and try again.',
   unavailable: 'Gmail connection is temporarily unavailable. Try again shortly. If you already approved Google access but could not connect, review this app’s access using Manage Google account permissions below and remove any unwanted grant.',
 };

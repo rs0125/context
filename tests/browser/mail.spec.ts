@@ -5,6 +5,72 @@ const connected = {
   connection: { connected: true, status: 'active', accountEmail: 'employee@wareongo.com', updatedAt: '2026-10-04T00:00:00.000Z' },
   availability: { enabled: true, configured: true, available: true },
 };
+
+test('native Gmail connect preserves Origin and permits the Google consent navigation', async ({ page, context, baseURL }) => {
+  // Use the real document headers and native form. Only API responses are mocked.
+  // Redirect-chain requests bypass page.route, so take the browser offline before
+  // submitting and observe the Google navigation without sending it to Google.
+  const origin = new URL(baseURL!).origin;
+  const googleUrl = 'https://accounts.google.com/o/oauth2/v2/auth?state=synthetic-state';
+  let postedOrigin: string | undefined;
+  const cspViolations: string[] = [];
+  page.on('console', message => {
+    if (message.type() === 'error' && message.text().includes('form-action')) cspViolations.push(message.text());
+  });
+  await page.route('**/api/mail/connection', route => route.fulfill({ json: {
+    ...connected, connection: { ...connected.connection, connected: false, status: 'disconnected', accountEmail: null },
+  } }));
+  await page.route('**/api/mail/google/connect', async route => {
+    expect(route.request().method()).toBe('POST');
+    postedOrigin = route.request().headers().origin;
+    await route.fulfill({ status: 303, headers: { Location: googleUrl, 'Referrer-Policy': 'no-referrer' }, body: '' });
+  });
+  const response = await page.goto('/mail');
+  expect(response?.headers()['referrer-policy']).toBe('same-origin');
+  expect(response?.headers()['content-security-policy']).toContain("form-action 'self' https://accounts.google.com");
+  await expect(page.getByRole('button', { name: 'Connect work Gmail' })).toBeVisible();
+  await context.setOffline(true);
+  const requested = page.waitForEvent('request', request => request.url() === googleUrl);
+  const failed = page.waitForEvent('requestfailed', request => request.url() === googleUrl);
+  await page.getByRole('button', { name: 'Connect work Gmail' }).click({ noWaitAfter: true });
+  const outbound = await requested, failure = await failed;
+  expect(postedOrigin).toBe(origin);
+  expect(outbound.method()).toBe('GET');
+  expect(outbound.isNavigationRequest()).toBe(true);
+  expect(outbound.frame()).toBe(page.mainFrame());
+  expect(outbound.headers().referer).toBeUndefined();
+  expect(failure.failure()?.errorText).toBe('net::ERR_INTERNET_DISCONNECTED');
+  expect(cspViolations).toEqual([]);
+});
+
+test('mail form redirects to unrelated hosts remain blocked', async ({ page, context }) => {
+  let externalRequested = false;
+  await page.route('**/api/mail/connection', route => route.fulfill({ json: connected }));
+  await page.route('**/api/mail/google/connect', route => route.fulfill({
+    status: 303, headers: { Location: 'https://unrelated.example.test/consent' }, body: '',
+  }));
+  page.on('request', request => {
+    if (new URL(request.url()).origin === 'https://unrelated.example.test') externalRequested = true;
+  });
+  await page.goto('/mail');
+  await page.evaluate(() => {
+    document.addEventListener('securitypolicyviolation', event => {
+      if (event.effectiveDirective === 'form-action') document.documentElement.dataset.blockedForm = 'true';
+    });
+  });
+  await context.setOffline(true);
+  await page.getByRole('button', { name: 'Reconnect Gmail' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-blocked-form', 'true');
+  expect(externalRequested).toBe(false);
+});
+
+test('browser request failures offer retry without claiming an account mismatch', async ({ page }) => {
+  await page.route('**/api/mail/connection', route => route.fulfill({ json: connected }));
+  await page.goto('/mail?error=origin');
+  await expect(page.getByText('This connection request could not be verified.', { exact: false })).toBeVisible();
+  await expect(page.getByText('Connect the same authorized @wareongo.com account', { exact: false })).toHaveCount(0);
+});
+
 test('mail setup signs in, explains draft-only behavior, and preserves a clear Gmail handoff', async ({ page }) => {
   await page.route('**/api/mail/connection', route => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'CONSOLE_UNAUTHENTICATED' } }) }));
   await page.goto('/mail');

@@ -237,10 +237,21 @@ verified in production on 4 October 2026, including restricted runtime grants.
 The v2 migration was applied and verified in production on 4 October 2026,
 including restricted runtime grants. The preflight confirmed zero connections
 and zero draft operations; the migration seeded neither.
-No connections, keys or credentials were seeded. Gmail remains disabled:
-configuring Google, setting the dedicated server secrets, granting the scope
-and connecting an employee are required before the tools can work. No live
-Google draft or send was used for release validation.
+Google client configuration, a dedicated token-encryption key and `mail:drafts`
+were enabled in production on 4 October 2026. Signed discovery and connection
+status passed through the deployed worker without creating drafts, sending
+messages or calling a model. Each employee must still complete Google consent.
+No employee connection was seeded by the rollout.
+
+The `/mail` document uses `Referrer-Policy: same-origin` so a native form POST
+retains the Origin header required by the existing CSRF check. Its CSP allows
+form navigation to the same origin and Google's exact `https://accounts.google.com`
+origin, including the OAuth redirect. Other pages retain the default policy;
+OAuth API redirects still use `no-referrer`. Never accept `Origin: null` to work
+around browser policy. Origin failures have their own retry message instead of
+being reported as a mismatched Google account. Browser regressions exercise the
+actual form, headers and redirect using synthetic API responses, with external
+navigation blocked offline so no Google request is sent.
 
 ## Validation and references
 

@@ -166,9 +166,9 @@ describe('per-employee Gmail OAuth flow', () => {
     expect(url.toString()).not.toContain(String(flow.verifier));
     expect(dependencies.fetch).not.toHaveBeenCalled();
   });
-  it.each([null, 'https://evil.example'])('rejects a connect without the exact Origin (%s)', async originHeader => {
+  it.each([null, 'null', 'https://evil.example'])('rejects a connect without the exact Origin (%s)', async originHeader => {
     const d = deps();
-    expectFailure(await handleGmailConnect(request('/api/mail/google/connect', 'POST', sessionCookie(), originHeader), d), 'denied', false);
+    expectFailure(await handleGmailConnect(request('/api/mail/google/connect', 'POST', sessionCookie(), originHeader), d), 'origin', false);
     expect(d.transaction).not.toHaveBeenCalled();
   });
   it('requires an active unrevoked console session before redirecting to Gmail authorization', async () => {

@@ -78,6 +78,7 @@ function failure(error: unknown, clear = false) {
         : error instanceof HttpError && error.code === 'GMAIL_MANUAL_CLEANUP_REQUIRED' ? 'cleanup_required'
         : error instanceof HttpError && ['GMAIL_DISCONNECT_PENDING', 'GMAIL_REVOCATION_PENDING'].includes(error.code) ? 'disconnect_pending'
         : error instanceof HttpError && error.code === 'GMAIL_CONNECTION_CHANGED' ? 'changed'
+          : error instanceof HttpError && error.code === 'CONSOLE_ORIGIN_DENIED' ? 'origin'
           : error instanceof HttpError && error.status === 403 ? 'denied'
             : error instanceof HttpError && [400, 401].includes(error.status) ? 'expired' : 'unavailable';
     const response = redirect(`${consoleOrigin()}/mail?error=${code}`);
