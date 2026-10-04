@@ -243,6 +243,11 @@ status passed through the deployed worker without creating drafts, sending
 messages or calling a model. Each employee must still complete Google consent.
 No employee connection was seeded by the rollout.
 
+After the server confirms an active connection, `/mail` shows only “Gmail
+connected”, “You can close this screen.” and a small disconnect action. Setup
+and recovery details remain visible when sign-in, reconnection or cleanup is
+required; a success query parameter alone never displays the connected screen.
+
 The `/mail` document uses `Referrer-Policy: same-origin` so a native form POST
 retains the Origin header required by the existing CSRF check. Its CSP allows
 form navigation to the same origin and Google's exact `https://accounts.google.com`

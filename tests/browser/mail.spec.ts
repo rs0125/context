@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { mkdir } from 'node:fs/promises';
 
 const connected = {
   employee: { email: 'employee@wareongo.com', name: 'Employee' },
@@ -45,7 +46,9 @@ test('native Gmail connect preserves Origin and permits the Google consent navig
 
 test('mail form redirects to unrelated hosts remain blocked', async ({ page, context }) => {
   let externalRequested = false;
-  await page.route('**/api/mail/connection', route => route.fulfill({ json: connected }));
+  await page.route('**/api/mail/connection', route => route.fulfill({ json: {
+    ...connected, connection: { ...connected.connection, connected: false, status: 'needs_reauth' },
+  } }));
   await page.route('**/api/mail/google/connect', route => route.fulfill({
     status: 303, headers: { Location: 'https://unrelated.example.test/consent' }, body: '',
   }));
@@ -71,7 +74,7 @@ test('browser request failures offer retry without claiming an account mismatch'
   await expect(page.getByText('Connect the same authorized @wareongo.com account', { exact: false })).toHaveCount(0);
 });
 
-test('mail setup signs in, explains draft-only behavior, and preserves a clear Gmail handoff', async ({ page }) => {
+test('mail setup signs in and shows a minimal success screen only after verifying the connection', async ({ page }) => {
   await page.route('**/api/mail/connection', route => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'CONSOLE_UNAUTHENTICATED' } }) }));
   await page.goto('/mail');
   await expect(page.getByRole('link', { name: 'Sign in with Google' })).toHaveAttribute('href', '/api/mail/login');
@@ -79,17 +82,22 @@ test('mail setup signs in, explains draft-only behavior, and preserves a clear G
   await expect(page.getByText('If Google sign-in is blocked inside WhatsApp', { exact: false })).toBeVisible();
   await page.goto('/mail?connected=1');
   await expect(page.getByRole('link', { name: 'Sign in with Google' })).toBeVisible();
-  await expect(page.getByText('Gmail connected. You can return to Ramesh on WhatsApp.')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Gmail connected', exact: true })).toHaveCount(0);
   await page.unroute('**/api/mail/connection');
   await page.route('**/api/mail/connection', route => route.fulfill({ json: connected }));
   await page.goto('/mail?connected=1');
-  await expect(page.getByRole('heading', { name: 'Gmail is connected' })).toBeVisible();
-  await expect(page.getByText('Google bundles managing drafts and sending email', { exact: false })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Reconnect Gmail' })).toBeEnabled();
-  await expect(page.getByText('Find prepared messages in Gmail’s Drafts folder.', { exact: false })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Gmail connected', exact: true })).toBeVisible();
+  await expect(page.getByText('You can close this screen.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Disconnect Gmail' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Reconnect Gmail' })).toHaveCount(0);
+  await expect(page.getByText('Google bundles managing drafts and sending email', { exact: false })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Your email drafts, ready to review.' })).toHaveCount(0);
   await expect(page).toHaveURL('/mail');
+  await mkdir('previews', { recursive: true });
+  await page.screenshot({ path: 'previews/gmail-connected-desktop.png', fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: 'previews/gmail-connected-mobile.png', fullPage: true });
 });
 
 test('disconnect stays usable when drafting is disabled and reports completed Google revocation', async ({ page }) => {

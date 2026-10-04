@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Brand, Notice, Spinner } from '@/components/console/ui';
+import { Icon } from '@/components/console/icons';
 
 type ConnectionState = {
   employee: { email: string; name: string };
@@ -29,7 +30,6 @@ export function MailConnection() {
   const [error, setError] = useState('');
   const [manualCleanupRequired, setManualCleanupRequired] = useState(false);
   const [message, setMessage] = useState('');
-  const [returnedFromGoogle, setReturnedFromGoogle] = useState(false);
   const load = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     try {
@@ -48,7 +48,6 @@ export function MailConnection() {
     const url = new URL(window.location.href);
     if (url.searchParams.get('error') === 'cleanup_required') setManualCleanupRequired(true);
     else if (url.searchParams.has('error')) setError(errors[url.searchParams.get('error') ?? ''] ?? errors.unavailable);
-    setReturnedFromGoogle(url.searchParams.get('connected') === '1');
     if (url.search) window.history.replaceState(window.history.state, '', '/mail');
     const controller = new AbortController();
     void load(controller.signal);
@@ -56,7 +55,7 @@ export function MailConnection() {
   }, [load]);
   async function disconnect() {
     if (busy) return;
-    setBusy(true); setError(''); setMessage(''); setReturnedFromGoogle(false);
+    setBusy(true); setError(''); setMessage('');
     try {
       const response = await fetch('/api/mail/connection', { method: 'POST', credentials: 'same-origin', cache: 'no-store' });
       if (response.status === 401 || response.status === 403) { setSignedOut(true); setState(null); return; }
@@ -72,6 +71,19 @@ export function MailConnection() {
   }
   const pending = state?.connection.status === 'revoking';
   const reconnectRequired = state?.connection.status === 'needs_reauth';
+  if (!loading && !signedOut && state?.connection.connected && state.connection.status === 'active'
+    && state.availability.available && !error && !manualCleanupRequired && !message) {
+    return <main id="main-content" className="mail-connected">
+      <section className="mail-connected-message" role="status">
+        <span className="mail-connected-check"><Icon name="check" size={26} /></span>
+        <h1>Gmail connected</h1>
+        <p>You can close this screen.</p>
+      </section>
+      <button className="text-button mail-connected-disconnect" type="button" onClick={() => void disconnect()} disabled={busy}>
+        {busy ? 'Disconnecting…' : 'Disconnect Gmail'}
+      </button>
+    </main>;
+  }
   return <div className="login-shell">
     <header className="login-header"><Brand /><a className="text-button" href="/">Context console</a></header>
     <main id="main-content" className="login-main">
@@ -84,7 +96,6 @@ export function MailConnection() {
       <section className="login-card" aria-labelledby="mail-heading">
         <p className="eyebrow">Your work mailbox</p>
         <h2 id="mail-heading">{pending ? 'Finish disconnecting Gmail' : reconnectRequired ? 'Reconnect Gmail' : state?.connection.connected ? 'Gmail is connected' : 'Connect Gmail'}</h2>
-        {returnedFromGoogle && !loading && state?.connection.connected && <Notice tone="info">Gmail connected. You can return to Ramesh on WhatsApp.</Notice>}
         {message && <Notice tone="info">{message}</Notice>}
         {manualCleanupRequired && <Notice>{errors.cleanup_required}</Notice>}
         {error && <Notice action={<button className="text-button" onClick={() => { setError(''); void load(); }}>Check again</button>}>{error}</Notice>}
