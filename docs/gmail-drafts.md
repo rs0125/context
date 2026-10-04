@@ -3,7 +3,7 @@
 Ramesh can save a plain-text draft or edit an existing app-created draft in the
 employee's Gmail mailbox when explicitly asked, in the same turn without a second
 `confirm CODE` step. The employee reviews and sends in Gmail. This implementation
-has no send, delete, attachment, inbox-search or arbitrary Google-request tool. It does not create a custom per-draft review page or deep link.
+has no send, delete, attachment, inbox-search or arbitrary Google-request tool.
 
 ## Tools and account connection
 
@@ -58,10 +58,21 @@ recipient headers may be shortened by whole entries and are explicitly marked
 `recipients_truncated`. An incomplete read must direct the employee to Gmail for
 the full content or recipient list.
 
-The success reply supplies the mailbox, subject and the fixed
-`https://mail.google.com/mail/#drafts` folder link. The employee must select the
-right Gmail account. It does not promise to open an individual draft. Google
-draft IDs are not treated as browser URLs.
+Fresh provider results can include `draft_url`, an account-specific link opening
+that draft's Gmail editor. The bot also provides the fixed
+`https://mail.google.com/mail/#drafts` folder fallback. This is an undocumented
+Gmail web UI convention, not a guaranteed REST API field or authorization token.
+Unknown ID formats omit the direct link instead of failing a successful write.
+
+For recognized saved drafts, encode `f:<decimal thread ID>+msg-a:<draft ID>` using
+the Gmail URL alphabet. Convert the fresh REST `threadId` from hex with `BigInt`;
+never substitute `messageId` or use lossy JavaScript numbers. This matches the
+[InboxSDK encoder](https://github.com/InboxSDK/InboxSDK/blob/main/src/platform-implementation-js/dom-driver/gmail/gmail-driver/encodeDraftUrlId.ts).
+The link selects the mailbox with `authuser`, not a fixed browser account slot
+such as `/u/0/`. Historical journal-only replay omits a direct link, because its
+current thread has not been read. Fresh reads and successful updates can supply
+a new link without an extra provider request. Stored draft IDs, employee grants
+and operation markers remain the only write authority; the URL is navigation.
 
 ## Sending boundary
 
@@ -198,6 +209,20 @@ matching sender can be edited. HTML/multipart alternatives, attachments, Bcc,
 reply metadata, custom semantic headers, unsupported addresses and truncated
 reads fail closed. Benign provider transport/authentication headers do not make
 a plain-text draft uneditable. Google IDs are opaque version tokens, not URLs.
+
+Gmail can replace the submitted RFC `Message-ID` header when saving a draft.
+That header is not the API `message.id` used for version checks. Editing and
+update recovery bind the exact provider draft ID recorded at creation, the
+current employee/Google account and `X-Wareongo-Operation-ID`; update recovery
+also requires its exact `X-Wareongo-Update-ID`. A rewritten RFC header does not
+make an otherwise valid owned draft uneditable. There is no fallback to an
+arbitrary mailbox draft or a sender/subject match. Creation reconciliation still
+uses its conservative Message-ID search and can remain unresolved if Gmail
+rewrites that header; a missing search result never authorizes another creation.
+
+The normalized-provider regression exercises the actual HTTP parser through
+read, same-draft update, reread and lost-response recovery using synthetic mail
+content and Gmail-assigned RFC headers. Tests must not only stub `editable: true`.
 
 Google documents a stable draft ID whose contained message ID changes whenever
 content is replaced. The [draft update API](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.drafts/update)

@@ -6,7 +6,8 @@ import { requireScope, resolvePrincipal, type KeyRegistration } from './auth';
 import { consoleOrigin } from './console-auth';
 import { withGmailWriteTransaction, withReadOnlyTransaction } from './db';
 import { HttpError } from './errors';
-import { GmailClient, GmailClientError, GMAIL_COMPOSE_SCOPE, operationMessageId } from './gmail-client';
+import { GmailClient, GmailClientError, GMAIL_COMPOSE_SCOPE } from './gmail-client';
+import { gmailDraftLink } from './gmail-draft-link';
 import { gmailAvailability, refreshGmailAccessToken } from './gmail-oauth';
 import {
   getGmailDraftUpdateOperation, claimGmailDraftUpdateOperation, finishGmailDraftUpdateOperation,
@@ -56,17 +57,23 @@ export const emailDraftReadOutputSchema = z.object({
   recipients_truncated: z.boolean(), body: z.string().nullable(),
   body_format: z.enum(['text', 'unsupported']), body_truncated: z.boolean(),
   message_id: z.string().regex(/^[A-Za-z0-9_-]{1,256}$/), editable: z.boolean(),
+  draft_url: z.string().url().max(2048).optional().describe('Best-effort Gmail web editor link. The undocumented UI format may change; the Drafts folder remains the fallback.'),
   content_guidance: z.string(),
 }).strict();
 export const emailDraftOutputSchema = z.object({
   operation_id: z.string().uuid(), outcome: z.enum(['created', 'updated', 'replayed', 'not_dispatched', 'rejected', 'outcome_unknown']),
   code: z.string(), message: z.string(), data: z.object({
     draft_ref: z.string().uuid(), mailbox: z.string().email(), subject, status: z.literal('draft'), provider: z.literal('gmail'),
+    draft_url: z.string().url().max(2048).optional(),
   }).strict().optional(),
   recovery: z.object({ action: z.enum(['connect_gmail', 'reconnect_gmail', 'finish_gmail_disconnect', 'check_gmail_connection']) }).strict().optional(),
   retry_at: z.string().datetime().optional(),
 }).strict();
 export type EmailDraftResult = z.infer<typeof emailDraftOutputSchema>;
+function draftLinkData(mailbox: string, draft?: { id: string; threadId: string | null }) {
+  const link = draft && gmailDraftLink(mailbox, draft);
+  return link ? { draft_url: link } : {};
+}
 export type GmailToolDependencies = {
   readTransaction: typeof withReadOnlyTransaction;
   writeTransaction: typeof withGmailWriteTransaction;
@@ -239,8 +246,11 @@ export async function readEmailDraft(args: unknown, key: KeyRegistration, signal
     return boundedDraftRead(emailDraftReadOutputSchema.parse({ draft_ref: operation.operationId, mailbox: owner.employeeEmail,
       provider: 'gmail', status: 'draft', subject: draft.subject, to: draft.to, cc: draft.cc, bcc: draft.bcc,
       recipients_truncated: false, body: draft.body, message_id: draft.messageId,
+      ...draftLinkData(owner.employeeEmail, draft),
+      // Gmail may replace the submitted RFC Message-ID. Ownership is bound to
+      // the stored provider draft ID, this mailbox and our operation marker.
       editable: draft.editable === true && draft.from?.toLowerCase() === owner.employeeEmail
-        && draft.operationId === operation.operationId && draft.internetMessageId === operationMessageId(operation.operationId),
+        && draft.id === operation.draftId && draft.operationId === operation.operationId,
       // Retrieval timing belongs in the API envelope's meta.generatedAt. Keep data
       // stable so generic delivery reauthorization can compare actual draft content.
       body_format: draft.bodyFormat, body_truncated: draft.bodyTruncated,
@@ -284,9 +294,9 @@ export async function executeEmailDraft(args: unknown, key: KeyRegistration, sig
       if (!prior || prior.state === 'retryable') ctx.checkedConnection(connected, owner, frozen);
       return { owner, connected, prior };
     });
-    const receipt = (replayed: boolean): EmailDraftResult => ({ operation_id: operationId, outcome: replayed ? 'replayed' : 'created',
+    const receipt = (replayed: boolean, draft?: { id: string; threadId: string | null }): EmailDraftResult => ({ operation_id: operationId, outcome: replayed ? 'replayed' : 'created',
       code: 'GMAIL_DRAFT_SAVED', message: replayed ? 'Recovered the original draft-creation receipt. Current Gmail status was not checked; no additional draft was created.' : 'Gmail confirmed the draft was saved. It was not sent.',
-      data: { draft_ref: operationId, mailbox: owner.employeeEmail, subject: input.subject, status: 'draft', provider: 'gmail' } });
+      data: { draft_ref: operationId, mailbox: owner.employeeEmail, subject: input.subject, status: 'draft', provider: 'gmail', ...draftLinkData(owner.employeeEmail, draft) } });
     const rejected = () => result('rejected', 'GMAIL_DRAFT_REJECTED', 'This operation was rejected. It will not be dispatched again.');
     const delayed = (retryAt: string | null, code = 'GMAIL_RETRY_LATER') => {
       const seconds = Math.max(1, Math.ceil(((retryAt ? Date.parse(retryAt) : Date.now() + 1000) - Date.now()) / 1000));
@@ -350,7 +360,7 @@ export async function executeEmailDraft(args: unknown, key: KeyRegistration, sig
       draft = lookup.draft;
     }
     const saved = await finish({ state: 'created', draftId: draft.id, messageId: draft.messageId });
-    return saved.state === 'created' ? receipt(!claimed) : uncertain();
+    return saved.state === 'created' ? receipt(!claimed, draft) : uncertain();
   } catch (error) {
     if (error instanceof HttpError && error.code === 'GMAIL_OPERATION_CONFLICT')
       return result('rejected', error.code, 'This operation UUID already belongs to different draft content. Do not overwrite or automatically replace it.');
@@ -399,9 +409,9 @@ export async function executeEmailDraftUpdate(args: unknown, key: KeyRegistratio
         throw new HttpError(404, 'GMAIL_DRAFT_UNAVAILABLE', 'No accessible application-created draft exists for this reference.');
       return { owner, connected, prior, original };
     });
-    const receipt = (operation: GmailDraftUpdateOperation, replayed: boolean): EmailDraftResult => operation.state === 'updated'
+    const receipt = (operation: GmailDraftUpdateOperation, replayed: boolean, draft?: { id: string; threadId: string | null }): EmailDraftResult => operation.state === 'updated'
       ? { ...result(replayed ? 'replayed' : 'updated', 'GMAIL_DRAFT_UPDATED', 'The existing Gmail draft was updated. This is a saved operation receipt, not a current read. Nothing was sent.'),
-        data: { draft_ref: draftRef, mailbox: owner.employeeEmail, subject: input.subject, status: 'draft', provider: 'gmail' } }
+        data: { draft_ref: draftRef, mailbox: owner.employeeEmail, subject: input.subject, status: 'draft', provider: 'gmail', ...draftLinkData(owner.employeeEmail, draft) } }
       : operation.state === 'rejected' ? result('rejected', operation.reason ?? 'GMAIL_UPDATE_REJECTED', 'This update was not applied. Read the draft again before preparing another edit.') : uncertain();
     const finish = async (outcome: GmailDraftUpdateOutcome) => {
       // Persist a dispatched outcome even after request cancellation. Do not
@@ -416,9 +426,9 @@ export async function executeEmailDraftUpdate(args: unknown, key: KeyRegistratio
       mayHaveUpdated = true;
       await ctx.connection(connected);
       const current = await deps.gmail.getDraft(accessToken, original.draftId!, signal);
-      if (current.updateOperationId !== operationId || current.operationId !== draftRef
-        || current.internetMessageId !== operationMessageId(draftRef)) { await ctx.connection(connected); return uncertain(); }
-      return receipt(await finish({ state: 'updated', messageId: current.messageId }), true);
+      if (current.id !== original.draftId || current.updateOperationId !== operationId || current.operationId !== draftRef)
+        { await ctx.connection(connected); return uncertain(); }
+      return receipt(await finish({ state: 'updated', messageId: current.messageId }), true, current);
     };
     if (prior) return await recover();
     // Ambiguous COMMIT must never authorize a second PUT. Set uncertainty before
@@ -441,7 +451,7 @@ export async function executeEmailDraftUpdate(args: unknown, key: KeyRegistratio
       if (current.messageId !== input.expected_message_id)
         throw new HttpError(409, 'GMAIL_DRAFT_CHANGED', 'The draft changed since it was read. Read it again and preserve the latest content before editing.');
       if (current.editable !== true || current.from?.toLowerCase() !== owner.employeeEmail
-        || current.operationId !== draftRef || current.internetMessageId !== operationMessageId(draftRef))
+        || current.id !== original.draftId || current.operationId !== draftRef)
         throw new HttpError(409, 'GMAIL_DRAFT_NOT_EDITABLE', 'This draft has unsupported or incomplete content. Edit it in Gmail; attachments, HTML, Bcc and reply metadata are not replaced.');
       await ctx.connection(connected);
       ctx.enabled();
@@ -449,7 +459,7 @@ export async function executeEmailDraftUpdate(args: unknown, key: KeyRegistratio
       const updated = await updateDeps.gmail.updateDraft(accessToken, original.draftId!,
         { ...content, from: owner.employeeEmail, operationId: draftRef, updateOperationId: operationId }, signal);
       if (updated.id !== original.draftId) return uncertain();
-      return receipt(await finish({ state: 'updated', messageId: updated.messageId }), false);
+      return receipt(await finish({ state: 'updated', messageId: updated.messageId }), false, updated);
     } catch (error) {
       const uncertainDispatch = dispatched && (!(error instanceof GmailClientError) || error.operationMayHaveSucceeded);
       const code = error instanceof HttpError || error instanceof GmailClientError ? error.code : 'GMAIL_UPDATE_FAILED';

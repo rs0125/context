@@ -3,7 +3,7 @@ import type { PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 import type { KeyRegistration, Principal } from '../src/lib/auth';
 import { HttpError } from '../src/lib/errors';
-import { GmailClientError, GMAIL_COMPOSE_SCOPE, operationMessageId, type GmailDraft } from '../src/lib/gmail-client';
+import { GmailClient, GmailClientError, GMAIL_COMPOSE_SCOPE, operationMessageId, type GmailDraft } from '../src/lib/gmail-client';
 import { encryptGmailSecret, type GmailConnection, type GmailDraftUpdateOperation } from '../src/lib/gmail-storage';
 vi.mock('../src/lib/gmail-oauth', () => ({ gmailAvailability: () => ({ available: true }), refreshGmailAccessToken: vi.fn() }));
 import { executeEmailDraftUpdate, readEmailDraft, type GmailUpdateToolDependencies } from '../src/lib/gmail-tools';
@@ -16,13 +16,13 @@ const key: KeyRegistration = { id: 'test', ...owner, scopes: ['mail:drafts'], ha
 const now = '2026-10-04T09:00:00.000Z';
 const input = { operation_id: operationId, connection_id: connectionId, connection_version: 1, draft_ref: draftRef,
   expected_message_id: 'original_message', to: ['recipient@example.com'], cc: [], subject: 'Updated subject', body: 'Updated full body' };
-function fixture() {
+function fixture(draftId = 'draft1') {
   const env: NodeJS.ProcessEnv = { NODE_ENV: 'test', CONTEXT_GMAIL_ENCRYPTION_KEY: Buffer.alloc(32, 29).toString('base64url') };
   const connected: GmailConnection = { ...owner, id: connectionId, version: 1, status: 'active', googleSub: 'google-sub', accountEmail: owner.employeeEmail,
     encryptedRefreshToken: encryptGmailSecret('synthetic-token', { purpose: 'refresh_token', employeeId: 7, id: connectionId }, env),
     grantedScopes: [GMAIL_COMPOSE_SCOPE], createdAt: now, updatedAt: now };
   const state = { connected, revoked: false, originalPresent: true, ambiguousCommit: false, committed: false };
-  const current: GmailDraft = { id: 'draft1', messageId: input.expected_message_id, threadId: null, operationId: draftRef,
+  const current: GmailDraft = { id: draftId, messageId: input.expected_message_id, threadId: null, operationId: draftRef,
     internetMessageId: operationMessageId(draftRef), from: owner.employeeEmail, editable: true, subject: 'Original', to: input.to, cc: [], bcc: [],
     body: 'Original body', bodyFormat: 'text', bodyTruncated: false, updateOperationId: null };
   const operations = new Map<string, GmailDraftUpdateOperation>();
@@ -31,9 +31,9 @@ function fixture() {
   const gmail: GmailUpdateToolDependencies['gmail'] = {
     createDraft: vi.fn(async () => { throw new Error('Never create a replacement'); }),
     findDraftByOperation: vi.fn(async () => { throw new Error('Never search unrelated draft targets'); }),
-    getDraft: vi.fn(async (_token, id) => { expect(id).toBe('draft1'); return { ...current }; }),
+    getDraft: vi.fn(async (_token, id) => { expect(id).toBe(draftId); return { ...current }; }),
     updateDraft: vi.fn(async (_token, id, content) => {
-      expect(state.committed).toBe(true); expect(id).toBe('draft1'); expect(content.operationId).toBe(draftRef);
+      expect(state.committed).toBe(true); expect(id).toBe(draftId); expect(content.operationId).toBe(draftRef);
       Object.assign(current, { messageId: 'updated_message', updateOperationId: content.updateOperationId });
       return { ...current };
     }),
@@ -51,7 +51,7 @@ function fixture() {
     references: vi.fn(async () => ({ items: [], nextCursor: null })),
     operation: vi.fn<GmailUpdateToolDependencies['operation']>(async (_db, requestedOwner, ref) => state.originalPresent && requestedOwner.employeeId === owner.employeeId && ref === draftRef
       ? { ...owner, operationId: draftRef, connectionId, connectionVersion: 1, requestHash: 'a'.repeat(64), googleSub: 'google-sub', retryAt: null,
-        state: 'created', draftId: 'draft1', messageId: 'original_message', reason: null, createdAt: now, updatedAt: now } : null),
+        state: 'created', draftId, messageId: 'original_message', reason: null, createdAt: now, updatedAt: now } : null),
     updateOperation: vi.fn(async (_db, _owner, id) => operations.get(id) ? { ...operations.get(id)! } : null),
     updateClaim: vi.fn(async (_db, _owner, args) => {
       const previous = operations.get(args.operationId);
@@ -72,7 +72,134 @@ function fixture() {
     run: (args: unknown = input, signal = new AbortController().signal) => executeEmailDraftUpdate(args, key, signal, revalidate, deps),
     read: () => readEmailDraft({ draft_ref: draftRef }, key, new AbortController().signal, revalidate, deps) };
 }
+
+/** Google can assign its own RFC Message-ID while preserving the stable draft ID
+ * and our custom operation markers. Exercise the real HTTP parser rather than
+ * injecting editable=true into the service. All content here is synthetic. */
+function providerFixture() {
+  const ctx = fixture();
+  const originalBody = 'Hello,\r\n\r\nCould you share the next meeting time?\r\n\r\nThanks!';
+  const provider = {
+    losePutResponse: false,
+    draft: { id: 'draft1', message: {
+      id: input.expected_message_id, threadId: 'synthetic_thread', labelIds: ['DRAFT'],
+      payload: { partId: '', mimeType: 'text/plain', filename: '',
+        headers: [
+          { name: 'Received', value: 'by synthetic.google.test with SMTP id synthetic' },
+          { name: 'X-Received', value: 'by synthetic.google.test with SMTP id synthetic' },
+          { name: 'From', value: owner.employeeEmail },
+          { name: 'To', value: input.to.join(', ') },
+          { name: 'Subject', value: 'Next meeting' },
+          { name: 'Message-ID', value: '<synthetic-provider-original@mail.gmail.com>' },
+          { name: 'X-Wareongo-Operation-ID', value: draftRef },
+          { name: 'MIME-Version', value: '1.0' },
+          { name: 'Content-Type', value: 'text/plain; charset="UTF-8"' },
+          { name: 'Content-Transfer-Encoding', value: 'base64' },
+        ],
+        body: { size: Buffer.byteLength(originalBody), data: Buffer.from(originalBody).toString('base64url') },
+      },
+    } },
+  };
+  const fetch = vi.fn<typeof globalThis.fetch>(async (url, options) => {
+    expect(new URL(String(url)).origin).toBe('https://gmail.googleapis.com');
+    expect(new URL(String(url)).pathname).toBe('/gmail/v1/users/me/drafts/draft1');
+    if (options?.method === 'GET') {
+      expect(new URL(String(url)).searchParams.get('format')).toBe('full');
+      return Response.json(provider.draft);
+    }
+    expect(options?.method).toBe('PUT');
+    expect(ctx.state.committed).toBe(true);
+    const raw = Buffer.from(JSON.parse(String(options?.body)).message.raw, 'base64url').toString('utf8');
+    const [rawHeaders, rawBody] = raw.split('\r\n\r\n');
+    const headers = rawHeaders.replace(/\r\n[ \t]+/g, ' ').split('\r\n').map(line => {
+      const colon = line.indexOf(':');
+      return { name: line.slice(0, colon), value: line.slice(colon + 1).trim() };
+    });
+    expect(headers).toContainEqual({ name: 'X-Wareongo-Operation-ID', value: draftRef });
+    expect(headers).toContainEqual({ name: 'X-Wareongo-Update-ID', value: operationId });
+    const body = Buffer.from(rawBody.replace(/\s/g, ''), 'base64');
+    // Provider normalization replaces the RFC Message-ID, not our custom marker.
+    provider.draft.message.id = 'updated_message';
+    provider.draft.message.payload.headers = headers.map(header => header.name.toLowerCase() === 'message-id'
+      ? { ...header, value: '<synthetic-provider-updated@mail.gmail.com>' } : header);
+    provider.draft.message.payload.body = { size: body.byteLength, data: body.toString('base64url') };
+    if (provider.losePutResponse) throw new Error('Synthetic connection dropped after provider saved the update');
+    return Response.json({ id: provider.draft.id, message: { id: provider.draft.message.id, threadId: provider.draft.message.threadId } });
+  });
+  ctx.deps.gmail = new GmailClient({ fetch });
+  return { ...ctx, provider, fetch, originalBody,
+    putCount: () => fetch.mock.calls.filter(([, options]) => options?.method === 'PUT').length };
+}
+
 describe('durable employee-owned Gmail draft replacement', () => {
+  it('links the actual current provider thread after an update instead of guessing from its new message ID', async () => {
+    const ctx = fixture('r-202');
+    ctx.current.threadId = 'abc123';
+    const read = await ctx.read();
+    const updated = await ctx.run();
+    expect(updated.outcome).toBe('updated');
+    expect(updated.data?.draft_url).toBe(read.draft_url);
+    expect(updated.data?.draft_url).toMatch(/^https:\/\/mail\.google\.com\/mail\/\?authuser=employee%40wareongo\.com#drafts\?compose=/);
+    expect((await ctx.run()).data?.draft_url).toBeUndefined();
+    expect(ctx.gmail.updateDraft).toHaveBeenCalledOnce();
+    expect(ctx.gmail.createDraft).not.toHaveBeenCalled();
+  });
+  it('reads, updates and rereads the same draft when Google replaces the RFC Message-ID', async () => {
+    const ctx = providerFixture();
+    expect(await ctx.read()).toMatchObject({ draft_ref: draftRef, message_id: input.expected_message_id,
+      body: ctx.originalBody, editable: true });
+    expect(await ctx.run()).toMatchObject({ outcome: 'updated', code: 'GMAIL_DRAFT_UPDATED', data: { draft_ref: draftRef } });
+    expect(await ctx.read()).toMatchObject({ draft_ref: draftRef, message_id: 'updated_message', editable: true,
+      to: input.to, cc: input.cc, subject: input.subject, body: input.body });
+    expect(await ctx.run()).toMatchObject({ outcome: 'replayed', data: { draft_ref: draftRef } });
+    expect(ctx.putCount()).toBe(1);
+    expect(ctx.deps.claim).not.toHaveBeenCalled();
+    expect(ctx.fetch.mock.calls.every(([, options]) => ['GET', 'PUT'].includes(String(options?.method)))).toBe(true);
+  });
+  it('recovers a saved update after a lost HTTP response and Google-assigned Message-ID without another PUT', async () => {
+    const ctx = providerFixture();
+    ctx.provider.losePutResponse = true;
+    expect(await ctx.run()).toMatchObject({ outcome: 'outcome_unknown' });
+    expect(ctx.operations.get(operationId)?.state).toBe('unknown');
+    ctx.state.connected.version++;
+    expect(await ctx.run()).toMatchObject({ outcome: 'replayed', code: 'GMAIL_DRAFT_UPDATED', data: { draft_ref: draftRef } });
+    expect(await ctx.read()).toMatchObject({ message_id: 'updated_message', editable: true, body: input.body });
+    expect(ctx.operations.get(operationId)).toMatchObject({ state: 'updated', messageId: 'updated_message' });
+    expect(ctx.putCount()).toBe(1);
+    expect(ctx.deps.claim).not.toHaveBeenCalled();
+  });
+  it.each(['wrong_draft', 'missing_marker', 'wrong_marker'] as const)('rejects provider %s before any PUT', async kind => {
+    const ctx = providerFixture();
+    if (kind === 'wrong_draft') ctx.provider.draft.id = 'unowned_draft';
+    else ctx.provider.draft.message.payload.headers = ctx.provider.draft.message.payload.headers.flatMap(header => {
+      if (header.name !== 'X-Wareongo-Operation-ID') return [header];
+      return kind === 'missing_marker' ? [] : [{ ...header, value: otherOperation }];
+    });
+    if (kind === 'wrong_draft') await expect(ctx.read()).rejects.toMatchObject({ code: 'GMAIL_RESPONSE_INVALID' });
+    else expect(await ctx.read()).toMatchObject({ editable: false });
+    expect(await ctx.run()).toMatchObject({ outcome: 'rejected',
+      code: kind === 'wrong_draft' ? 'GMAIL_RESPONSE_INVALID' : 'GMAIL_DRAFT_NOT_EDITABLE' });
+    expect(ctx.putCount()).toBe(0);
+    expect(ctx.fetch.mock.calls.every(([, options]) => options?.method === 'GET')).toBe(true);
+    expect(ctx.deps.claim).not.toHaveBeenCalled();
+  });
+  it.each(['missing_creation_marker', 'wrong_creation_marker', 'missing_update_marker', 'wrong_update_marker', 'wrong_draft'] as const)
+    ('does not recover an uncertain HTTP update from %s', async kind => {
+      const ctx = providerFixture(); ctx.provider.losePutResponse = true;
+      expect(await ctx.run()).toMatchObject({ outcome: 'outcome_unknown' });
+      if (kind === 'wrong_draft') ctx.provider.draft.id = 'unowned_draft';
+      else {
+        const marker = kind.includes('creation') ? 'X-Wareongo-Operation-ID' : 'X-Wareongo-Update-ID';
+        ctx.provider.draft.message.payload.headers = ctx.provider.draft.message.payload.headers.flatMap(header => {
+          if (header.name !== marker) return [header];
+          return kind.startsWith('missing') ? [] : [{ ...header, value: otherOperation }];
+        });
+      }
+      expect(await ctx.run()).toMatchObject({ outcome: 'outcome_unknown' });
+      expect(ctx.operations.get(operationId)?.state).toBe('unknown');
+      expect(ctx.putCount()).toBe(1);
+      expect(ctx.deps.claim).not.toHaveBeenCalled();
+    });
   it('checks the current revision, commits a claim, PUTs once, and preserves the original reference on replay', async () => {
     const ctx = fixture();
     expect(await ctx.read()).toMatchObject({ draft_ref: draftRef, message_id: input.expected_message_id, editable: true });

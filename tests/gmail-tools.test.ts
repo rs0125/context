@@ -107,6 +107,19 @@ function fixture() {
 
 describe('employee-bound Gmail draft tools', () => {
   afterEach(() => vi.useRealTimers());
+  it('returns a link from fresh provider thread metadata without another Google request, and omits it on journal-only replay', async () => {
+    const ctx = fixture();
+    const provider = { ...savedDraft, id: 'r-101', threadId: 'abc123', messageId: 'def456' };
+    ctx.gmail.createDraft.mockResolvedValue(provider);
+    ctx.gmail.getDraft.mockResolvedValue(provider);
+    const saved = await ctx.run();
+    expect(saved.outcome).toBe('created');
+    expect(saved.data?.draft_url).toMatch(/^https:\/\/mail\.google\.com\/mail\/\?authuser=employee%40wareongo\.com#drafts\?compose=/);
+    expect((await ctx.read()).draft_url).toBe(saved.data?.draft_url);
+    expect((await ctx.run()).data?.draft_url).toBeUndefined();
+    expect(ctx.gmail.createDraft).toHaveBeenCalledOnce();
+    expect(ctx.gmail.getDraft).toHaveBeenCalledOnce();
+  });
   it('returns a bounded connection receipt without exposing encrypted credentials or Gmail provider IDs', async () => {
     const ctx = fixture();
     expect(await ctx.status()).toEqual({ provider: 'gmail', connected: true, connection_status: 'active', mailbox: principal.email, connection_id: connectionId,
