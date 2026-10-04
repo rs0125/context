@@ -423,3 +423,86 @@ export async function finishGmailDraftOperation(client: PoolClient, owner: Gmail
   if (rows.length !== 1) return unavailable();
   return operation(rows[0], owner);
 }
+
+/** Separate journal: updates never replace the original creation reference. */
+export type GmailDraftUpdateOperation = GmailOwner & {
+  operationId: string; connectionId: string; connectionVersion: number; googleSub: string;
+  requestHash: string; draftRef: string; draftId: string; expectedMessageId: string;
+  state: 'dispatching' | 'updated' | 'unknown' | 'rejected'; messageId: string | null; reason: string | null;
+  createdAt: string; updatedAt: string;
+};
+export type GmailDraftUpdateClaim = GmailDraftClaim & { draftRef: string; draftId: string; expectedMessageId: string };
+export type GmailDraftUpdateOutcome = { state: 'updated'; messageId: string } | { state: 'unknown' | 'rejected'; reason: string };
+const UPDATES = 'context_gmail_private.draft_update_operations';
+const UPDATE_FIELDS = 'employee_id, employee_email, operation_id, connection_id, connection_version, google_sub, request_hash, draft_ref, draft_id, expected_message_id, state, message_id, reason, created_at, updated_at';
+function updateOperation(row: Row, owner: GmailOwner): GmailDraftUpdateOperation {
+  if (row.employee_id !== owner.employeeId || row.employee_email !== owner.employeeEmail
+    || !employeeId(row.connection_version) || typeof row.google_sub !== 'string' || !/^[A-Za-z0-9_-]{1,255}$/.test(row.google_sub)
+    || typeof row.request_hash !== 'string' || !HASH.test(row.request_hash)
+    || typeof row.draft_id !== 'string' || !PROVIDER_ID.test(row.draft_id)
+    || typeof row.expected_message_id !== 'string' || !PROVIDER_ID.test(row.expected_message_id)
+    || !['dispatching', 'updated', 'unknown', 'rejected'].includes(String(row.state))
+    || (row.state === 'updated' ? typeof row.message_id !== 'string' || !PROVIDER_ID.test(row.message_id) : row.message_id !== null)
+    || (row.reason !== null && (typeof row.reason !== 'string' || !REASON.test(row.reason)))) return unavailable();
+  return { ...owner, operationId: uuid(row.operation_id), connectionId: uuid(row.connection_id), connectionVersion: row.connection_version,
+    googleSub: row.google_sub, requestHash: row.request_hash, draftRef: uuid(row.draft_ref), draftId: row.draft_id,
+    expectedMessageId: row.expected_message_id, state: row.state as GmailDraftUpdateOperation['state'],
+    messageId: row.message_id as string | null, reason: row.reason as string | null,
+    createdAt: timestamp(row.created_at), updatedAt: timestamp(row.updated_at) };
+}
+async function readUpdateOperation(client: PoolClient, owner: GmailOwner, operationId: string) {
+  const { rows } = await client.query<Row>(`SELECT ${UPDATE_FIELDS} FROM ${UPDATES}
+    WHERE employee_id=$1 AND employee_email=$2 AND operation_id=$3 LIMIT 2`, [owner.employeeId, owner.employeeEmail, uuid(operationId)]);
+  if (rows.length > 1) return unavailable();
+  return rows[0] ? updateOperation(rows[0], owner) : null;
+}
+export async function getGmailDraftUpdateOperation(client: PoolClient, owner: GmailOwner, operationId: string) {
+  await assertGmailOwnerActive(client, owner);
+  return readUpdateOperation(client, owner, operationId);
+}
+/** Only a committed, fresh claim may issue PUT. Unknown claims are never reclaimed. */
+export async function claimGmailDraftUpdateOperation(client: PoolClient, owner: GmailOwner, input: GmailDraftUpdateClaim) {
+  const operationId = uuid(input.operationId), draftRef = uuid(input.draftRef), connectionId = uuid(input.connectionId);
+  if (!employeeId(input.connectionVersion) || !HASH.test(input.requestHash)
+    || !PROVIDER_ID.test(input.draftId) || !PROVIDER_ID.test(input.expectedMessageId)) return unavailable();
+  await lockOwner(client, owner);
+  const current = await readConnection(client, owner);
+  if (!current || current.status !== 'active' || !current.googleSub || current.id !== connectionId || current.version !== input.connectionVersion) return changed();
+  const original = await readOperation(client, owner, draftRef);
+  if (!original || original.state !== 'created' || original.draftId !== input.draftId
+    || original.connectionId !== current.id || original.googleSub !== current.googleSub)
+    throw new HttpError(404, 'GMAIL_DRAFT_UNAVAILABLE', 'No accessible application-created draft exists for this reference.');
+  const existing = await readUpdateOperation(client, owner, operationId);
+  if (existing) {
+    if (existing.requestHash !== input.requestHash || existing.draftRef !== draftRef || existing.draftId !== input.draftId
+      || existing.expectedMessageId !== input.expectedMessageId || existing.connectionId !== connectionId
+      || existing.connectionVersion !== input.connectionVersion || existing.googleSub !== current.googleSub)
+      throw new HttpError(409, 'GMAIL_OPERATION_CONFLICT', 'This update operation ID was already used for another request.');
+    return { claimed: false, operation: existing };
+  }
+  const pending = await client.query(`SELECT 1 FROM ${UPDATES} WHERE employee_id=$1 AND draft_ref=$2
+    AND state IN ('dispatching','unknown') LIMIT 1`, [owner.employeeId, draftRef]);
+  if (pending.rows.length) throw new HttpError(409, 'GMAIL_DRAFT_UPDATE_PENDING', 'An earlier update is unresolved. Recover that same operation or check this draft in Gmail before further edits.');
+  const { rows } = await client.query<Row>(`INSERT INTO ${UPDATES}
+    (employee_id,employee_email,operation_id,connection_id,connection_version,google_sub,request_hash,draft_ref,draft_id,expected_message_id,state)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'dispatching') RETURNING ${UPDATE_FIELDS}`,
+  [owner.employeeId, owner.employeeEmail, operationId, connectionId, input.connectionVersion, current.googleSub, input.requestHash, draftRef, input.draftId, input.expectedMessageId]);
+  if (rows.length !== 1) return unavailable();
+  return { claimed: true, operation: updateOperation(rows[0], owner) };
+}
+export async function finishGmailDraftUpdateOperation(client: PoolClient, owner: GmailOwner, operationId: string, input: GmailDraftUpdateOutcome) {
+  if (input.state === 'updated' ? !PROVIDER_ID.test(input.messageId)
+    : !['unknown', 'rejected'].includes(input.state) || !REASON.test(input.reason)) return unavailable();
+  // Record an already dispatched result even if employee access was revoked in
+  // flight. Disclosure separately requires fresh grant and connection checks.
+  await lockPrivateOwner(client, owner);
+  const existing = await readUpdateOperation(client, owner, operationId);
+  if (!existing) throw new HttpError(404, 'GMAIL_OPERATION_NOT_FOUND', 'This draft update operation was not found.');
+  if (existing.state !== 'dispatching' && !(existing.state === 'unknown' && input.state === 'updated')) return existing;
+  const { rows } = await client.query<Row>(`UPDATE ${UPDATES} SET state=$4,message_id=$5,reason=$6,updated_at=CURRENT_TIMESTAMP
+    WHERE employee_id=$1 AND employee_email=$2 AND operation_id=$3 AND state=$7 RETURNING ${UPDATE_FIELDS}`,
+  [owner.employeeId, owner.employeeEmail, uuid(operationId), input.state,
+    input.state === 'updated' ? input.messageId : null, input.state === 'updated' ? null : input.reason, existing.state]);
+  if (rows.length !== 1) return unavailable();
+  return updateOperation(rows[0], owner);
+}

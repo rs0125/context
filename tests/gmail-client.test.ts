@@ -57,7 +57,7 @@ describe('draft-only Gmail HTTP adapter', () => {
     expect(subjectWords.map(word => Buffer.from(word[1], 'base64').toString()).join('')).toBe(input.subject);
     expect(headerText.split('\r\n').every(line => line.length < 998)).toBe(true);
     expect(result).toMatchObject({ id: 'r-123', messageId: 'message123', operationId: null, subject: null, body: null, bodyFormat: 'unsupported' });
-    expect(Object.getOwnPropertyNames(GmailClient.prototype).sort()).toEqual(['constructor', 'createDraft', 'findDraftByOperation', 'getDraft']);
+    expect(Object.getOwnPropertyNames(GmailClient.prototype).sort()).toEqual(['constructor', 'createDraft', 'findDraftByOperation', 'getDraft', 'updateDraft']);
   });
 
   it('supports drafts whose recipients will be filled in Gmail', async () => {
@@ -279,5 +279,53 @@ describe('draft-only Gmail HTTP adapter', () => {
     const fetch = mockFetch(() => Response.json(responses.shift()));
     const client = new GmailClient({ fetch });
     for (let i = 0; i < 5; i++) await expect(client.getDraft(token, 'r-123')).rejects.toMatchObject({ code: 'GMAIL_RESPONSE_INVALID' });
+  });
+});
+
+describe('draft replacement boundary', () => {
+  const updateOperationId = '33333333-3333-4333-8333-333333333333';
+  const editableDraft = () => fullDraft({ headers: [
+    { name: 'From', value: input.from }, { name: 'To', value: input.to![0] },
+    { name: 'Subject', value: input.subject }, { name: 'Content-Type', value: 'text/plain; charset=UTF-8' },
+    { name: 'X-Wareongo-Operation-ID', value: operationId }, { name: 'Message-ID', value: internetMessageId },
+    { name: 'Received', value: 'by synthetic.google.test with SMTP id synthetic' },
+    { name: 'X-Google-Smtp-Source', value: 'synthetic-provider-metadata' },
+    { name: 'X-Received', value: 'by synthetic.google.test with SMTP id synthetic' },
+    { name: 'X-Gm-Message-State', value: 'synthetic-provider-metadata' },
+  ] });
+  it('PUTs exactly the same draft ID with original identity and a separate update marker', async () => {
+    const fetch = mockFetch(() => Response.json(draftIds));
+    await new GmailClient({ fetch }).updateDraft(token, draftIds.id, { ...input, updateOperationId });
+    expect(fetch.mock.calls[0][0]).toBe(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftIds.id}`);
+    expect(fetch.mock.calls[0][1]).toMatchObject({ method: 'PUT', redirect: 'error' });
+    const mime = Buffer.from(JSON.parse(fetch.mock.calls[0][1]!.body as string).message.raw, 'base64url').toString();
+    expect(mime).toContain(`X-Wareongo-Operation-ID: ${operationId}`);
+    expect(mime).toContain(`Message-ID: ${internetMessageId}`);
+    expect(mime).toContain(`X-Wareongo-Update-ID: ${updateOperationId}`);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it('marks unexpected target IDs and network failures uncertain without repeating PUT', async () => {
+    for (const response of [() => Response.json({ ...draftIds, id: 'other_draft' }), () => { throw new Error('private provider error'); }]) {
+      const fetch = mockFetch(response);
+      await expect(new GmailClient({ fetch }).updateDraft(token, draftIds.id, { ...input, updateOperationId }))
+        .rejects.toMatchObject({ operationMayHaveSucceeded: true });
+      expect(fetch).toHaveBeenCalledTimes(1);
+    }
+  });
+  it('admits only a complete simple plain-text representation for editing', async () => {
+    expect(await new GmailClient({ fetch: mockFetch(() => Response.json(editableDraft())) }).getDraft(token, draftIds.id))
+      .toMatchObject({ editable: true, from: input.from, updateOperationId: null });
+    for (const mutate of [
+      (draft: ReturnType<typeof editableDraft>) => { draft.message.payload.mimeType = 'multipart/alternative'; },
+      (draft: ReturnType<typeof editableDraft>) => { Object.assign(draft.message.payload, { parts: [{ mimeType: 'text/html' }] }); },
+      (draft: ReturnType<typeof editableDraft>) => { draft.message.payload.body.size++; },
+      (draft: ReturnType<typeof editableDraft>) => { draft.message.payload.headers.push({ name: 'Bcc', value: 'hidden@example.com' }); },
+      (draft: ReturnType<typeof editableDraft>) => { draft.message.payload.headers.push({ name: 'In-Reply-To', value: '<prior@example.com>' }); },
+      (draft: ReturnType<typeof editableDraft>) => { draft.message.payload.headers.push({ name: 'X-Priority', value: '1' }); },
+      (draft: ReturnType<typeof editableDraft>) => { Object.assign(draft.message.payload, { filename: 'attached.txt' }); },
+    ]) {
+      const draft = editableDraft(); mutate(draft);
+      expect((await new GmailClient({ fetch: mockFetch(() => Response.json(draft)) }).getDraft(token, draftIds.id)).editable).toBe(false);
+    }
   });
 });

@@ -1,6 +1,6 @@
 # Wareongo Context
 
-A REST, Markdown, and remote MCP context service for employee AI tools. REST remains read-only; MCP additionally supports explicitly authorized GIS creation, guarded GIS compensation, employee Gmail draft creation and new CRM RFQ creation. It combines reviewed company guides with permitted warehouse facts and CRM opportunities. Employees see leads they created or are assigned to; Analysts (including roster admins) see all mirrored leads. The same Next.js deployment hosts the `/mcp` endpoint and an employee console for agent setup, with Markdown editing for roster admins.
+A REST, Markdown, and remote MCP context service for employee AI tools. REST remains read-only; MCP additionally supports explicitly authorized GIS creation, guarded GIS compensation, employee Gmail draft creation/editing and new CRM RFQ creation. It combines reviewed company guides with permitted warehouse facts and CRM opportunities. Employees see leads they created or are assigned to; Analysts (including roster admins) see all mirrored leads. The same Next.js deployment hosts the `/mcp` endpoint and an employee console for agent setup, with Markdown editing for roster admins.
 
 `create_crm_rfq` adds explicitly granted new-RFQ creation with verbatim source descriptions and duplicate-safe receipt recovery. It remains disabled until configured; CRM audit/history and reversal are deferred. See [RFQ SOP, permissions and setup](docs/crm-rfq-writes.md).
 
@@ -9,8 +9,8 @@ A REST, Markdown, and remote MCP context service for employee AI tools. REST rem
 `resolve_location` normalizes Google Maps links, raw coordinates and native pin coordinate pairs through one read-only tool, retaining extraction method and ambiguity. It does not save GIS points or call warehouse enrichment. See [location resolution and storage fields](docs/location-resolution.md).
 
 Optional employee Gmail drafts add `get_email_connection`, `create_email_draft`,
-`list_email_drafts` and `read_email_draft` for WhatsApp with an explicit `mail:drafts` grant. Draft
-creation uses Ramesh's confirmation flow; no send operation is exposed. Gmail
+`update_email_draft`, `list_email_drafts` and `read_email_draft` for WhatsApp with an explicit `mail:drafts` grant. Draft
+creation and supported edits run on an explicit request without a second confirmation; no send operation is exposed. Gmail
 setup is disabled by default and requires each employee to connect their account.
 See [Gmail setup and boundaries](docs/gmail-drafts.md).
 

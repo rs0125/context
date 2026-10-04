@@ -35,7 +35,7 @@ describe('RFQ-only scope and MCP contract', () => {
     const { result } = await wire(await handleMcpRequest(rpc('tools/list'), { authenticate: async () => key(), platform }));
     const writes = result.tools.filter((t: { annotations: { readOnlyHint: boolean } }) => !t.annotations.readOnlyHint);
     expect(writes.map((t: { name: string }) => t.name)).toEqual(['create_crm_rfq']);
-    expect(writes[0]._meta['wareongo/context-write-v1']).toEqual({ requiredScopes: ['crm.rfq:write'], sourceFamily: 'crm', effect: 'create', idempotencyArgument: 'operation_id', sourceTextArgument: 'raw_text' });
+    expect(writes[0]._meta['wareongo/context-write-v1']).toEqual({ executionMode: 'direct_request', requiredScopes: ['crm.rfq:write'], sourceFamily: 'crm', effect: 'create', idempotencyArgument: 'operation_id', sourceTextArgument: 'raw_text' });
     expect(writes[0].inputSchema.additionalProperties).toBe(false);
     expect(writes[0].inputSchema.properties).not.toHaveProperty('stage');
   });
@@ -79,8 +79,11 @@ describe('owned RFQ edit and undo MCP integration', () => {
     const { result } = await wire(await handleMcpRequest(rpc('tools/list'), { authenticate: async () => key(), platform }));
     const named = Object.fromEntries(result.tools.map((tool: { name: string }) => [tool.name, tool]));
     for (const name of ['read_crm_rfq', 'list_crm_rfq_changes', 'update_crm_rfq', 'undo_crm_rfq']) expect(named).toHaveProperty(name);
+    // Execution policy is explicit; even the destructive undo hint must not reintroduce a confirmation loop.
+    for (const name of ['create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq'])
+      expect(named[name]._meta['wareongo/context-write-v1'].executionMode).toBe('direct_request');
     for (const name of ['update_crm_rfq', 'undo_crm_rfq']) {
-      expect(named[name]._meta['wareongo/context-write-v1']).toEqual({ requiredScopes: ['crm.rfq:write'], sourceFamily: 'crm', effect: 'update', idempotencyArgument: 'operation_id', sourceTextArgument: 'raw_text' });
+      expect(named[name]._meta['wareongo/context-write-v1']).toEqual({ executionMode: 'direct_request', requiredScopes: ['crm.rfq:write'], sourceFamily: 'crm', effect: 'update', idempotencyArgument: 'operation_id', sourceTextArgument: 'raw_text' });
       expect(named[name].inputSchema.additionalProperties).toBe(false);
     }
     expect(named.undo_crm_rfq.annotations.destructiveHint).toBe(true);

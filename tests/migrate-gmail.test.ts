@@ -10,7 +10,7 @@ type Options = { collision?: boolean; bypass?: boolean; locked?: boolean; privac
   runtimeUnsafe?: boolean; unsafeGrant?: boolean; unexpectedPolicy?: boolean; foreignTrigger?: boolean; changedConstraint?: boolean };
 
 function database(options: Options = {}) {
-  let schemaCreated = false;
+  let schemaCreated = false, schemaMarker = 'context-gmail-schema-v3';
   const markers = new Map<string, string>(), policies = new Set<string>();
   const definitions = new Map<string, string>();
   const columns: Record<string, string[][]> = {
@@ -20,15 +20,20 @@ function database(options: Options = {}) {
     draft_operations: [['employee_id', 'integer'], ['employee_email', 'text'], ['operation_id', 'uuid'], ['connection_id', 'uuid'],
       ['connection_version', 'integer'], ['request_hash', 'text'], ['state', 'text'],
       ['draft_id', 'text'], ['message_id', 'text'], ['reason', 'text'], ['created_at', 'timestamp with time zone'], ['updated_at', 'timestamp with time zone'], ['google_sub', 'text'], ['retry_at', 'timestamp with time zone']],
+    draft_update_operations: [['employee_id','integer'],['employee_email','text'],['operation_id','uuid'],['connection_id','uuid'],
+      ['connection_version','integer'],['google_sub','text'],['request_hash','text'],['draft_ref','uuid'],['draft_id','text'],
+      ['expected_message_id','text'],['state','text'],['message_id','text'],['reason','text'],
+      ['created_at','timestamp with time zone'],['updated_at','timestamp with time zone']],
   };
   const nullable = ['encrypted_refresh_token', 'google_sub', 'retry_at', 'draft_id', 'message_id', 'reason'];
-  const tableName = (oid: unknown) => oid === 10 ? 'connections' : 'draft_operations';
+  const tableName = (oid: unknown) => oid === 10 ? 'connections' : oid === 11 ? 'draft_operations' : 'draft_update_operations';
   const query = vi.fn(async (sql: string, values: unknown[] = []): Promise<{ rows: Row[] }> => {
     if (sql.includes('pg_try_advisory_xact_lock')) return { rows: [{ locked: options.locked !== false }] };
     if (sql.startsWith('SELECT rolsuper')) return { rows: [{ rolsuper: false, rolbypassrls: options.bypass !== false }] };
     if (sql.includes("obj_description(n.oid, 'pg_namespace')")) return { rows: options.collision || schemaCreated
-      ? [{ oid: 1, owned: true, marker: options.collision ? 'unrelated-schema' : 'context-gmail-schema-v2' }] : [] };
+      ? [{ oid: 1, owned: true, marker: options.collision ? 'unrelated-schema' : schemaMarker }] : [] };
     if (sql.startsWith('CREATE SCHEMA')) schemaCreated = true;
+    if (sql.startsWith('COMMENT ON SCHEMA')) schemaMarker = /IS '([^']+)'/.exec(sql)![1];
     if (sql.startsWith('CREATE TABLE')) {
       const name = /CREATE TABLE context_gmail_private\.(\w+)/.exec(sql)![1]; definitions.set(name, sql);
     }
@@ -39,11 +44,11 @@ function database(options: Options = {}) {
     if (sql.includes('AS relations')) return { rows: [{ relations: 0, routines: 0 }] };
     if (sql.includes('FROM pg_class c JOIN pg_namespace n') && sql.includes('c.relname = $2')) {
       const name = String(values[1]);
-      return { rows: [{ oid: name === 'connections' ? 10 : 11, relkind: 'r', relpersistence: 'p', relispartition: false,
+      return { rows: [{ oid: name === 'connections' ? 10 : name === 'draft_operations' ? 11 : 12, relkind: 'r', relpersistence: 'p', relispartition: false,
         owned: true, relrowsecurity: true, relforcerowsecurity: true, marker: markers.get(name) ?? null }] };
     }
     if (sql.includes('FROM pg_attribute a')) return { rows: columns[tableName(values[0])].map(([name, type]) => ({
-      name, type, not_null: !nullable.includes(name), identity: '', generated: '', dropped: false,
+      name, type, not_null: !(tableName(values[0]) === 'draft_update_operations' ? ['message_id', 'reason'] : nullable).includes(name), identity: '', generated: '', dropped: false,
       default_expression: ['created_at', 'updated_at'].includes(name) ? 'CURRENT_TIMESTAMP' : null,
     })) };
     if (sql.includes('FROM pg_constraint')) {
@@ -68,7 +73,12 @@ function database(options: Options = {}) {
     if (sql.includes('AS tables_safe')) return { rows: [{ schema_safe: true, tables_safe: options.unsafeGrant !== true }] };
     return { rows: [] };
   });
-  return { client: { query }, query, options, policies };
+  return { client: { query }, query, options, policies, downgradeToV2() {
+    schemaMarker = 'context-gmail-schema-v2';
+    for (const name of ['connections', 'draft_operations']) markers.set(name, markers.get(name)!.replace('table-v3:', 'table-v2:'));
+    definitions.delete('draft_update_operations'); markers.delete('draft_update_operations');
+    policies.delete('context_gmail_private.draft_update_operations');
+  } };
 }
 
 describe('Gmail private storage migration', () => {
@@ -76,6 +86,7 @@ describe('Gmail private storage migration', () => {
     expect(RUNTIME_TABLES.filter(([name]: string[]) => name.startsWith('context_gmail_private.'))).toEqual([
       ['context_gmail_private.connections', 'SELECT, INSERT, UPDATE'],
       ['context_gmail_private.draft_operations', 'SELECT, INSERT, UPDATE'],
+      ['context_gmail_private.draft_update_operations', 'SELECT, INSERT, UPDATE'],
     ]);
     for (const [name, privileges] of RUNTIME_TABLES as string[][]) {
       if (name.startsWith('public.')) expect(privileges).not.toMatch(/INSERT|UPDATE|DELETE|TRUNCATE/);
@@ -96,7 +107,7 @@ describe('Gmail private storage migration', () => {
     expect(await migrateGmailStorage(db.client)).toEqual({ applied: true, verified: true, seededConnections: 0, runtimeGranted: true });
     const sql = db.query.mock.calls.map(([statement]) => statement);
     expect(sql[0]).toBe('BEGIN'); expect(sql.at(-1)).toBe('COMMIT');
-    for (const table of ['connections', 'draft_operations']) {
+    for (const table of ['connections', 'draft_operations', 'draft_update_operations']) {
       expect(sql).toContain(`ALTER TABLE context_gmail_private.${table} ENABLE ROW LEVEL SECURITY`);
       expect(sql).toContain(`ALTER TABLE context_gmail_private.${table} FORCE ROW LEVEL SECURITY`);
       expect(sql).toContain(`GRANT SELECT, INSERT, UPDATE ON TABLE context_gmail_private.${table} TO context_engine_runtime`);
@@ -121,6 +132,22 @@ describe('Gmail private storage migration', () => {
     const statements = db.query.mock.calls.map(([sql]) => sql).join('\n');
     expect(statements).not.toMatch(/^(?:CREATE TABLE|CREATE SCHEMA|CREATE POLICY|INSERT INTO|UPDATE |DELETE FROM)/m);
     expect(statements).toContain('LOCK TABLE context_gmail_private.connections, context_gmail_private.draft_operations');
+  });
+
+  it('upgrades validated v2 tables additively without rewriting mailbox credentials or creation receipts', async () => {
+    const db = database();
+    await migrateGmailStorage(db.client);
+    db.downgradeToV2(); db.query.mockClear();
+    expect(await migrateGmailStorage(db.client)).toMatchObject({ verified: true, runtimeGranted: true });
+    const statements = db.query.mock.calls.map(([sql]) => sql);
+    const creates = statements.filter(sql => sql.startsWith('CREATE TABLE'));
+    expect(creates).toHaveLength(1);
+    expect(creates[0]).toContain('CREATE TABLE context_gmail_private.draft_update_operations');
+    expect(statements.join('\n')).not.toMatch(/^(?:INSERT INTO|UPDATE |DELETE FROM|ALTER TABLE .* (?:DROP|ADD))/m);
+    expect(statements).toContain("COMMENT ON SCHEMA context_gmail_private IS 'context-gmail-schema-v3'");
+    db.query.mockClear();
+    expect(await migrateGmailStorage(db.client)).toMatchObject({ verified: true });
+    expect(db.query.mock.calls.map(([sql]) => sql).join('\n')).not.toMatch(/^CREATE TABLE/m);
   });
 
   it('leaves forced RLS closed when a runtime role has not been provisioned', async () => {

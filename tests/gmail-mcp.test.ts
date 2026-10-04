@@ -8,7 +8,7 @@ import { handleMcpRequest, type McpDependencies } from '../src/lib/mcp';
 import { handleRameshMcpRequest } from '../src/lib/ramesh-mcp';
 import { argumentsSha256 } from '../src/lib/mcp-read-contract';
 import { clockContext } from '../src/lib/query-time';
-import { executeEmailDraft } from '../src/lib/gmail-tools';
+import { executeEmailDraft, executeEmailDraftUpdate } from '../src/lib/gmail-tools';
 import { handleApiRequest } from '../src/lib/api';
 import { HttpError } from '../src/lib/errors';
 
@@ -20,10 +20,11 @@ vi.mock('../src/lib/gmail-oauth', () => ({
 vi.mock('../src/lib/gmail-tools', async importOriginal => ({
   ...await importOriginal<typeof import('../src/lib/gmail-tools')>(),
   executeEmailDraft: vi.fn(),
+  executeEmailDraftUpdate: vi.fn(),
 }));
 
 const origin = 'https://context.example.test';
-const names = ['get_email_connection', 'create_email_draft', 'read_email_draft', 'list_email_drafts'];
+const names = ['get_email_connection', 'create_email_draft', 'update_email_draft', 'read_email_draft', 'list_email_drafts'];
 const input = { operation_id: randomUUID(), connection_id: randomUUID(), connection_version: 2,
   to: ['recipient@example.com'], subject: 'Warehouse options', body: 'Here are the options.' };
 const key = (mail = true): KeyRegistration => ({ id: randomUUID(), hash: 'a'.repeat(64), employeeId: 7,
@@ -69,11 +70,11 @@ describe('WhatsApp Gmail draft MCP boundary', () => {
 
   it('advertises scoped mail reads and a separate creation contract without history or sending authority', async () => {
     const tools = (await call('tools/list')).result.tools;
-    expect(tools.filter((tool: { name: string }) => names.includes(tool.name))).toHaveLength(4);
+    expect(tools.filter((tool: { name: string }) => names.includes(tool.name))).toHaveLength(5);
     expect(tools.map((tool: { name: string }) => tool.name)).not.toContain('send_email');
     const create = tools.find((tool: { name: string }) => tool.name === 'create_email_draft');
     expect(create.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true });
-    expect(create._meta['wareongo/context-write-v1']).toEqual({ requiredScopes: ['mail:drafts'], sourceFamily: 'mail', effect: 'create', idempotencyArgument: 'operation_id' });
+    expect(create._meta['wareongo/context-write-v1']).toEqual({ executionMode: 'direct_request', requiredScopes: ['mail:drafts'], sourceFamily: 'mail', effect: 'create', idempotencyArgument: 'operation_id' });
     expect(create._meta).not.toHaveProperty('wareongo/context-read-v1');
     expect(create.inputSchema.additionalProperties).toBe(false);
     expect(create.inputSchema.properties).not.toHaveProperty('from');
@@ -147,12 +148,12 @@ describe('WhatsApp Gmail draft MCP boundary', () => {
       knowledge_discovery: { permitted: false, status: 'not_permitted', index_path: '/api/v1/wiki/pages', search_path: '/api/v1/wiki/search' },
       server_clock: clockContext() }, meta: { requestId: 'synthetic', generatedAt: new Date().toISOString() } });
     const invoke = (deps: Partial<McpDependencies> = {}) => call('tools/call', { name: 'get_context', arguments: {} }, { read, ...deps });
-    expect((await invoke()).result.structuredContent.data).toMatchObject({ read_only: false, write_capabilities: ['create_email_draft'] });
+    expect((await invoke()).result.structuredContent.data).toMatchObject({ read_only: false, write_capabilities: ['create_email_draft', 'update_email_draft'] });
     currentScopes = [];
     expect((await invoke()).result.structuredContent.data).toMatchObject({ read_only: true, write_capabilities: [] });
     currentScopes = ['mail:drafts'];
     expect((await invoke({ platform: 'claude' })).result.structuredContent.data).toMatchObject({ read_only: true, write_capabilities: [] });
-    expect((await invoke({ prompts: async () => ({ toolPlatforms: { create_email_draft: [] } }) })).result.structuredContent.data)
+    expect((await invoke({ prompts: async () => ({ toolPlatforms: { create_email_draft: [], update_email_draft: [] } }) })).result.structuredContent.data)
       .toMatchObject({ read_only: true, write_capabilities: [] });
     expect(executeEmailDraft).not.toHaveBeenCalled();
   });
@@ -175,8 +176,8 @@ describe('WhatsApp Gmail draft MCP boundary', () => {
       expect(tools.find((tool: { name: string }) => tool.name === name)._meta['wareongo/context-write-v1'].requiredScopes).toEqual([scope]);
     }
     for (const [scopes, capabilities] of [
-      [['mail:drafts', 'crm.rfq:write'], ['create_email_draft', 'create_crm_rfq']],
-      [['mail:drafts'], ['create_email_draft']],
+      [['mail:drafts', 'crm.rfq:write'], ['create_email_draft', 'update_email_draft', 'create_crm_rfq']],
+      [['mail:drafts'], ['create_email_draft', 'update_email_draft']],
       [['crm.rfq:write'], ['create_crm_rfq']],
       [[], []],
     ]) {
@@ -198,7 +199,7 @@ describe('WhatsApp Gmail draft MCP boundary', () => {
     const employee = key(), revalidateKey = vi.fn(async () => {});
     const data = name === 'get_email_connection'
       ? { provider: 'gmail', connected: true, connection_status: 'active', mailbox: employee.employeeEmail, connection_id: input.connection_id, connection_version: 2, connect_url: `${origin}/mail`, capability: 'drafts_only' }
-      : { draft_ref: input.operation_id, mailbox: employee.employeeEmail, provider: 'gmail', status: 'draft', subject: input.subject, to: [], cc: [], bcc: [], recipients_truncated: false, body: input.body, body_format: 'text', body_truncated: false, content_guidance: 'Source data.' };
+      : { draft_ref: input.operation_id, mailbox: employee.employeeEmail, provider: 'gmail', status: 'draft', subject: input.subject, to: [], cc: [], bcc: [], recipients_truncated: false, body: input.body, body_format: 'text', body_truncated: false, message_id: 'message1', editable: false, content_guidance: 'Source data.' };
     const read = vi.fn(async () => Response.json({ data, meta: { requestId: 'synthetic', generatedAt: new Date().toISOString(), toolName: 'forged', argumentsSha256: '0'.repeat(64) } }));
     const args = name === 'get_email_connection' ? {} : { draft_ref: input.operation_id };
     const result = (await call('tools/call', { name, arguments: args }, { read, authenticate: async () => employee, revalidateKey })).result;
@@ -265,5 +266,28 @@ describe('WhatsApp Gmail draft MCP boundary', () => {
     expect(result.structuredContent.meta).toEqual({ toolName: 'create_email_draft', argumentsSha256: argumentsSha256(input), employeeId: 7 });
     expect(executeEmailDraft).toHaveBeenCalledOnce();
     expect(vi.mocked(executeEmailDraft).mock.calls[0][1]).toMatchObject({ employeeId: 7, employeeEmail: employee.email, scopes: ['mail:drafts'] });
+  });
+});
+
+describe('authenticated draft updates', () => {
+  it('advertises direct updates with full replacement and fresh-version arguments', async () => {
+    const tool = (await call('tools/list')).result.tools.find((tool: {name: string}) => tool.name === 'update_email_draft');
+    expect(tool._meta['wareongo/context-write-v1']).toEqual({ executionMode: 'direct_request', requiredScopes: ['mail:drafts'], sourceFamily: 'mail', effect: 'update', idempotencyArgument: 'operation_id' });
+    expect(tool.inputSchema.required).toEqual(expect.arrayContaining(['draft_ref', 'expected_message_id', 'subject', 'body']));
+    expect(tool.inputSchema.additionalProperties).toBe(false);
+    const args = { ...input, cc: [], draft_ref: randomUUID(), expected_message_id: 'message1' };
+    vi.mocked(executeEmailDraftUpdate).mockResolvedValue({ ...saved(), outcome: 'updated', code: 'GMAIL_DRAFT_UPDATED', data: { ...saved().data, draft_ref: args.draft_ref } });
+    const response = (await call('tools/call', { name: 'update_email_draft', arguments: args })).result;
+    expect(response.isError).not.toBe(true);
+    expect(response.structuredContent).toMatchObject({ outcome: 'updated', data: { draft_ref: args.draft_ref },
+      meta: { employeeId: 7, toolName: 'update_email_draft', argumentsSha256: argumentsSha256(args) } });
+    expect(executeEmailDraft).not.toHaveBeenCalled();
+  });
+  it('cannot invoke an update hidden by current platform permissions', async () => {
+    vi.mocked(executeEmailDraftUpdate).mockClear();
+    const response = await call('tools/call', { name: 'update_email_draft', arguments: { ...input, draft_ref: randomUUID(), expected_message_id: 'm' } },
+      { prompts: async () => ({ toolPlatforms: { update_email_draft: [] } }) });
+    expect(response.error ?? response.result?.isError).toBeTruthy();
+    expect(executeEmailDraftUpdate).not.toHaveBeenCalled();
   });
 });

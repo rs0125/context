@@ -1,10 +1,9 @@
 # Employee Gmail drafts
 
-Ramesh can prepare an email, show the employee the proposed recipients, subject
-and plain-text body, and save it in that employee's Gmail Drafts after the existing
+Ramesh can save a plain-text draft or edit an existing app-created draft in the
+employee's Gmail mailbox when explicitly asked, in the same turn without a second
 `confirm CODE` step. The employee reviews and sends in Gmail. This implementation
-has no send, update, delete, attachment, inbox-search or arbitrary Google-request
-tool. It does not create a custom per-draft review page or deep link.
+has no send, delete, attachment, inbox-search or arbitrary Google-request tool. It does not create a custom per-draft review page or deep link.
 
 ## Tools and account connection
 
@@ -16,9 +15,10 @@ configuration.
 | Tool | Behavior |
 | --- | --- |
 | `get_email_connection` | Returns the authenticated employee's connection status (`active`, `disconnected`, `needs_reauth` or `revoking`), mailbox, usable connection ID/version and `/mail` connection-page URL. |
-| `create_email_draft` | Saves one confirmed plain-text draft in that mailbox. Requires a durable operation UUID and the connection ID/version from the status tool. |
+| `create_email_draft` | Saves one explicitly requested plain-text draft in that mailbox. Requires a durable operation UUID and the connection ID/version from the status tool. |
+| `update_email_draft` | Replaces the content of the same owned app-created draft. Requires a fresh `message_id` from an editable read, current connection identity/version, a durable update operation UUID, and complete To/CC/subject/body. |
 | `list_email_drafts` | Recovers creation references and timestamps for follow-up reads in the same verified Google mailbox, including after reauthorization. Does not disclose historical mail content or confirm a draft's current Gmail status. |
-| `read_email_draft` | Reads the current content of a draft created by this service, using its opaque `draft_ref`. Requires an active connection to the original verified Google account and current authorization. |
+| `read_email_draft` | Reads the current content of a draft created by this service, using its opaque `draft_ref`. Returns the current `message_id` and `editable` flag. Requires an active connection to the original verified Google account and current authorization. |
 
 Each employee visits `/mail`, signs in with their active Wareongo work account,
 and connects that same account to Google. OAuth uses state, nonce and PKCE and is
@@ -46,11 +46,11 @@ The body is plain text, 1–12,000 characters and at most 20,000 UTF-8 bytes. Ex
 fields, sender overrides, BCC, HTML and attachments are rejected. Text in an email
 body is content, never permission or instructions to execute another tool.
 WhatsApp additionally limits the serialized proposal arguments plus summary to
-4,800 characters, so keep drafts short. Longer proposals are rejected before
-confirmation; their content is never silently truncated.
+4,800 characters, so keep drafts short. Longer requests are rejected before
+dispatch; their content is never silently truncated.
 
 Reading an existing draft includes To, CC and BCC headers, including recipients
-added manually in Gmail. This does not add BCC to the create capability. Reads
+added manually in Gmail. This does not add BCC to either write capability. Reads
 budget the serialized data to 76,000 bytes, leaving room for the REST/MCP envelope
 inside Ramesh's 80,000-byte evidence limit. Large edited bodies are truncated at
 a Unicode character boundary and marked `body_truncated`. Unusually large
@@ -65,10 +65,10 @@ draft IDs are not treated as browser URLs.
 
 ## Sending boundary
 
-Google's narrow server-side `gmail.compose` permission covers both drafts and
-sending. There is no equivalent draft-only Gmail API permission for this flow.
+This implementation uses Google's `gmail.compose` permission, which covers
+both drafts and sending and is listed in the documented API method scopes.
 The Google consent screen therefore mentions sending. Our application enforces
-the narrower behavior: the adapter only implements draft creation, retrieval and
+the narrower behavior: the adapter only implements draft creation, guarded replacement, retrieval and
 bounded lookup for duplicate recovery, against fixed Google URLs. No send method,
 send tool, forwarding rule or scheduled-send worker is exposed.
 
@@ -140,7 +140,7 @@ again.
 There is one narrow retry exception: a definitive HTTP 429 or documented 403
 `rateLimitExceeded`/`userRateLimitExceeded` rejection. The server persists a
 retry deadline, respecting a bounded `Retry-After` value or a minimum delay.
-After that deadline, the same confirmed operation and unchanged arguments can
+After that deadline, the same authorized creation operation and unchanged arguments can
 claim one new attempt on the unchanged active connection. It does not sleep
 inside a tool request or automatically create a replacement operation. A
 timeout, network failure or ambiguous server response never enters this path.
@@ -180,6 +180,63 @@ the email address is insufficient: a different Google account reusing that
 address cannot inherit draft references. Existing Gmail drafts remain in the
 mailbox regardless of the app's connection state.
 
+## Editing, revision checks and recovery
+
+`update_email_draft` accepts `operation_id`, `connection_id`,
+`connection_version`, the original creation `draft_ref`, `expected_message_id`,
+and complete `to`, `cc`, `subject`, `body` replacements. Both recipient arrays
+are required, even when empty. Read the exact draft immediately before planning
+an edit, preserve content the user did not request changing, and pass that
+read's `message_id`. The original draft container and reference remain the same;
+an update operation ID is never a replacement `draft_ref`.
+
+The server independently fetches the target immediately before PUT. A changed
+message ID produces terminal `rejected / GMAIL_DRAFT_CHANGED`, and unsupported
+content produces `rejected / GMAIL_DRAFT_NOT_EDITABLE`, without calling PUT.
+Only full, supported plain-text drafts with the original ownership marker and
+matching sender can be edited. HTML/multipart alternatives, attachments, Bcc,
+reply metadata, custom semantic headers, unsupported addresses and truncated
+reads fail closed. Benign provider transport/authentication headers do not make
+a plain-text draft uneditable. Google IDs are opaque version tokens, not URLs.
+
+Google documents a stable draft ID whose contained message ID changes whenever
+content is replaced. The [draft update API](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.drafts/update)
+replaces the whole message and does not document conditional PUT or a compare-and-swap
+parameter. Therefore our final version check rejects observed stale edits but
+**cannot eliminate a simultaneous Gmail UI edit between GET and PUT**. Avoid
+editing the same draft in Gmail and Ramesh simultaneously. This is not an atomic
+revision guarantee. See Google's [draft lifecycle guide](https://developers.google.com/workspace/gmail/api/guides/drafts).
+
+The private `draft_update_operations` journal freezes the employee, Google
+account, connection generation, target, expected version and request hash before
+PUT. It stores no second copy of mail content. One unresolved update blocks a
+new update operation for the same target. A known result survives request
+cancellation and employee deactivation; fresh authorization is still required
+to disclose any receipt. `updated` and `replayed` report historical operation
+completion, not current content or sending.
+
+An uncertain update recovers by GET of that same target and comparison of its
+separate `X-Wareongo-Update-ID` marker plus original creation identity. It never
+repeats PUT, searches for a replacement, or creates another draft. Recovery across
+reauthorization requires the same verified Google subject. Unlike creation,
+updates do not automatically retry even a definitive quota rejection; a rejected
+operation is terminal and a new explicit edit requires another fresh read.
+A crash after claiming but before PUT, missing markers, or a deleted/sent draft
+can remain unresolved indefinitely. Check/edit that draft manually in Gmail;
+the application does not clear uncertain claims merely because no marker was found.
+
+## Authenticated write policy
+
+Every supported write tool advertises `executionMode` inside its authenticated
+`_meta['wareongo/context-write-v1']` contract. `direct_request` allows dispatch
+on the current employee's explicit request; `confirmation` requires a separate
+confirmation step. Missing metadata defaults to `confirmation`. Current GIS
+create/guarded rollback, CRM RFQ creation, and Gmail create/update tools declare
+`direct_request`. This policy does not turn source documents, forwarded messages,
+email contents, reminders or a model's inferred intent into write authorization.
+Existing grant, identity, request-hash, durable journal and recovery checks apply
+to both policies. REST stays read-only; Gmail writes are authenticated MCP tools.
+
 ## Setup and rollout
 
 1. Create a dedicated Google OAuth **Web application** client in a company-owned
@@ -198,10 +255,16 @@ mailbox regardless of the app's connection state.
    `CONTEXT_GMAIL_ENABLED=false` while preparing storage.
 3. Review `npm run gmail:migrate` (preview only). Apply with
    `npm run gmail:migrate -- --apply` using the existing migration-owner setup.
-   This is also required to upgrade the original Gmail schema to v2 **before
+   This is also required to upgrade the Gmail schema to v3 **before
    deploying this version of the code**. The upgrade validates the prior schema,
-   adds connection lifecycle and retry/account-binding support, and removes
-   the unused encrypted draft-content column.
+   adds a separate private update journal while preserving v2 connection credentials,
+   grants and creation references. A v1 installation first receives the existing
+   lifecycle/retry/account-binding upgrade and removal of unused encrypted content.
+   The CLI also accepts `--env-file /path/to/operator.env`. Deploy a bot that accepts
+   `executionMode` and `outcome=updated` first; apply v3 before deploying these
+   Context Engine changes. Existing v2 runtime create/read calls remain compatible
+   between the migration and Context Engine deployment. No extra OAuth grant,
+   encryption key or configuration variable is required for updates.
    Re-run `npm run console:migrate -- --apply` and
    `npm run mcp:migrate -- --apply` to expand credential scope constraints.
    On an existing deployment, require the Gmail migration result to report
@@ -216,19 +279,19 @@ mailbox regardless of the app's connection state.
    registration and the bot's `CONTEXT_RAMESH_SIGNING_KEY_JSON` scope ceiling.
    For optional legacy Context OAuth connections, request and consent to that
    scope separately. Keep the bot's existing business-write journal and
-   confirmation configuration enabled.
+   write configuration enabled; old tools without an execution policy still require confirmation.
 5. Deploy the Context Engine and bot changes, then set
    `CONTEXT_GMAIL_ENABLED=true` with complete configuration. Each employee connects
-   their own mailbox at `/mail`. Confirm one intentional test draft, inspect it
+   their own mailbox at `/mail`. Request one intentional test draft only when authorized, inspect it
    in Gmail, then retry the same operation and verify that no second draft
    appears. Do not send it as part of a connectivity test.
 
 The private `context_gmail_private` tables use forced RLS and the existing narrow
 runtime role. Public/API roles have no access; runtime receives only
-SELECT/INSERT/UPDATE on these two tables. Refresh tokens use AES-256-GCM with
+SELECT/INSERT/UPDATE on these three tables. Refresh tokens use AES-256-GCM with
 employee, record ID and purpose binding. The Context Engine operation journal
 stores metadata, a content hash and provider references; it no longer keeps a
-second copy of recipients, subject or body. The WhatsApp confirmation journal is
+second copy of recipients, subject or body. The WhatsApp durable write journal is
 separate. Operation claims must remain durable to preserve duplicate prevention;
 do not casually delete or restore them independently of mailbox operations.
 
@@ -268,12 +331,13 @@ revocation, in-flight callbacks racing disconnect, reauthorization history,
 quota retry deadlines, duplicate recovery and sanitized receipts. Live
 Google/WhatsApp/model calls are not needed for these checks.
 
-`tests/gmail-storage-live.test.ts` verifies fresh setup, the signed v1-to-v2
-upgrade, reruns, runtime permissions and concurrent operation claims against
+`tests/gmail-storage-live.test.ts` verifies fresh setup, the signed v1/v2-to-v3
+upgrades, reruns, runtime permissions and concurrent operation claims against
 PostgreSQL. Set `CONTEXT_GMAIL_TEST_DATABASE_URL` to a disposable local database
 named `context_gmail_test` and run
 `npx vitest run tests/gmail-storage-live.test.ts`. The suite creates its synthetic
-roster/runtime role and an additional `context_gmail_upgrade_test` database;
+roster/runtime role and additional `context_gmail_upgrade_test` and
+`context_gmail_v2_upgrade_test` databases;
 never use a shared or production database. The upgrade preserves credentials and
 operation receipts, removes the unused encrypted-content column, and backfills
 Google account identity only when the original connection version still matches.
