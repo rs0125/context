@@ -16,7 +16,7 @@ export const rfqInputSchema = z.object({
   company_name: text(120).optional(),
   poc_name: text(120).optional(),
   poc_phone: text(40).optional().describe('Exact Indian phone excerpt, only when supplied for this RFQ. International numbers remain in raw_text; no guessed country code.'),
-  budget: text(120).optional().describe('Exact budget excerpt preserving currency, units, period and range. Never calculate total deal value.'),
+  budget: text(120).optional().describe('Preserve every explicit currency, area basis, period and range across selected source messages. Prefer one exact excerpt. If terms span a clarification, join at most three nonempty exact excerpts with "; " (for example: 20 rs /sqft; per month). A later monthly clarification does not erase an earlier per-sqft basis. Never calculate total deal value.'),
   lead_source: z.object({ value: z.enum(CRM_LEAD_SOURCES), quote }).strict().optional(),
   lease_duration: z.object({ value: z.enum(CRM_LEASE_DURATIONS), quote }).strict().optional(),
   repeat_client: z.object({ value: z.boolean(), quote }).strict().optional(),
@@ -26,7 +26,9 @@ export const rfqOutputSchema = z.object({
   operation_id: z.string().uuid(),
   outcome: z.enum(['created', 'replayed', 'not_dispatched', 'rejected', 'outcome_unknown']),
   code: z.string().regex(/^[A-Z][A-Z0-9_]{0,95}$/), message: z.string().min(1).max(2000),
-  data: z.object({ id: z.string().uuid(), stage: z.literal('RFQ_RECEIVED') }).strict().optional(),
+  data: z.object({ id: z.string().uuid(), stage: z.literal('RFQ_RECEIVED'), url: z.string().url().optional(),
+    name: z.string().max(500).optional(), updated_at: z.string().datetime({ offset: true }).max(40).optional(),
+    undo_available: z.boolean().optional() }).strict().optional(),
 }).strict();
 export type RfqResult = z.infer<typeof rfqOutputSchema>;
 export type CrmCreator = { id: string; name: string };
@@ -37,7 +39,7 @@ const capacityUnits = [CRM_SQFT_PATTERN, 'sq\\.?\\s*m\\.?|sqm|m²|square\\s*met(
 const capacityUnit = `(?:${capacityUnits.join('|')})`;
 const unitFamilies = capacityUnits.map(pattern => new RegExp(`^(?:${pattern})$`, 'i'));
 const capacity = new RegExp(`^(?:(?:~|≈|approx(?:imately)?\\.?|around|about|circa|at least|at most|up to|over|above|under|below|[<>]=?)\\s*)?(${CRM_NUMBER_PATTERN})\\s*(${CRM_MAGNITUDE_PATTERN})?(?:\\s*(${capacityUnit})?\\s*(?:-|–|—|to)\\s*(${CRM_NUMBER_PATTERN})\\s*(${CRM_MAGNITUDE_PATTERN})?)?\\s*(${capacityUnit})$`, 'i');
-function capacityValid(value: string) {
+export function capacityValid(value: string) {
   const match = capacity.exec(value);
   if (!match) return false;
   const quantity = (raw: string, magnitude?: string) => Number(raw.replaceAll(',', '')) * (magnitude ? CRM_MAGNITUDE_MULTIPLIERS[magnitude.toLowerCase()] : 1);
@@ -55,9 +57,17 @@ export function rfqProblems(input: RfqInput): string[] {
   if (!input.raw_text.trim()) issues.push('raw_text');
   if (placeholder.test(input.location) || !/\p{L}/u.test(input.location)) issues.push('location');
   if (!capacityValid(input.requirement)) issues.push('requirement (positive quantity and explicit unit)');
-  for (const field of ['location', 'requirement', 'city', 'micro_market', 'company_name', 'poc_name', 'poc_phone', 'budget'] as const) {
+  for (const field of ['location', 'requirement', 'city', 'micro_market', 'company_name', 'poc_name', 'poc_phone'] as const) {
     const value = input[field];
     if (value !== undefined && (placeholder.test(value) || !input.raw_text.includes(value))) issues.push(`${field} (verbatim source required)`);
+  }
+  if (input.budget !== undefined) {
+    const fragments = input.budget.split('; ');
+    const exact = !placeholder.test(input.budget) && input.raw_text.includes(input.budget);
+    const joined = fragments.length >= 2 && fragments.length <= 3
+      && fragments.every(fragment => fragment.length > 0 && fragment === fragment.trim()
+        && !placeholder.test(fragment) && input.raw_text.includes(fragment));
+    if (!exact && !joined) issues.push('budget (verbatim source required)');
   }
   for (const field of ['lead_source', 'lease_duration', 'repeat_client'] as const) {
     if (input[field] && !input.raw_text.includes(input[field].quote)) issues.push(`${field} (supporting source required)`);
@@ -65,7 +75,7 @@ export function rfqProblems(input: RfqInput): string[] {
   if (input.poc_phone && indianPhone(input.poc_phone) === null) issues.push('poc_phone (unambiguous Indian number)');
   return [...new Set(issues)];
 }
-function indianPhone(raw: string): string | null {
+export function indianPhone(raw: string): string | null {
   if (!/^[+\d ()-]+$/.test(raw)) return null;
   const compact = raw.replace(/[ ()-]/g, '');
   const national = compact.startsWith('+91') ? compact.slice(3) : compact;

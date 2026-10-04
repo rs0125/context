@@ -7,30 +7,34 @@ import { readEnv } from './env-utils.mjs';
 import { migrationDatabaseOptions } from './migrate-knowledge.mjs';
 import { EXPECTED_RUNTIME_POLICY, RUNTIME_ROLE } from './runtime-policy.mjs';
 
-// Staged by default. Receipts contain hashes/IDs only; no RFQ bodies or credentials.
+// Staged by default. Private undo snapshots are encrypted by the application before storage.
 const SCHEMA = 'context_crm_private';
 const TABLE = `${SCHEMA}.write_operations`;
-const MARKER = 'context-crm-write-schema-v1';
-const TABLE_MARKER = 'context-crm-write-receipts-v1:';
-const COLUMNS = [['employee_id', 'integer'], ['employee_email', 'text'], ['operation_id', 'uuid'], ['member_id', 'uuid'],
+const MARKER = 'context-crm-write-schema-v2';
+const LEGACY_MARKER = 'context-crm-write-schema-v1';
+const TABLE_MARKER = 'context-crm-write-receipts-v2:';
+const LEGACY_TABLE_MARKER = 'context-crm-write-receipts-v1:';
+const LEGACY_COLUMNS = [['employee_id', 'integer'], ['employee_email', 'text'], ['operation_id', 'uuid'], ['member_id', 'uuid'],
   ['action', 'text'], ['request_hash', 'text'], ['state', 'text'], ['resource_id', 'uuid'],
   ['created_at', 'timestamp with time zone'], ['updated_at', 'timestamp with time zone']];
+const COLUMNS = [...LEGACY_COLUMNS, ['encrypted_snapshot', 'text']];
 const CONSTRAINTS = ['write_operations_pkey', 'write_operations_employee_check', 'write_operations_email_check',
   'write_operations_action_check', 'write_operations_hash_check', 'write_operations_state_check', 'write_operations_result_check'];
 export const CRM_WRITE_TABLE_SQL = `CREATE TABLE ${TABLE} (
   employee_id integer NOT NULL, employee_email text NOT NULL, operation_id uuid NOT NULL, member_id uuid NOT NULL,
   action text NOT NULL, request_hash text NOT NULL, state text NOT NULL, resource_id uuid,
   created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  encrypted_snapshot text,
   PRIMARY KEY (employee_id, operation_id),
   CONSTRAINT write_operations_employee_check CHECK (employee_id > 0),
   CONSTRAINT write_operations_email_check CHECK (employee_email = lower(employee_email) AND char_length(employee_email) <= 254 AND employee_email ~ '^[^[:space:]@]+@wareongo[.]com$'),
-  CONSTRAINT write_operations_action_check CHECK (action = 'create_crm_rfq'),
+  CONSTRAINT write_operations_action_check CHECK (action IN ('create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq')),
   CONSTRAINT write_operations_hash_check CHECK (request_hash ~ '^[a-f0-9]{64}$'),
-  CONSTRAINT write_operations_state_check CHECK (state IN ('dispatching', 'created', 'unknown', 'rejected')),
-  CONSTRAINT write_operations_result_check CHECK ((state = 'created') = (resource_id IS NOT NULL))
+  CONSTRAINT write_operations_state_check CHECK (state IN ('dispatching', 'created', 'updated', 'undone', 'unknown', 'rejected')),
+  CONSTRAINT write_operations_result_check CHECK ((state IN ('created', 'updated', 'undone')) = (resource_id IS NOT NULL))
 )`;
 const fail = code => { throw new Error(code); };
-async function inspect(client) {
+async function inspect(client, legacy = false) {
   const table = (await client.query(`SELECT c.oid, c.relkind, c.relpersistence, c.relispartition, c.relrowsecurity, c.relforcerowsecurity,
     c.relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) AS owned, obj_description(c.oid, 'pg_class') AS marker
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = 'write_operations'`, [SCHEMA])).rows[0];
@@ -46,8 +50,9 @@ async function inspect(client) {
     (SELECT count(*)::integer FROM pg_trigger WHERE tgrelid = $1 AND NOT tgisinternal) AS triggers,
     (SELECT count(*)::integer FROM pg_rewrite WHERE ev_class = $1) AS rules,
     (SELECT count(*)::integer FROM pg_inherits WHERE inhrelid = $1 OR inhparent = $1) AS inheritance`, [table.oid])).rows[0];
-  if (columns.length !== COLUMNS.length || columns.some((col, i) => col.name !== COLUMNS[i][0] || col.type !== COLUMNS[i][1]
-    || col.not_null !== (col.name !== 'resource_id') || col.identity || col.generated || col.dropped
+  const expectedColumns = legacy ? LEGACY_COLUMNS : COLUMNS;
+  if (columns.length !== expectedColumns.length || columns.some((col, i) => col.name !== expectedColumns[i][0] || col.type !== expectedColumns[i][1]
+    || col.not_null !== (!['resource_id', 'encrypted_snapshot'].includes(col.name)) || col.identity || col.generated || col.dropped
     || col.default_expression !== (['created_at', 'updated_at'].includes(col.name) ? 'CURRENT_TIMESTAMP' : null))
     || constraints.length !== CONSTRAINTS.length || constraints.some(c => !c.validated || !CONSTRAINTS.includes(c.name) || c.type !== (c.name.endsWith('_pkey') ? 'p' : 'c'))
     || !objects || Object.values(objects).some(v => v !== 0)) fail('CRM_RELATION_INCOMPATIBLE');
@@ -66,16 +71,31 @@ export async function migrateCrmWrites(client) {
     const schema = (await client.query(`SELECT n.oid, n.nspowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) AS owned,
       obj_description(n.oid, 'pg_namespace') AS marker FROM pg_namespace n WHERE n.nspname = $1`, [SCHEMA])).rows[0];
     if (schema) {
-      if (!schema.owned || schema.marker !== MARKER) fail('CRM_SCHEMA_COLLISION');
+      if (!schema.owned || ![MARKER, LEGACY_MARKER].includes(schema.marker)) fail('CRM_SCHEMA_COLLISION');
+      const legacy = schema.marker === LEGACY_MARKER;
+      const tableMarker = legacy ? LEGACY_TABLE_MARKER : TABLE_MARKER;
       const extra = (await client.query(`SELECT
         (SELECT count(*)::integer FROM pg_class WHERE relnamespace = $1 AND relname NOT IN ('write_operations', 'write_operations_pkey')) AS relations,
         (SELECT count(*)::integer FROM pg_proc WHERE pronamespace = $1) AS routines`, [schema.oid])).rows[0];
       if (!extra || Object.values(extra).some(v => v !== 0)) fail('CRM_SCHEMA_COLLISION');
-      let table = await inspect(client);
-      if (table.marker !== TABLE_MARKER + table.signature) fail('CRM_RELATION_COLLISION');
+      let table = await inspect(client, legacy);
+      if (table.marker !== tableMarker + table.signature) fail('CRM_RELATION_COLLISION');
       await client.query(`LOCK TABLE ${TABLE} IN SHARE ROW EXCLUSIVE MODE`);
-      table = await inspect(client);
-      if (table.marker !== TABLE_MARKER + table.signature) fail('CRM_RELATION_COLLISION');
+      table = await inspect(client, legacy);
+      if (table.marker !== tableMarker + table.signature) fail('CRM_RELATION_COLLISION');
+      if (legacy) {
+        await client.query(`ALTER TABLE ${TABLE}
+          ADD COLUMN encrypted_snapshot text,
+          DROP CONSTRAINT write_operations_action_check,
+          ADD CONSTRAINT write_operations_action_check CHECK (action IN ('create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq')),
+          DROP CONSTRAINT write_operations_state_check,
+          ADD CONSTRAINT write_operations_state_check CHECK (state IN ('dispatching', 'created', 'updated', 'undone', 'unknown', 'rejected')),
+          DROP CONSTRAINT write_operations_result_check,
+          ADD CONSTRAINT write_operations_result_check CHECK ((state IN ('created', 'updated', 'undone')) = (resource_id IS NOT NULL))`);
+        const upgraded = await inspect(client);
+        await client.query(`COMMENT ON TABLE ${TABLE} IS '${TABLE_MARKER}${upgraded.signature}'`);
+        await client.query(`COMMENT ON SCHEMA ${SCHEMA} IS '${MARKER}'`);
+      }
     } else {
       await client.query(`CREATE SCHEMA ${SCHEMA}`);
       await client.query(`COMMENT ON SCHEMA ${SCHEMA} IS '${MARKER}'`);

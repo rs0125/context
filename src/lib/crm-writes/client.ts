@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Principal } from '../auth';
 import { HttpError } from '../errors';
 import type { CrmCreator } from './rfq';
+import { RFQ_DETAIL_FIELDS, rfqLiveRecordSchema, type RfqLiveRecord } from './changes';
 
 export function crmWriteConfiguration(env: Partial<NodeJS.ProcessEnv> = process.env) {
   if (env.CONTEXT_CRM_RFQ_WRITES_ENABLED !== 'true') throw new HttpError(503, 'CRM_WRITES_DISABLED', 'RFQ creation is not enabled.');
@@ -46,11 +47,11 @@ const member = z.object({ id: z.string().uuid(), userEmail: z.string().email(), 
 
 export class CrmRfqClient {
   constructor(private readonly env: Partial<NodeJS.ProcessEnv> = process.env, private readonly fetcher: typeof fetch = fetch) {}
-  private request(path: string, method: 'GET' | 'POST', signal: AbortSignal, body?: unknown) {
+  private request(path: string, method: 'GET' | 'POST' | 'PATCH' | 'DELETE', signal: AbortSignal, body?: unknown) {
     const { origin, key } = crmWriteConfiguration(this.env);
     return this.fetcher(new URL(path, origin), { method, redirect: 'error', cache: 'no-store',
       signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]),
-      headers: { Authorization: `Bearer ${key}`, Accept: 'application/json', ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) },
+      headers: { Authorization: `Bearer ${key}`, Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   }
@@ -74,7 +75,7 @@ export class CrmRfqClient {
       throw new HttpError(403, 'CRM_IDENTITY_UNAVAILABLE', 'The employee could not be uniquely verified as a current CRM member.');
     }
   }
-  async create(payload: Record<string, unknown>, signal: AbortSignal): Promise<{ outcome: 'created'; id: string } | { outcome: 'rejected' | 'outcome_unknown' }> {
+  async create(payload: Record<string, unknown>, signal: AbortSignal): Promise<{ outcome: 'created'; id: string; record?: RfqLiveRecord } | { outcome: 'rejected' | 'outcome_unknown' }> {
     try {
       const response = await this.request('/rest/opportunities?depth=0', 'POST', signal, payload);
       if (!response.ok) {
@@ -85,9 +86,88 @@ export class CrmRfqClient {
       const result = z.object({ data: z.object({ createOpportunity: z.object({ id: z.string().uuid(), deletedAt: z.null() }).passthrough() }) }).parse(await json(response, 64_000));
       const record = result.data.createOpportunity;
       if (response.status !== 201 || !contains(record, payload)) return { outcome: 'outcome_unknown' };
-      return { outcome: 'created', id: record.id };
+      const snapshot = rfqLiveRecordSchema.safeParse(record);
+      return { outcome: 'created', id: record.id, ...(snapshot.success ? { record: snapshot.data } : {}) };
     } catch { return { outcome: 'outcome_unknown' }; }
   }
+  /** Callers must first establish an actor-bound successful creation receipt. */
+  async read(id: string, signal: AbortSignal): Promise<RfqLiveRecord> {
+    const parsedId = z.string().uuid().safeParse(id);
+    if (!parsedId.success) throw new HttpError(400, 'CRM_RFQ_ID_INVALID', 'A valid RFQ ID is required.');
+    try {
+      const response = await this.request(`/rest/opportunities/${parsedId.data.toLowerCase()}?depth=0`, 'GET', signal);
+      if (!response.ok) {
+        await response.body?.cancel();
+        if (response.status === 404 && !response.redirected)
+          throw new HttpError(404, 'CRM_RFQ_NOT_FOUND', 'The requested RFQ is no longer available.');
+        throw new Error();
+      }
+      const result = z.object({ data: z.object({ opportunity: rfqLiveRecordSchema }) }).parse(await json(response, 64_000));
+      if (result.data.opportunity.id.toLowerCase() !== parsedId.data.toLowerCase()) throw new Error();
+      return result.data.opportunity;
+    } catch (error) {
+      if (error instanceof HttpError && error.code === 'CRM_RFQ_NOT_FOUND') throw error;
+      throw new HttpError(503, 'CRM_RFQ_UNAVAILABLE', 'The current RFQ could not be verified. Nothing was changed.');
+    }
+  }
+  async update(current: RfqLiveRecord, patch: Record<string, unknown>, signal: AbortSignal): Promise<CrmRfqChangeOutcome> {
+    const filter = guardedFilter(current);
+    if (!filter || !Object.keys(patch).length || Object.keys(patch).some(key => !(RFQ_DETAIL_FIELDS as readonly string[]).includes(key))) {
+      return { outcome: 'rejected', code: 'CRM_RFQ_CHANGE_INVALID' };
+    }
+    try {
+      const query = new URLSearchParams({ depth: '0', filter });
+      const response = await this.request(`/rest/opportunities?${query}`, 'PATCH', signal, patch);
+      if (!response.ok) {
+        await response.body?.cancel();
+        return rejectedResponse(response);
+      }
+      const result = z.object({ data: z.object({ updateOpportunities: z.array(rfqLiveRecordSchema).max(1) }) }).parse(await json(response, 64_000));
+      if (response.status !== 200) return { outcome: 'outcome_unknown' };
+      const record = result.data.updateOpportunities[0];
+      if (!record) return { outcome: 'rejected', code: 'CRM_RFQ_VERSION_CONFLICT' };
+      if (record.id.toLowerCase() !== current.id.toLowerCase() || record.deletedAt !== null
+        || record.ownerId?.toLowerCase() !== current.ownerId?.toLowerCase()
+        || record.createdBy.workspaceMemberId?.toLowerCase() !== current.createdBy.workspaceMemberId?.toLowerCase()
+        || record.stage !== current.stage || Date.parse(record.updatedAt) <= Date.parse(current.updatedAt)
+        || !contains(record, patch)) return { outcome: 'outcome_unknown' };
+      return { outcome: 'updated', id: record.id, record };
+    } catch { return { outcome: 'outcome_unknown' }; }
+  }
+  /** Reverses only an unchanged RFQ creation; never permanently deletes a record. */
+  async undoCreate(current: RfqLiveRecord, signal: AbortSignal): Promise<CrmRfqChangeOutcome> {
+    const filter = guardedFilter(current);
+    if (!filter || current.stage !== 'RFQ_RECEIVED') return { outcome: 'rejected', code: 'CRM_RFQ_CHANGE_INVALID' };
+    try {
+      const query = new URLSearchParams({ filter, soft_delete: 'true' });
+      const response = await this.request(`/rest/opportunities?${query}`, 'DELETE', signal);
+      if (!response.ok) {
+        await response.body?.cancel();
+        return rejectedResponse(response);
+      }
+      const result = z.object({ data: z.object({ deleteOpportunities: z.array(z.object({ id: z.string().uuid() })).max(1) }) }).parse(await json(response, 64_000));
+      if (response.status !== 200) return { outcome: 'outcome_unknown' };
+      const record = result.data.deleteOpportunities[0];
+      if (!record) return { outcome: 'rejected', code: 'CRM_RFQ_VERSION_CONFLICT' };
+      if (record.id.toLowerCase() !== current.id.toLowerCase()) return { outcome: 'outcome_unknown' };
+      return { outcome: 'rolled_back', id: record.id };
+    } catch { return { outcome: 'outcome_unknown' }; }
+  }
+}
+export type CrmRfqChangeOutcome = { outcome: 'updated'; id: string; record: RfqLiveRecord }
+  | { outcome: 'rolled_back'; id: string }
+  | { outcome: 'rejected' | 'outcome_unknown'; code?: string };
+
+function rejectedResponse(response: Response): CrmRfqChangeOutcome {
+  return { outcome: [400, 401, 403, 404, 409, 412, 422].includes(response.status) && !response.redirected ? 'rejected' : 'outcome_unknown' };
+}
+
+/** The collection route retains these predicates in the provider mutation. */
+function guardedFilter(current: RfqLiveRecord): string | null {
+  const parsed = rfqLiveRecordSchema.safeParse(current);
+  if (!parsed.success || current.deletedAt !== null || !current.ownerId || !current.createdBy.workspaceMemberId
+    || !/^[A-Z][A-Z0-9_]{0,99}$/.test(current.stage)) return null;
+  return `id[eq]:"${current.id.toLowerCase()}",updatedAt[eq]:"${current.updatedAt}",ownerId[eq]:"${current.ownerId.toLowerCase()}",createdBy.workspaceMemberId[eq]:"${current.createdBy.workspaceMemberId.toLowerCase()}",stage[eq]:"${current.stage}",deletedAt[is]:NULL`;
 }
 function contains(actual: unknown, expected: unknown): boolean {
   if (Array.isArray(expected)) return Array.isArray(actual) && actual.length === expected.length && expected.every((value, i) => contains(actual[i], value));

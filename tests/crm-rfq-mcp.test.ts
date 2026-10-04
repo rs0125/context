@@ -17,6 +17,7 @@ function rpc(method: string, params: object = {}) { return new Request(`${origin
 async function wire(response: Response) { const body = await response.text(); return response.headers.get('content-type')?.includes('text/event-stream')
   ? JSON.parse(body.split('\n').filter(line => line.startsWith('data:')).at(-1)!.slice(5)) : JSON.parse(body); }
 beforeEach(() => {
+  vi.stubEnv('CONTEXT_CRM_RFQ_EDITS_ENABLED', 'false');
   vi.stubEnv('CONTEXT_CONSOLE_ORIGIN', origin); vi.stubEnv('CONTEXT_CRM_RFQ_WRITES_ENABLED', 'true');
   vi.stubEnv('TWENTY_CRM_BASE_URL', 'https://crm.example.test'); vi.stubEnv('CONTEXT_CRM_WRITE_API_KEY', 'synthetic');
 });
@@ -69,5 +70,78 @@ describe('RFQ-only scope and MCP contract', () => {
     }
     const response = await wire(await handleMcpRequest(rpc('tools/call', { name: 'create_crm_rfq', arguments: args }), { authenticate: async () => key(false), crmRfq }));
     expect(response.error || response.result?.isError).toBeTruthy(); expect(crmRfq).not.toHaveBeenCalled();
+  });
+});
+
+describe('owned RFQ edit and undo MCP integration', () => {
+  beforeEach(() => vi.stubEnv('CONTEXT_CRM_RFQ_EDITS_ENABLED', 'true'));
+  it.each(['claude', 'whatsapp'] as const)('advertises narrow reads/update/undo on %s without generic journal access', async platform => {
+    const { result } = await wire(await handleMcpRequest(rpc('tools/list'), { authenticate: async () => key(), platform }));
+    const named = Object.fromEntries(result.tools.map((tool: { name: string }) => [tool.name, tool]));
+    for (const name of ['read_crm_rfq', 'list_crm_rfq_changes', 'update_crm_rfq', 'undo_crm_rfq']) expect(named).toHaveProperty(name);
+    for (const name of ['update_crm_rfq', 'undo_crm_rfq']) {
+      expect(named[name]._meta['wareongo/context-write-v1']).toEqual({ requiredScopes: ['crm.rfq:write'], sourceFamily: 'crm', effect: 'update', idempotencyArgument: 'operation_id', sourceTextArgument: 'raw_text' });
+      expect(named[name].inputSchema.additionalProperties).toBe(false);
+    }
+    expect(named.undo_crm_rfq.annotations.destructiveHint).toBe(true);
+    expect(named.read_crm_rfq._meta['wareongo/context-read-v1']).toEqual({ requiredScopes: ['crm.rfq:write'], sourceFamily: 'crm' });
+    expect(named.update_crm_rfq.inputSchema.properties.changes.properties).not.toHaveProperty('stage');
+    expect(named.update_crm_rfq.inputSchema.properties.changes.properties).not.toHaveProperty('ownerId');
+  });
+  it.each(['read-only scope', 'disabled edits', 'disabled creation', 'missing writer', 'platform'])('hides all edit capabilities for %s', async reason => {
+    if (reason === 'disabled edits') vi.stubEnv('CONTEXT_CRM_RFQ_EDITS_ENABLED', 'false');
+    if (reason === 'disabled creation') vi.stubEnv('CONTEXT_CRM_RFQ_WRITES_ENABLED', 'false');
+    if (reason === 'missing writer') vi.stubEnv('CONTEXT_CRM_WRITE_API_KEY', '');
+    const tools = ['read_crm_rfq', 'list_crm_rfq_changes', 'update_crm_rfq', 'undo_crm_rfq'] as const;
+    const { result } = await wire(await handleMcpRequest(rpc('tools/list'), {
+      authenticate: async () => key(reason !== 'read-only scope'), platform: 'whatsapp',
+      prompts: async () => reason === 'platform' ? { toolPlatforms: Object.fromEntries(tools.map(name => [name, ['claude']])) } : {},
+    }));
+    for (const name of tools) expect(result.tools.map((tool: { name: string }) => tool.name)).not.toContain(name);
+  });
+  it('rejects stale direct RFQ write/read calls when the tool is excluded from a platform', async () => {
+    const mutate = vi.fn(), read = vi.fn();
+    const prompts = async () => ({ toolPlatforms: { update_crm_rfq: ['whatsapp' as const], read_crm_rfq: ['whatsapp' as const] } });
+    const input = { operation_id: args.operation_id, id: randomUUID(), expected_updated_at: '2026-10-04T10:00:00.000Z', raw_text: 'Change the budget to 22 per sqft per month', changes: { budget: '22/sqft/month' } };
+    for (const [name, parameters] of [['update_crm_rfq', input], ['read_crm_rfq', { id: input.id }]] as const) {
+      const denied = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: parameters }), { authenticate: async () => key(), platform: 'claude', prompts, crmRfqUpdate: mutate, read }));
+      expect(denied.error || denied.result?.isError).toBeTruthy();
+    }
+    expect(mutate).not.toHaveBeenCalled(); expect(read).not.toHaveBeenCalled();
+    const { result } = await wire(await handleMcpRequest(rpc('tools/list'), { authenticate: async () => key(), platform: 'whatsapp', prompts }));
+    expect(result.tools.map((tool: { name: string }) => tool.name)).toEqual(expect.arrayContaining(['read_crm_rfq', 'update_crm_rfq']));
+  });
+  it('routes RFQ reads through the authorized REST boundary with argument binding', async () => {
+    const id = randomUUID();
+    const read = vi.fn(async (_request: Request, path: string[]) => Response.json({ data: path[1] === 'rfqs' ? { id, editable: true } : { items: [] }, meta: { requestId: 'owned-rfq', generatedAt: new Date().toISOString() } }));
+    for (const [name, input, expected] of [
+      ['read_crm_rfq', { id }, ['crm', 'rfqs', id]],
+      ['list_crm_rfq_changes', { limit: 3 }, ['crm', 'rfq-changes']],
+    ] as const) {
+      const { result } = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: input }), { authenticate: async () => key(), read }));
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent.meta).toMatchObject({ toolName: name, argumentsSha256: argumentsSha256(input) });
+      expect(read.mock.calls.at(-1)![1]).toEqual(expected);
+    }
+  });
+  it.each(['update_crm_rfq', 'undo_crm_rfq'] as const)('binds %s success to exact arguments and employee', async name => {
+    const input = name === 'update_crm_rfq'
+      ? { operation_id: args.operation_id, id: randomUUID(), expected_updated_at: '2026-10-04T10:00:00.000Z', raw_text: 'Change the budget to 22 rupees per sqft per month', changes: { budget: 'INR22/sqft/month' } }
+      : { operation_id: args.operation_id, original_operation_id: randomUUID(), raw_text: 'Undo that change' };
+    const mutate = vi.fn(async () => ({ operation_id: input.operation_id, outcome: name === 'update_crm_rfq' ? 'updated' as const : 'rolled_back' as const, code: 'OK', message: 'Completed.' }));
+    const read = vi.fn();
+    const { result } = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: input }), { authenticate: async () => key(), read, crmRfqUpdate: mutate, crmRfqUndo: mutate }));
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent.meta).toEqual({ toolName: name, argumentsSha256: argumentsSha256(input), employeeId: 7 });
+    expect(mutate).toHaveBeenCalledOnce(); expect(read).not.toHaveBeenCalled();
+  });
+  it('rejects unadvertised calls and arbitrary update fields before dispatch', async () => {
+    const mutate = vi.fn();
+    const input = { operation_id: args.operation_id, id: randomUUID(), expected_updated_at: '2026-10-04T10:00:00.000Z', raw_text: 'Mark it won', changes: { stage: 'DEAL_CLOSED' } };
+    const response = await wire(await handleMcpRequest(rpc('tools/call', { name: 'update_crm_rfq', arguments: input }), { authenticate: async () => key(), crmRfqUpdate: mutate }));
+    expect(response.error || response.result?.isError).toBeTruthy();
+    vi.stubEnv('CONTEXT_CRM_RFQ_EDITS_ENABLED', 'false');
+    const denied = await wire(await handleMcpRequest(rpc('tools/call', { name: 'undo_crm_rfq', arguments: { operation_id: args.operation_id, original_operation_id: randomUUID(), raw_text: 'undo' } }), { authenticate: async () => key(), crmRfqUndo: mutate }));
+    expect(denied.error || denied.result?.isError).toBeTruthy(); expect(mutate).not.toHaveBeenCalled();
   });
 });

@@ -42,6 +42,17 @@ describe('RFQ intake SOP and Twenty schema', () => {
     expect(rfqProblems({ ...rfq, lease_duration: { value: 'LONG_TERM', quote: '5 years' } })).toContain('lease_duration (supporting source required)');
     expect(rfqProblems({ ...rfq, poc_phone: '[redacted]' })).toContain('poc_phone (unambiguous Indian number)');
   });
+  it('preserves budget basis and period from separate original messages without rewriting the description', () => {
+    const raw_text = 'Add an RFQ for Test Logistics in nelamangala bangalore, budget 20 rs /sqft\n\nyeah its 50k sqft an 20 rs per month';
+    const input = rfqInputSchema.parse({ ...rfq, raw_text, location: 'nelamangala bangalore', requirement: '50k sqft', company_name: 'Test Logistics', budget: '20 rs /sqft; per month' });
+    expect(rfqProblems(input)).toEqual([]);
+    expect(rfqPayload(input, creator)).toMatchObject({ budget: '20 rs /sqft; per month', description: raw_text });
+    expect(rfqProblems({ ...input, location: 'nelamangala; bangalore' })).toContain('location (verbatim source required)');
+  });
+  it.each(['20 rs /sqft; per year', '20 rs /sqft; INR', '20 rs /sqft; ; per month', '20 rs /sqft; per month; per month; per month', '20 rs /sqft;per month', '20 rs /sqft; '])('rejects an unsupported or malformed combined budget %s', budget => {
+    const input = { ...rfq, raw_text: rfq.raw_text + '\n20 rs /sqft\n\n20 rs per month', budget };
+    expect(rfqProblems(input)).toContain('budget (verbatim source required)');
+  });
   it('maps only explicitly supplied optional fields, preserving budget units and repeat-client enum', () => {
     const input: RfqInput = { ...rfq, raw_text: rfq.raw_text + 'Contact: Anand Rao +91 98765 43210. Repeat client, 2 year lease, broker referral.',
       poc_name: 'Anand Rao', poc_phone: '+91 98765 43210', lease_duration: { value: 'LONG_TERM', quote: '2 year lease' },

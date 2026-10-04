@@ -644,6 +644,22 @@ export function getOpenApiDocument() {
           responses: jsonResponses("Warehouse specifications containing only allowlisted fields.", false, { $ref: "#/components/schemas/Warehouse" }),
         },
       },
+      "/crm/rfqs/{id}": {
+        get: {
+          operationId: "readAgentCreatedRfq", tags: ["CRM"], summary: "Read your agent-created RFQ for editing",
+          description: "Requires crm.rfq:write and enabled RFQ edits. Reads live Twenty details only for RFQs this agent created for the current employee and still assigned to them. Analyst access does not widen this restriction. Returns exact updated_at for edit preconditions and masked fields; no generic write or journal disclosure is granted.",
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+          responses: jsonResponses("Current authorized agent RFQ details and exact update version."),
+        },
+      },
+      "/crm/rfq-changes": {
+        get: {
+          operationId: "listAgentRfqChanges", tags: ["CRM"], summary: "List your recent agent RFQ changes",
+          description: "Requires crm.rfq:write and enabled RFQ edits. Returns up to ten recent owned RFQ change references after current record authorization. Retain operation_id for supported undo; old success does not prove the current record is unchanged. This is a read and does not perform a mutation.",
+          parameters: [{ name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 10, default: 10 } }],
+          responses: jsonResponses("Authorized recent RFQ change references and current undo eligibility."),
+        },
+      },
       "/crm/opportunities": {
         get: {
           operationId: "searchOpportunities",

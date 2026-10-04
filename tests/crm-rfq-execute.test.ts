@@ -4,6 +4,7 @@ import type { KeyRegistration, Principal } from '../src/lib/auth';
 import { executeCrmRfq, type CrmRfqDependencies } from '../src/lib/crm-writes/execute';
 import type { CrmWriteReceipt } from '../src/lib/crm-writes/storage';
 import { HttpError } from '../src/lib/errors';
+import { crmSnapshotContext, decryptCrmSnapshot } from '../src/lib/crm-writes/snapshots';
 
 const args = { operation_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', raw_text: '  Need 5000 sqft in Hoskote\n', location: 'Hoskote', requirement: '5000 sqft' };
 const principal: Principal = { employeeId: 7, email: 'employee@wareongo.com', keyId: 'synthetic', scopes: ['crm.rfq:write'],
@@ -35,6 +36,7 @@ function fixture() {
     finish: vi.fn(async (_c, _p, _operation, _hash, result) => {
       stored!.state = result.outcome === 'outcome_unknown' ? 'unknown' : result.outcome;
       stored!.resource_id = result.outcome === 'created' ? result.id : null;
+      if (result.outcome === 'created' && result.encryptedSnapshot) stored!.encrypted_snapshot = result.encryptedSnapshot;
     }),
   };
   return { deps, actor, crm, stored: () => stored, call: (input: unknown = args, signal = new AbortController().signal, revalidate = async () => {}) => executeCrmRfq(input, key, signal, revalidate, deps) };
@@ -49,6 +51,34 @@ describe('RFQ dispatch and recovery boundary', () => {
     expect(f.crm.create).toHaveBeenCalledOnce();
     expect(f.crm.creator).toHaveBeenCalledOnce();
     expect(vi.mocked(f.deps.claim).mock.invocationCallOrder[0]).toBeLessThan(f.crm.create.mock.invocationCallOrder[0]);
+  });
+  it('captures a bound encrypted create version for undo only after verified creation', async () => {
+    const f = fixture();
+    f.deps.env.CONTEXT_CRM_RFQ_EDITS_ENABLED = 'true';
+    f.deps.env.CONTEXT_KEY_ENCRYPTION_SECRET = 'synthetic-create-key-at-least-32-characters';
+    const record = { id, updatedAt: '2026-10-04T10:00:00.000Z', deletedAt: null, ownerId: principal.twentyUserId!,
+      createdBy: { workspaceMemberId: principal.twentyUserId! }, stage: 'RFQ_RECEIVED', name: 'TBD - 5000 sqft - Hoskote' };
+    f.crm.create.mockResolvedValue({ outcome: 'created', id, record });
+    expect(await f.call()).toMatchObject({ outcome: 'created', data: { undo_available: true, updated_at: record.updatedAt } });
+    const stored = f.stored()!;
+    expect(stored.encrypted_snapshot).toMatch(/^v1\./);
+    expect(stored.encrypted_snapshot).not.toContain(record.updatedAt);
+    expect(decryptCrmSnapshot(stored.encrypted_snapshot!, crmSnapshotContext(stored), f.deps.env))
+      .toEqual({ kind: 'create', record_id: id, after_updated_at: record.updatedAt });
+    expect(await f.call()).toMatchObject({ outcome: 'replayed', data: { undo_available: false } });
+    expect(f.crm.create).toHaveBeenCalledOnce();
+  });
+  it('fails before reserving or creating when edits need an unavailable snapshot key', async () => {
+    const f = fixture(); f.deps.env.CONTEXT_CRM_RFQ_EDITS_ENABLED = 'true';
+    expect(await f.call()).toMatchObject({ outcome: 'not_dispatched', code: 'CRM_SNAPSHOT_CONFIGURATION' });
+    expect(f.deps.claim).not.toHaveBeenCalled(); expect(f.crm.create).not.toHaveBeenCalled();
+  });
+  it('keeps creation successful without offering undo when the provider omits its version', async () => {
+    const f = fixture();
+    f.deps.env.CONTEXT_CRM_RFQ_EDITS_ENABLED = 'true';
+    f.deps.env.CONTEXT_KEY_ENCRYPTION_SECRET = 'synthetic-create-key-at-least-32-characters';
+    expect(await f.call()).toMatchObject({ outcome: 'created', data: { undo_available: false } });
+    expect(f.stored()?.encrypted_snapshot).toBeUndefined();
   });
   it.each(['created', 'rejected', 'outcome_unknown'] as const)('recovers %s without contacting CRM or writing another receipt', async outcome => {
     const f = fixture(); f.crm.create.mockResolvedValue(outcome === 'created' ? { outcome, id } : { outcome });

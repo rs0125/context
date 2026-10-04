@@ -16,6 +16,10 @@ import { parseShortlistAssessmentQuery, buildShortlistAssessment } from './short
 import { parseLocationQuery, resolveLocation } from './location-resolver';
 import { getEmailConnection, readEmailDraft, listEmailDrafts } from './gmail-tools';
 import { gmailReadError } from './gmail-read-errors';
+import { readCrmRfq, listCrmRfqChanges } from './crm-writes/change-read';
+import { crmWriteAvailability } from './crm-writes/client';
+import { RFQ_SCOPE } from './crm-writes/rfq';
+import { rfqReadInputSchema, rfqListChangesInputSchema } from './crm-writes/changes';
 
 const ANALYTICS_GUIDANCE = 'Aggregate website analytics for Analysts: /api/v1/analytics/capabilities discovers supported reports; /api/v1/analytics/ga4 reports traffic and recorded events; /api/v1/analytics/search-console reports Google organic search. Analytics dates use the source timezone, not necessarily the India server clock. Preserve source_fetched_at, resolved dates, quality warnings and pagination. For form activity per session use ga4?report=form_performance with a landing_page_contains filter; its separate event ratios use matching entry sessions. For relative comparisons resolve period on the first group and reuse the returned dates for later groups. Recent data may change. Event counts are not unique CRM leads or a sequential conversion funnel; Search Console clicks are not GA sessions. Failed reads mean unavailable, never zero.';
 
@@ -34,6 +38,8 @@ type ApiDependencies = {
   getEmailConnection: typeof getEmailConnection;
   readEmailDraft: typeof readEmailDraft;
   listEmailDrafts: typeof listEmailDrafts;
+  readCrmRfq: typeof readCrmRfq;
+  listCrmRfqChanges: typeof listCrmRfqChanges;
   audit: (entry: Record<string, unknown>) => void;
 };
 const defaults: ApiDependencies = {
@@ -41,7 +47,7 @@ const defaults: ApiDependencies = {
   authenticate: request => authenticateRequestKey(request, hash => withReadOnlyTransaction(client => findDatabaseKey(client, hash))),
   liveCrmAccess: (principal, view, opportunityId) => getLiveCrmAccess(principal, { view, opportunityId }),
   relatedCrmContext: getRelatedCrmContext,
-  analyticsCapabilities, ga4Report, searchConsoleReport, resolveLocation, getEmailConnection, readEmailDraft, listEmailDrafts,
+  analyticsCapabilities, ga4Report, searchConsoleReport, resolveLocation, getEmailConnection, readEmailDraft, listEmailDrafts, readCrmRfq, listCrmRfqChanges,
   audit: entry => console.info(JSON.stringify(entry)),
 };
 
@@ -235,6 +241,26 @@ export async function handleApiRequest(request: Request, path: string[], depende
           : (() => { throw new HttpError(404, 'NOT_FOUND', 'Endpoint not found.'); })();
       return request.method === 'HEAD' ? new Response(null, { headers }) : Response.json({ data: value, meta }, { headers });
     }
+    if (path[0] === 'crm' && ['rfqs', 'rfq-changes'].includes(path[1])) {
+      const listing = path.join('/') === 'crm/rfq-changes';
+      if (!listing && !(path.length === 3 && path[1] === 'rfqs')) throw new HttpError(404, 'NOT_FOUND', 'Endpoint not found.');
+      if (!key.scopes.includes(RFQ_SCOPE)) throw new HttpError(403, 'FORBIDDEN', 'RFQ write permission is required.');
+      if (process.env.CONTEXT_CRM_RFQ_EDITS_ENABLED !== 'true' || !crmWriteAvailability().available) throw new HttpError(503, 'CRM_RFQ_EDITS_DISABLED', 'RFQ detail edits are not enabled.');
+      const query = new URL(request.url).searchParams;
+      strictQuery(query, listing ? ['limit'] : []);
+      const parsed = listing
+        ? rfqListChangesInputSchema.safeParse(query.has('limit') ? { limit: /^\d+$/.test(query.get('limit')!) ? Number(query.get('limit')) : NaN } : {})
+        : rfqReadInputSchema.safeParse({ id: path[2] });
+      if (!parsed.success) throw new HttpError(422, 'INVALID_QUERY', 'Use a valid RFQ ID or a limit between 1 and 10.');
+      employeeId = key.employeeId;
+      const revalidate = deps.revalidateKey ?? (async () => {});
+      // These live domain reads revalidate employee, receipt ownership and current record access.
+      // They do not depend on CRM mirror freshness or hold its transaction across Twenty I/O.
+      const value = listing
+        ? await deps.listCrmRfqChanges('limit' in parsed.data ? parsed.data.limit : undefined, key, request.signal, revalidate)
+        : await deps.readCrmRfq(path[2], key, request.signal, revalidate);
+      return request.method === 'HEAD' ? new Response(null, { headers }) : Response.json({ data: value, meta }, { headers });
+    }
     let crmAccess: CrmAccess | undefined;
     let verifiedPrincipal: Principal | undefined;
     let relatedContext: Awaited<ReturnType<typeof getRelatedCrmContext>> | undefined;
@@ -352,9 +378,10 @@ export async function handleApiRequest(request: Request, path: string[], depende
     // Do not log tokens, query values, record payloads, or raw database errors.
     const route = path.join('/');
     const operation = ['context', 'context.md', 'wiki/pages', 'wiki/search', 'warehouses', 'warehouses/filters',
-      'warehouses/summary', 'crm/opportunities', 'crm/summary', 'crm/filters', 'crm/my-briefing',
+      'warehouses/summary', 'crm/rfq-changes', 'crm/opportunities', 'crm/summary', 'crm/filters', 'crm/my-briefing',
       'analytics/capabilities', 'analytics/ga4', 'analytics/search-console', 'locations/resolve', 'mail/connection', 'mail/drafts', 'openapi.json'].includes(route)
-      ? route : path.length === 2 && path[0] === 'warehouses' ? 'warehouses/read'
+      ? route : path.length === 3 && path[0] === 'crm' && path[1] === 'rfqs' ? 'crm/rfq/read'
+        : path.length === 2 && path[0] === 'warehouses' ? 'warehouses/read'
         : path.length === 3 && path[0] === 'mail' && path[1] === 'drafts' ? 'mail/draft/read'
         : path.length === 3 && path[0] === 'wiki' && path[1] === 'pages' ? 'wiki/read'
           : path.length === 4 && path[0] === 'crm' && path[1] === 'opportunities' && path[3] === 'context' ? 'crm/context'
