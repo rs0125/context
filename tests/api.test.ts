@@ -31,6 +31,29 @@ function harness(options: { scopes?: KeyRegistration['scopes']; roster?: unknown
 const request = (path: string, init?: RequestInit) => new Request(`https://context.example.com/api/v1/${path}`, init);
 
 describe('REST access boundary', () => {
+  it('reads selected recorded property factors without granting private-field access', async () => {
+    const deps = harness();
+    const original = deps.query.getMockImplementation()!;
+    deps.query.mockImplementation(async sql => sql.includes('"Warehouse"') ? { rows: [{ id: 12,
+      recorded_context: { floor_strength_per_sqm: 'Heavy racking; load test pending', compliances: 'Reported compliant' },
+      contactNumber: '9876543210',
+    }] } : original(sql));
+    const result = await handleApiRequest(request('warehouses/12?context_fields=floor_strength_per_sqm'), ['warehouses', '12'], deps);
+    expect(result.status).toBe(200);
+    const data = (await result.json()).data;
+    expect(Object.keys(data.recorded_context)).toEqual(['floor_strength_per_sqm']);
+    expect(data.recorded_context.floor_strength_per_sqm.text).toBe('Heavy racking; load test pending');
+    expect(JSON.stringify(data)).not.toContain('9876543210');
+    const denied = harness({ scopes: ['crm:read'] });
+    expect((await handleApiRequest(request('warehouses/12?context_fields=compliances'), ['warehouses', '12'], denied)).status).toBe(403);
+    expect(denied.query.mock.calls.some(([sql]) => sql.includes('"Warehouse"'))).toBe(false);
+  });
+  it.each(['', 'contactNumber', 'scoutNotes', 'compliances,compliances', 'compliances,dimensions,fire_exits,canopy_type,centre_height,total_floors,carpet_area,builtup_area,chargeable_area'])('rejects invalid context selection %s before a warehouse read', async fields => {
+    const deps = harness();
+    const result = await handleApiRequest(request(`warehouses/12?context_fields=${encodeURIComponent(fields)}`), ['warehouses', '12'], deps);
+    expect(result.status).toBe(422);
+    expect(deps.query.mock.calls.some(([sql]) => sql.includes('"Warehouse"'))).toBe(false);
+  });
   it.each(['context', 'context.md'])('keeps %s available independently of a failed knowledge source', async route => {
     const deps = harness();
     const original = deps.query.getMockImplementation()!;

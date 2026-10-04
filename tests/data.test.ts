@@ -25,7 +25,8 @@ function database(rows: Record<string, unknown>[] = []) {
 function queryCursor(query: URLSearchParams, id: number | string) {
   const warehouse = typeof id === 'number';
   return buildPagination(query, { idColumn: warehouse ? 'w.id' : 'o.opportunity_id', idType: warehouse ? 'integer' : 'uuid', sortColumns: {},
-    filterContext: { start_at: null, end_before: null, ...(!warehouse ? { follow_up: null } : {}) },
+    filterContext: { start_at: null, end_before: null, ...(!warehouse ? { follow_up: null }
+      : { matching_policy_version: 2, mode: 'permissive', include_unknown: true }) },
   }, () => '$unused').cursorFor({ id });
 }
 

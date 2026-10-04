@@ -232,7 +232,7 @@ describe('MCP read-only protocol', () => {
     expect(data.response_format).toBe('concise');
     expect(data.items[0]).toMatchObject({ id: 12, image_count: 3, video_count: 0, has_valid_google_maps_id: false, created_at: now.toISOString(), verification_required: true, power_kva: null,
       field_evidence: { dock_count: { kind: 'range', lower: 2, upper: 6 }, power_kva: { kind: 'unknown' }, gate_size_ft: { kind: 'approximate', value: 20 } } });
-    expect(data.items[0]).not.toHaveProperty('land_type');
+    expect(data.items[0].land_type).toBe('Industrial');
     expect(data.items[0].field_evidence).not.toHaveProperty('washroom_count');
     const detailed = await wire(await handleMcpRequest(rpc('tools/call', { name: 'search_warehouses', arguments: { ...args, response_format: 'detailed' } }), { authenticate: async () => key(), read }));
     expect(detailed.result.structuredContent.data).toMatchObject({ response_format: 'detailed', items: [item] });
@@ -399,6 +399,23 @@ describe('MCP read-only protocol', () => {
     const body = await wire(await handleMcpRequest(rpc('tools/call', { name: 'read_warehouse', arguments: { id: 12 } }), { authenticate: async () => key(), read }));
     expect(body.result.structuredContent.data.id).toBe(12);
     expect(JSON.stringify(body)).not.toMatch(/9876543210|contactNumber|media|secret/);
+  });
+  it('transports selected source context and unparsed numeric evidence through the real MCP and API boundaries', async () => {
+    const query = vi.fn(async (sql: string) => ({ rows: sql.includes('VerifiedNumber') ? [employee]
+      : sql.includes('"Warehouse"') ? [{ id: 12, total_space_sqft: [40000],
+        recorded_context: { fire_safety_measures: 'Hydrants installed; document pending', compliances: 'Reported compliant' },
+        field_evidence: { dock_count: { source: 'Two operating; another possible' } } }] : [] }));
+    const read: typeof handleApiRequest = (request, path, deps) => handleApiRequest(request, path, { ...deps,
+      transaction: async work => work({ query } as unknown as PoolClient), audit: () => {} });
+    const result = await wire(await handleMcpRequest(rpc('tools/call', { name: 'read_warehouse', arguments: {
+      id: 12, context_fields: ['fire_safety_measures'],
+    } }), { authenticate: async () => key(), read }));
+    expect(result.result.isError).not.toBe(true);
+    const data = result.result.structuredContent.data;
+    expect(Object.keys(data.recorded_context)).toEqual(['fire_safety_measures']);
+    expect(data.recorded_context.fire_safety_measures.text).toBe('Hydrants installed; document pending');
+    expect(data.field_evidence.dock_count).toMatchObject({ kind: 'unknown', recorded_source: { text: 'Two operating; another possible' } });
+    expect(JSON.parse(result.result.content[0].text).data).toEqual(data);
   });
   it('keeps failures as tool errors rather than an empty list', async () => {
     const read = vi.fn(async () => Response.json({ error: { code: 'CRM_SOURCE_STALE', message: 'CRM needs a recent sync.' } }, { status: 503, headers: { 'Retry-After': '10' } }));

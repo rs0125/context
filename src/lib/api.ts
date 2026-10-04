@@ -20,6 +20,7 @@ import { readCrmRfq, listCrmRfqChanges } from './crm-writes/change-read';
 import { crmWriteAvailability } from './crm-writes/client';
 import { RFQ_SCOPE } from './crm-writes/rfq';
 import { rfqReadInputSchema, rfqListChangesInputSchema } from './crm-writes/changes';
+import { WAREHOUSE_RECORDED_FIELD_NAMES, type WarehouseRecordedFieldName } from './warehouse-recorded-context';
 
 const ANALYTICS_GUIDANCE = 'Aggregate website analytics for Analysts: /api/v1/analytics/capabilities discovers supported reports; /api/v1/analytics/ga4 reports traffic and recorded events; /api/v1/analytics/search-console reports Google organic search. Analytics dates use the source timezone, not necessarily the India server clock. Preserve source_fetched_at, resolved dates, quality warnings and pagination. For form activity per session use ga4?report=form_performance with a landing_page_contains filter; its separate event ratios use matching entry sessions. For relative comparisons resolve period on the first group and reuse the returned dates for later groups. Recent data may change. Event counts are not unique CRM leads or a sequential conversion funnel; Search Console clicks are not GA sessions. Failed reads mean unavailable, never zero.';
 
@@ -136,9 +137,14 @@ async function dispatch(client: PoolClient, principal: Principal, path: string[]
   }
   if (path.length === 2 && path[0] === 'warehouses') {
     requireScope(principal, 'warehouses:read');
-    strictQuery(query, []);
+    strictQuery(query, ['context_fields']);
+    const contextFields = query.has('context_fields') ? query.get('context_fields')!.split(',') : undefined;
+    if (contextFields && (contextFields.length < 1 || contextFields.length > 8 || new Set(contextFields).size !== contextFields.length
+      || contextFields.some(field => !WAREHOUSE_RECORDED_FIELD_NAMES.includes(field as WarehouseRecordedFieldName)))) {
+      throw new HttpError(422, 'INVALID_QUERY', 'context_fields must contain one to eight distinct supported warehouse context field names.');
+    }
     if (!/^[1-9]\d{0,9}$/.test(path[1])) throw new HttpError(422, 'INVALID_QUERY', 'Invalid warehouse identifier.');
-    const value = await getWarehouse(client, Number(path[1]));
+    const value = await getWarehouse(client, Number(path[1]), contextFields as WarehouseRecordedFieldName[] | undefined);
     if (!value) throw new HttpError(404, 'NOT_FOUND', 'Warehouse not found.');
     return { value };
   }

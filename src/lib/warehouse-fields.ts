@@ -1,5 +1,7 @@
 import { sanitizeLabel } from './privacy';
 import { DATE_PERIODS } from './query-time';
+import type { RedactedCrmText } from './crm-redaction';
+import { redactWarehouseRecordedSource, warehouseRecordedValueSql, WAREHOUSE_NUMERIC_SOURCE_MAX_BYTES } from './warehouse-recorded-context';
 
 export type FieldEvidence = {
   kind: 'exact' | 'approximate' | 'range' | 'unknown';
@@ -7,6 +9,7 @@ export type FieldEvidence = {
   lower?: number;
   upper?: number;
   source?: string;
+  recorded_source?: RedactedCrmText;
 };
 
 export type WarehouseNumericField = {
@@ -63,10 +66,10 @@ export const WAREHOUSE_FILTER_CATALOG: readonly WarehouseFilterDefinition[] = [
   ...WAREHOUSE_NUMERIC_FIELDS.flatMap(field => [field.minParam, field.maxParam].map(name => ({
     name, type: field.integer ? 'integer' as const : 'number' as const,
     ...(field.allowZero ? { minimum: 0 } : { exclusiveMinimum: 0 }), maximum: field.maximum,
-    description: `${name === field.minParam ? 'Minimum' : 'Maximum'} ${field.field}. Permissive ranges match on possible overlap; unknowns are excluded unless include_unknown=true.`,
+    description: `${name === field.minParam ? 'Minimum' : 'Maximum'} ${field.field}. Permissive ranges match on possible overlap and include unknowns by default. Set include_unknown=false to exclude unknowns explicitly.`,
   }))),
   { name: 'match_mode', type: 'string', enum: ['permissive', 'strict'], default: 'permissive', description: 'Permissive accepts scalar estimates and overlapping ranges as candidates requiring verification. Strict excludes approximate values and ranges; include_unknown=true can independently admit missing or uninterpretable constrained values.' },
-  { name: 'include_unknown', type: 'string', enum: ['true', 'false'], default: 'false', description: 'Include missing or uninterpretable values for constrained numeric fields; these matches require verification.' },
+  { name: 'include_unknown', type: 'string', enum: ['true', 'false'], description: 'Default true in permissive mode, false in strict mode. Keep missing or uninterpretable constrained numeric values as candidates for investigation. Explicit false excludes them. Does not soften category or boolean filters.' },
   { name: 'date_field', type: 'string', enum: ['created', 'updated'], default: 'created', description: 'Date field for period/date bounds. created is warehouse record creation; updated is the Dashboard Warehouse-row timestamp status_updated_at, not complete edit history. Related WarehouseData changes may not advance it. Requires period, date_from or date_to.' },
   { name: 'period', type: 'string', enum: DATE_PERIODS, description: 'Calendar period in Asia/Kolkata. Weeks start Monday; rolling day periods include today. Cannot combine with explicit date bounds.' },
   { name: 'date_from', type: 'string', description: 'Inclusive India calendar date YYYY-MM-DD. Combine with date_to or use alone; cannot combine with period.' },
@@ -121,13 +124,14 @@ function validMeasurement(number: number, field: WarehouseNumericField) {
 
 export function parseWarehouseMeasurement(value: unknown, fieldOrName: WarehouseNumericField | string): FieldEvidence {
   const field = fieldDefinition(fieldOrName);
-  if (typeof value !== 'string' && typeof value !== 'number') return { kind: 'unknown' };
+  const unknown = (): FieldEvidence => ({ kind: 'unknown',
+    recorded_source: redactWarehouseRecordedSource(value, WAREHOUSE_NUMERIC_SOURCE_MAX_BYTES) });
+  if (typeof value !== 'string' && typeof value !== 'number') return unknown();
   const raw = String(value).replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, '');
+  // The legacy source string remains exclusive to parsed measurements. Failed
+  // parsing uses a masked object so absent and recorded-but-unparsed differ.
+  if (!raw || raw.length > MAX_SOURCE_LENGTH) return unknown();
   const source = sanitizeLabel(raw, MAX_SOURCE_LENGTH);
-  // Unparsed specification prose may contain names or obfuscated contacts.
-  // Only successfully parsed measurements are eligible for a source excerpt.
-  const unknown: FieldEvidence = { kind: 'unknown' };
-  if (!raw || raw.length > MAX_SOURCE_LENGTH) return unknown;
   const text = raw.toLowerCase();
   const patterns = warehouseMeasurementPatterns(field);
   const convert = (number: string, unit?: string) => Number(number.replaceAll(',', ''))
@@ -138,14 +142,14 @@ export function parseWarehouseMeasurement(value: unknown, fieldOrName: Warehouse
     if (key === 'range') {
       const lower = convert(match[1], match[2] || match[4]);
       const upper = convert(match[3], match[4] || match[2]);
-      if (!validMeasurement(lower, field) || !validMeasurement(upper, field) || lower > upper) return unknown;
+      if (!validMeasurement(lower, field) || !validMeasurement(upper, field) || lower > upper) return unknown();
       return { kind: 'range', lower, upper, ...(source ? { source } : {}) };
     }
     const number = convert(match[1], match[2]);
-    if (!validMeasurement(number, field)) return unknown;
+    if (!validMeasurement(number, field)) return unknown();
     return { kind: key === 'exact' ? 'exact' : 'approximate', value: number, ...(source ? { source } : {}) };
   }
-  return unknown;
+  return unknown();
 }
 
 function sqlLiteral(text: string) { return `'${text.replaceAll("'", "''")}'`; }
@@ -170,7 +174,7 @@ export function warehouseMeasurementSql(field: WarehouseNumericField, index: num
         CASE WHEN ${valid} THEN v.lo END AS lower,
         CASE WHEN ${valid} THEN v.hi END AS upper,
         CASE WHEN ${valid} AND m.kind <> 'range' THEN v.lo END AS value,
-        left(btrim(${field.column}, E' \\t\\r\\n'), ${MAX_SOURCE_LENGTH + 1}) AS source
+        ${warehouseRecordedValueSql(field.column)} AS source
       FROM LATERAL (SELECT CASE WHEN length(btrim(${field.column}, E' \\t\\r\\n')) <= ${MAX_SOURCE_LENGTH} THEN lower(btrim(${field.column}, E' \\t\\r\\n')) END AS text OFFSET 0) t
       CROSS JOIN LATERAL (SELECT ${matchSql} OFFSET 0) p
       CROSS JOIN LATERAL (SELECT CASE WHEN p.exact IS NOT NULL THEN 'exact' WHEN p.approximate IS NOT NULL OR p."approximateSuffix" IS NOT NULL THEN 'approximate' WHEN p.range IS NOT NULL THEN 'range' ELSE 'unknown' END AS kind,

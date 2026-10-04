@@ -4,6 +4,7 @@ import { sanitizeLabel } from './privacy';
 import { addDateConditions, resolveDateQuery } from './query-time';
 import { buildPagination } from './query-pagination';
 import { warehouseMediaCounts } from './warehouse-qa';
+import { warehouseRecordedContext, WAREHOUSE_RECORDED_CONTEXT_SELECT, type WarehouseRecordedFieldName } from './warehouse-recorded-context';
 import {
   WAREHOUSE_BOOLEAN_FIELDS, WAREHOUSE_CATEGORY_FIELDS, WAREHOUSE_FILTER_CATALOG,
   WAREHOUSE_NUMERIC_FIELDS, WAREHOUSE_SUMMARY_CATALOG, WAREHOUSE_SUMMARY_GROUPS,
@@ -98,7 +99,7 @@ const COLUMNS = `w.id, w.city, w.state, w.zone, w."warehouseType" AS warehouse_t
   w.media AS qa_media, w.photos AS qa_photos,
   (wd.latitude IS NOT NULL AND wd.longitude IS NOT NULL) AS has_valid_google_maps_id,
   w."handoverDate"::text AS handover_date, ${CREATED_AT} AS created_at, ${UPDATED_AT} AS updated_at,
-  ${EVIDENCE_SELECT}`;
+  ${EVIDENCE_SELECT}, ${WAREHOUSE_RECORDED_CONTEXT_SELECT}`;
 const BASE_FROM = 'FROM public."Warehouse" w LEFT JOIN public."WarehouseData" wd ON wd."warehouseId" = w.id';
 const FROM = `${BASE_FROM} ${NORMALIZATION_JOINS}`;
 
@@ -124,7 +125,7 @@ function validAreas(value: unknown): number[] {
     typeof area === 'number' && Number.isSafeInteger(area) && area > 0 && area <= 1e9) : [];
 }
 
-function warehouse(row: Row, constrainedFields: readonly string[] = []) {
+function warehouse(row: Row, constrainedFields: readonly string[] = [], contextFields?: readonly WarehouseRecordedFieldName[]) {
   const evidence: Record<string, FieldEvidence> = {};
   const supplied = row.field_evidence && typeof row.field_evidence === 'object' && !Array.isArray(row.field_evidence)
     ? row.field_evidence as Row : {};
@@ -154,6 +155,7 @@ function warehouse(row: Row, constrainedFields: readonly string[] = []) {
     land_type: sanitizeLabel(row.land_type), pollution_zone: sanitizeLabel(row.pollution_zone),
     water_supply: sanitizeLabel(row.water_supply), micromarkets: labels(row.micromarkets), suitable_for: labels(row.suitable_for),
     handover_date: calendarDate(row.handover_date), created_at: timestamp(row.created_at), updated_at: timestamp(row.updated_at),
+    recorded_context: warehouseRecordedContext(row.recorded_context, contextFields),
     field_evidence: evidence,
     verification_required: Object.values(evidence).some(item => item.kind === 'approximate' || item.kind === 'range')
       || constrainedFields.some(field => field === 'total_space_sqft' ? areas.length === 0 : evidence[field].kind === 'unknown'),
@@ -164,7 +166,7 @@ function warehouseFilters(query: URLSearchParams, catalog = WAREHOUSE_FILTER_CAT
   validateKeys(query, catalog.map(({ name }) => name));
   const time = resolveDateQuery(query, ['created', 'updated']);
   const mode = enumParameter(query, 'match_mode', ['permissive', 'strict'], 'permissive') as 'permissive' | 'strict';
-  const includeUnknown = enumParameter(query, 'include_unknown', ['true', 'false'], 'false') === 'true';
+  const includeUnknown = enumParameter(query, 'include_unknown', ['true', 'false'], mode === 'permissive' ? 'true' : 'false') === 'true';
   const numbers = Object.fromEntries(catalog.filter(item => item.type !== 'string')
     .map(item => [item.name, numericParameter(query, item)]));
   const values: unknown[] = [];
@@ -219,7 +221,7 @@ function warehouseFilters(query: URLSearchParams, catalog = WAREHOUSE_FILTER_CAT
   return { values, bind, where, constrainedFields, candidateNormalizers, numbers, time,
     matching_policy: {
       mode, include_unknown: includeUnknown, range_matching: 'overlap' as const,
-      guidance: 'Approximate values and overlapping ranges are provisional candidates. Tell the user that entries marked verification_required need their specifications verified. Unknown fields do not establish suitability; exact numeric properties are null for non-exact evidence.',
+      guidance: 'Discovery defaults to permissive numeric matching, including missing or uninterpretable constrained measurements. Approximate values, overlapping ranges and unknowns are candidates to investigate, not confirmed matches. Read recorded source text and property context before ranking. Explicit include_unknown=false excludes unknown numeric values; strict defaults to excluding them. Category and boolean filters still match exactly: use them only when intended, and broaden searches when patchy tags would hide candidates. Exact numeric properties are null for non-exact evidence.',
     },
   };
 }
@@ -229,7 +231,8 @@ export async function searchWarehouses(client: PoolClient, query: URLSearchParam
   const { values, bind, where, constrainedFields, candidateNormalizers, time } = filters;
   const limit = filters.numbers.limit ?? 10;
   const pagination = buildPagination(query, { idColumn: 'w.id', idType: 'integer', sortColumns: SORT_COLUMNS,
-    filterContext: { start_at: time.start_at, end_before: time.end_before },
+    filterContext: { start_at: time.start_at, end_before: time.end_before,
+      matching_policy_version: 2, mode: filters.matching_policy.mode, include_unknown: filters.matching_policy.include_unknown },
   }, bind);
   where.push(...pagination.where);
   const result = await client.query<Row>(`WITH candidate_page AS MATERIALIZED (
@@ -238,15 +241,27 @@ export async function searchWarehouses(client: PoolClient, query: URLSearchParam
   ) SELECT ${COLUMNS}${pagination.sortColumn ? `, ${pagination.sortColumn} AS sort_value` : ''} ${BASE_FROM}
     INNER JOIN candidate_page ON candidate_page.id = w.id
     ${NORMALIZATION_JOINS} ORDER BY ${pagination.orderBy}`, values);
-  const selected = result.rows.slice(0, limit);
-  const hasMore = result.rows.length > limit;
+  // Rich specification text must not make a valid page unreadable to a client.
+  // Stop at a whole-record boundary and continue after the last emitted row,
+  // including rows already fetched but not emitted. Never skip a large record.
+  const selected: Row[] = [];
+  const items: ReturnType<typeof warehouse>[] = [];
+  let itemBytes = 2;
+  for (const row of result.rows.slice(0, limit)) {
+    const item = warehouse(row, constrainedFields);
+    const size = Buffer.byteLength(JSON.stringify(item), 'utf8') + 1;
+    if (items.length && itemBytes + size > 60_000) break;
+    if (size > 70_000) throw new HttpError(503, 'WAREHOUSE_RESPONSE_TOO_LARGE', 'This warehouse record exceeds the supported response size.');
+    selected.push(row); items.push(item); itemBytes += size;
+  }
+  const hasMore = result.rows.length > selected.length;
   return {
-    items: selected.map(row => warehouse(row, constrainedFields)),
+    items,
     nextCursor: hasMore ? pagination.cursorFor(selected[selected.length - 1] as { id: number; sort_value?: unknown }) : null,
     matching_policy: filters.matching_policy,
     query_context: {
       ...time, sort: pagination.sort, returned_count: selected.length, has_more: hasMore,
-      semantics: { ...DATE_SEMANTICS, pagination: 'One bounded page, not a total. Follow nextCursor unchanged for more results. Concurrent source edits may change later pages; this is not a frozen snapshot.' },
+      semantics: { ...DATE_SEMANTICS, pagination: 'One bounded page, not a total. Rich records may shorten a page below the requested limit; follow nextCursor unchanged for every remaining record. Concurrent source edits may change later pages; this is not a frozen snapshot.' },
     },
   };
 }
@@ -339,10 +354,10 @@ export async function summarizeWarehouses(client: PoolClient, query: URLSearchPa
   };
 }
 
-export async function getWarehouse(client: PoolClient, id: number) {
+export async function getWarehouse(client: PoolClient, id: number, contextFields?: readonly WarehouseRecordedFieldName[]) {
   if (!Number.isSafeInteger(id) || id <= 0 || id > MAX_ID) invalid('Warehouse id must be a positive PostgreSQL integer');
   const result = await client.query<Row>(`SELECT ${COLUMNS} ${FROM} WHERE w.visibility IS TRUE AND w.id = $1 LIMIT 1`, [id]);
-  return result.rows[0] ? warehouse(result.rows[0]) : null;
+  return result.rows[0] ? warehouse(result.rows[0], [], contextFields) : null;
 }
 
 /** A selected shortlist, not a new inventory search. Reuses visibility and the

@@ -42,15 +42,15 @@ describe('warehouse candidate evidence', () => {
       dock_count: null, clear_height_ft: null, asking_rate_per_sqft: null, power_kva: 15, verification_required: true,
       field_evidence: { dock_count: { kind: 'approximate', value: 4 }, clear_height_ft: { kind: 'range', lower: 25, upper: 30 } },
     });
-    expect(output.matching_policy).toMatchObject({ mode: 'permissive', include_unknown: false, range_matching: 'overlap' });
-    expect(output.matching_policy.guidance).toMatch(/Tell the user.*verified/);
+    expect(output.matching_policy).toMatchObject({ mode: 'permissive', include_unknown: true, range_matching: 'overlap' });
+    expect(output.matching_policy.guidance).toMatch(/not confirmed matches/);
   });
 
   it('distinguishes an exact zero from unknown and flags explicitly included unknown constraints', async () => {
     const { client } = database([row({ dock_count: '0', plinth_height_ft: '0', washroom_count: 'No details yet' })]);
     const output = await searchWarehouses(client, new URLSearchParams('washrooms_min=2&include_unknown=true&match_mode=strict'));
     expect(output.items[0]).toMatchObject({ dock_count: 0, plinth_height_ft: 0, washroom_count: null, verification_required: true });
-    expect(output.items[0].field_evidence.washroom_count).toEqual({ kind: 'unknown' });
+    expect(output.items[0].field_evidence.washroom_count).toMatchObject({ kind: 'unknown' });
     expect(output.matching_policy).toMatchObject({ mode: 'strict', include_unknown: true });
   });
 
@@ -76,7 +76,7 @@ describe('warehouse candidate evidence', () => {
     const output = await getWarehouse(client, 18);
     expect(output).toMatchObject({ micromarkets: ['Nelamangala'], suitable_for: ['FMCG'], fire_noc_available: null, lift_access: false });
     expect(JSON.stringify(output)).not.toMatch(/Private|9876543210|contact@example|private\.example/);
-    expect(output?.field_evidence.dock_count).toEqual({ kind: 'unknown' });
+    expect(output?.field_evidence.dock_count).toMatchObject({ kind: 'unknown' });
   });
 });
 
@@ -106,7 +106,7 @@ describe('warehouse query boundary', () => {
   it('uses possible interval overlap and keeps categorical filters, visibility and pagination conjunctive', async () => {
     const { client, query } = database();
     const parameters = new URLSearchParams({ city: 'Bangalore', micromarket: "King's Road", docks_min: '4', docks_max: '6', verified: 'true', fire_noc: 'unknown', lift_access: 'false' });
-    const cursor = buildPagination(parameters, { idColumn: 'w.id', idType: 'integer', sortColumns: {}, filterContext: { start_at: null, end_before: null } }, () => '$unused').cursorFor({ id: 12 });
+    const cursor = buildPagination(parameters, { idColumn: 'w.id', idType: 'integer', sortColumns: {}, filterContext: { start_at: null, end_before: null, matching_policy_version: 2, mode: 'permissive', include_unknown: true } }, () => '$unused').cursorFor({ id: 12 });
     parameters.set('cursor', cursor);
     await searchWarehouses(client, parameters);
     const [sql, values] = query.mock.calls[0];
@@ -116,7 +116,7 @@ describe('warehouse query boundary', () => {
     expect(where).toContain('wd."fireNocAvailable" IS NULL');
     expect(where).toContain('w."liftAccess" IS FALSE');
     expect(where).toMatch(/n0\.kind IN \('exact', 'approximate', 'range'\) AND n0\.upper >= \$\d+ AND n0\.lower <= \$\d+/);
-    expect(where).not.toContain("OR n0.kind = 'unknown'");
+    expect(where).toContain("OR n0.kind = 'unknown'");
     expect(where).toContain('ORDER BY w.id ASC');
     expect(sql).not.toContain("King's Road");
     expect(values).toEqual(['Bangalore', "King's Road", 4, 6, 12, 11]);
