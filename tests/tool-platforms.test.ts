@@ -58,7 +58,7 @@ const names = (result: { tools: { name: string }[] }) => result.tools.map(tool =
 describe('platform-specific MCP tool availability', () => {
   it('keeps existing read tools on both harnesses by default within granted scopes', async () => {
     expect(key.scopes).not.toContain('gis:write');
-    const expected = Object.keys(TOOL_PROMPTS).filter(name => !['create_gis_poi', 'rollback_gis_poi', 'get_email_connection', 'create_crm_rfq', 'create_email_draft', 'read_email_draft', 'list_email_drafts'].includes(name)
+    const expected = Object.keys(TOOL_PROMPTS).filter(name => !['create_gis_poi', 'rollback_gis_poi', 'get_email_connection', 'create_crm_rfq', 'create_email_draft', 'update_email_draft', 'read_email_draft', 'list_email_drafts'].includes(name)
       && (key.scopes.includes('analytics:read') || !['analytics_capabilities', 'ga4_report', 'search_console_report'].includes(name)));
     for (const platform of ['claude', 'whatsapp'] as const) {
       expect(names((await rpc(platform, 'tools/list')).result).sort()).toEqual([...expected].sort());

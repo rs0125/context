@@ -10,8 +10,10 @@ import { EXPECTED_RUNTIME_POLICY, RUNTIME_ROLE } from './runtime-policy.mjs';
 // Private integration state only; never modifies Warehouse, CRM or roster.
 // The default CLI invocation does not read environment files or connect to a DB.
 const SCHEMA = 'context_gmail_private';
-const MARKER = 'context-gmail-schema-v2';
-const TABLE_MARKER = 'context-gmail-table-v2:';
+const MARKER = 'context-gmail-schema-v3';
+const PREVIOUS_MARKER = 'context-gmail-schema-v2';
+const PREVIOUS_TABLE_MARKER = 'context-gmail-table-v2:';
+const TABLE_MARKER = 'context-gmail-table-v3:';
 const LEGACY_MARKER = 'context-gmail-schema-v1';
 const LEGACY_TABLE_MARKER = 'context-gmail-table-v1:';
 const BLOCKED_ROLES = ['anon', 'authenticated', 'service_role'];
@@ -71,10 +73,40 @@ const TABLES = {
       CONSTRAINT draft_operations_reason_check CHECK (reason IS NULL OR reason ~ '^[A-Z][A-Z0-9_]{0,79}$')
     )`,
   },
+  draft_update_operations: {
+    columns: [['employee_id','integer'],['employee_email','text'],['operation_id','uuid'],['connection_id','uuid'],
+      ['connection_version','integer'],['google_sub','text'],['request_hash','text'],['draft_ref','uuid'],['draft_id','text'],
+      ['expected_message_id','text'],['state','text'],['message_id','text'],['reason','text'],
+      ['created_at','timestamp with time zone'],['updated_at','timestamp with time zone']],
+    nullable: ['message_id','reason'],
+    constraints: { draft_update_operations_pkey:'p', draft_update_connection_fkey:'f', draft_update_original_fkey:'f',
+      draft_update_owner_check:'c', draft_update_email_check:'c', draft_update_version_check:'c', draft_update_subject_check:'c',
+      draft_update_hash_check:'c', draft_update_target_check:'c', draft_update_state_check:'c', draft_update_result_check:'c', draft_update_reason_check:'c' },
+    create: `CREATE TABLE context_gmail_private.draft_update_operations (
+      employee_id integer NOT NULL, employee_email text NOT NULL, operation_id uuid NOT NULL,
+      connection_id uuid NOT NULL, connection_version integer NOT NULL, google_sub text NOT NULL,
+      request_hash text NOT NULL, draft_ref uuid NOT NULL, draft_id text NOT NULL, expected_message_id text NOT NULL,
+      state text NOT NULL, message_id text, reason text,
+      created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (employee_id,operation_id),
+      CONSTRAINT draft_update_connection_fkey FOREIGN KEY (connection_id,employee_id) REFERENCES context_gmail_private.connections(id,employee_id),
+      CONSTRAINT draft_update_original_fkey FOREIGN KEY (employee_id,draft_ref) REFERENCES context_gmail_private.draft_operations(employee_id,operation_id),
+      CONSTRAINT draft_update_owner_check CHECK (employee_id > 0),
+      CONSTRAINT draft_update_email_check CHECK (employee_email = lower(employee_email) AND char_length(employee_email) <= 254 AND employee_email ~ '^[^[:space:]@]+@wareongo[.]com$'),
+      CONSTRAINT draft_update_version_check CHECK (connection_version > 0),
+      CONSTRAINT draft_update_subject_check CHECK (google_sub ~ '^[A-Za-z0-9_-]{1,255}$'),
+      CONSTRAINT draft_update_hash_check CHECK (request_hash ~ '^[a-f0-9]{64}$'),
+      CONSTRAINT draft_update_target_check CHECK (char_length(draft_id) <= 256 AND draft_id ~ '^[A-Za-z0-9_-]+$' AND char_length(expected_message_id) <= 256 AND expected_message_id ~ '^[A-Za-z0-9_-]+$'),
+      CONSTRAINT draft_update_state_check CHECK (state IN ('dispatching','updated','unknown','rejected')),
+      CONSTRAINT draft_update_result_check CHECK ((state = 'updated' AND message_id IS NOT NULL AND char_length(message_id) <= 256 AND message_id ~ '^[A-Za-z0-9_-]+$') OR (state <> 'updated' AND message_id IS NULL)),
+      CONSTRAINT draft_update_reason_check CHECK (reason IS NULL OR reason ~ '^[A-Z][A-Z0-9_]{0,79}$')
+    )`,
+  },
 };
 
 // Validate the original deployment and its signed table descriptions before
 // upgrading. Never adopt an unrelated schema or guess an old draft's identity.
+const PREVIOUS_TABLES = { connections: TABLES.connections, draft_operations: TABLES.draft_operations };
 const LEGACY_TABLES = {
   connections: { ...TABLES.connections, nullable: ['encrypted_refresh_token'] },
   draft_operations: {
@@ -131,18 +163,18 @@ export async function migrateGmailStorage(client) {
     if (!role || (!role.rolsuper && !role.rolbypassrls)) fail('GMAIL_ROLE_REQUIRES_RLS_BYPASS');
     const schema = (await client.query(`SELECT n.oid, n.nspowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) AS owned,
       obj_description(n.oid, 'pg_namespace') AS marker FROM pg_namespace n WHERE n.nspname = $1`, [SCHEMA])).rows[0];
-    if (schema && (!schema.owned || ![MARKER, LEGACY_MARKER].includes(schema.marker))) fail('GMAIL_SCHEMA_COLLISION');
+    if (schema && (!schema.owned || ![MARKER, PREVIOUS_MARKER, LEGACY_MARKER].includes(schema.marker))) fail('GMAIL_SCHEMA_COLLISION');
     if (schema) {
       const collisions = (await client.query(`SELECT
         (SELECT count(*)::integer FROM pg_class WHERE relnamespace = $1 AND relname NOT IN
-          ('connections', 'connections_pkey', 'connections_employee_id_key', 'connections_id_employee_id_key', 'draft_operations', 'draft_operations_pkey')) AS relations,
+          ('connections', 'connections_pkey', 'connections_employee_id_key', 'connections_id_employee_id_key', 'draft_operations', 'draft_operations_pkey'${schema.marker === MARKER ? ", 'draft_update_operations', 'draft_update_operations_pkey'" : ''})) AS relations,
         (SELECT count(*)::integer FROM pg_proc WHERE pronamespace = $1) AS routines`, [schema.oid])).rows[0];
       if (!collisions || Object.values(collisions).some(value => value !== 0)) fail('GMAIL_SCHEMA_COLLISION');
       await client.query('LOCK TABLE context_gmail_private.connections, context_gmail_private.draft_operations IN SHARE ROW EXCLUSIVE MODE');
       const upgrading = schema.marker === LEGACY_MARKER;
-      for (const name of Object.keys(TABLES)) {
+      for (const name of Object.keys(schema.marker === MARKER ? TABLES : PREVIOUS_TABLES)) {
         const table = await inspect(client, name, upgrading ? LEGACY_TABLES : TABLES);
-        if (table.marker !== `${upgrading ? LEGACY_TABLE_MARKER : TABLE_MARKER}${table.signature}`) fail('GMAIL_RELATION_COLLISION');
+        if (table.marker !== `${upgrading ? LEGACY_TABLE_MARKER : schema.marker === PREVIOUS_MARKER ? PREVIOUS_TABLE_MARKER : TABLE_MARKER}${table.signature}`) fail('GMAIL_RELATION_COLLISION');
       }
       if (upgrading) {
         await client.query(`ALTER TABLE ${SCHEMA}.connections ALTER COLUMN google_sub DROP NOT NULL,
@@ -165,6 +197,11 @@ export async function migrateGmailStorage(client) {
           FROM ${SCHEMA}.connections AS connection WHERE operation.connection_id = connection.id
             AND operation.employee_id = connection.employee_id AND operation.employee_email = connection.employee_email
             AND operation.connection_version = connection.version`);
+      }
+      if (schema.marker !== MARKER) {
+        await client.query(TABLES.draft_update_operations.create);
+        await client.query(`ALTER TABLE ${SCHEMA}.draft_update_operations ENABLE ROW LEVEL SECURITY`);
+        await client.query(`ALTER TABLE ${SCHEMA}.draft_update_operations FORCE ROW LEVEL SECURITY`);
         await client.query(`COMMENT ON SCHEMA ${SCHEMA} IS '${MARKER}'`);
         for (const name of Object.keys(TABLES)) {
           const table = await inspect(client, name);

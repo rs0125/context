@@ -1,4 +1,4 @@
-/** Narrow Gmail adapter: this module cannot send, delete, or update mail.
+/** Narrow Gmail adapter: this module cannot send or delete mail; updates replace an existing draft only.
  * Employee/mailbox ownership and durable operation deduplication belong to the
  * calling service. Google grants compose/send together; our boundary is code.
  */
@@ -29,12 +29,17 @@ const createSchema = z.object({
 }).strict();
 
 export type GmailCreateDraftInput = z.input<typeof createSchema>;
+export type GmailUpdateDraftInput = GmailCreateDraftInput & { updateOperationId: string };
 export type GmailDraft = {
   id: string;
   messageId: string;
   threadId: string | null;
   operationId: string | null;
   internetMessageId: string | null;
+  updateOperationId?: string | null;
+  from?: string | null;
+  /** True only when full replacement cannot discard unsupported content. */
+  editable?: boolean;
   subject: string | null;
   /** Mailbox entries from the saved headers; may include user-edited display names. */
   to: string[];
@@ -87,7 +92,7 @@ function retryDelay(value: string | null): number {
 }
 function invalid(): never { throw new GmailClientError('GMAIL_INVALID_INPUT'); }
 function responseInvalid(): never { throw new GmailClientError('GMAIL_RESPONSE_INVALID'); }
-function operationMessageId(operationId: string): string {
+export function operationMessageId(operationId: string): string {
   return `<wareongo.${createHash('sha256').update(operationId).digest('hex')}@drafts.wareongo.com>`;
 }
 function encodedSubject(subject: string): string {
@@ -100,7 +105,7 @@ function encodedSubject(subject: string): string {
   if (chunk) chunks.push(chunk);
   return chunks.map(value => `=?UTF-8?B?${Buffer.from(value).toString('base64')}?=`).join('\r\n ');
 }
-function mime(input: z.output<typeof createSchema>): string {
+function mime(input: z.output<typeof createSchema>, updateOperationId?: string): string {
   const body = Buffer.from(input.body.replace(/\r\n|\r|\n/g, '\r\n'), 'utf8').toString('base64');
   const headers = [
     `From: ${input.from}`, ...(input.to.length ? [`To: ${input.to.join(',\r\n ')}`] : []),
@@ -108,6 +113,7 @@ function mime(input: z.output<typeof createSchema>): string {
     `Subject: ${encodedSubject(input.subject)}`,
     `Message-ID: ${operationMessageId(input.operationId)}`,
     `X-Wareongo-Operation-ID: ${input.operationId}`,
+    ...(updateOperationId ? [`X-Wareongo-Update-ID: ${updateOperationId}`] : []),
     'MIME-Version: 1.0', 'Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: base64',
   ];
   return Buffer.from(`${headers.join('\r\n')}\r\n\r\n${body.match(/.{1,76}/g)?.join('\r\n') ?? ''}\r\n`, 'utf8').toString('base64url');
@@ -218,16 +224,38 @@ function parseDraft(value: unknown, expectedId?: string): GmailDraft {
   const headers = headersOf(payload?.headers);
   const operationId = oneHeader(headers, 'x-wareongo-operation-id');
   if (operationId !== null && !OPERATION_ID.test(operationId)) responseInvalid();
+  const updateOperationId = oneHeader(headers, 'x-wareongo-update-id');
+  if (updateOperationId !== null && !OPERATION_ID.test(updateOperationId)) responseInvalid();
+  const content = payload ? plainBody(payload) : { body: null, bodyTruncated: false, bodyFormat: 'unsupported' as const };
+  const from = oneHeader(headers, 'from');
+  const to = addresses(oneHeader(headers, 'to')), cc = addresses(oneHeader(headers, 'cc')), bcc = addresses(oneHeader(headers, 'bcc'));
+  const subject = decodeSubject(oneHeader(headers, 'subject'));
+  const bodyRecord = payload?.body && typeof payload.body === 'object' ? object(payload.body) : null;
+  // A multipart alternative, attachment, Bcc, display-name address, or reply
+  // threading metadata cannot be faithfully represented by this write schema.
+  const editable = !!payload && payload.mimeType === 'text/plain' && !payload.filename
+    && (payload.parts === undefined || Array.isArray(payload.parts) && payload.parts.length === 0)
+    && !oneHeader(headers, 'content-disposition')
+    && headers.every(header => ['from', 'to', 'cc', 'bcc', 'subject', 'message-id', 'date', 'mime-version',
+      'content-type', 'content-transfer-encoding', 'x-wareongo-operation-id', 'x-wareongo-update-id',
+      // Provider delivery/authentication metadata is not editable draft content.
+      'received', 'x-received', 'return-path', 'delivered-to', 'authentication-results', 'dkim-signature',
+      'arc-seal', 'arc-message-signature', 'arc-authentication-results'].includes(header.name)
+      || /^x-(?:google-|gm-)/.test(header.name))
+    && /^text\/plain(?:\s*;\s*charset=[\"']?(?:utf-8|us-ascii)[\"']?)?\s*$/i.test(oneHeader(headers, 'content-type') ?? 'text/plain')
+    && content.bodyFormat === 'text' && !content.bodyTruncated && content.body !== null
+    && bodyRecord !== null && typeof bodyRecord.size === 'number' && bodyRecord.size === Buffer.byteLength(content.body)
+    && Buffer.byteLength(content.body) <= 20_000 && subject !== null && !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(subject)
+    && bcc.length === 0 && createSchema.safeParse({ from, to, cc, subject, body: content.body, operationId }).success;
   return {
+    updateOperationId, from, editable,
     id, messageId: providerId(message.id), threadId: message.threadId === undefined ? null : providerId(message.threadId),
-    operationId, internetMessageId: oneHeader(headers, 'message-id'), subject: decodeSubject(oneHeader(headers, 'subject')),
-    to: addresses(oneHeader(headers, 'to')), cc: addresses(oneHeader(headers, 'cc')), bcc: addresses(oneHeader(headers, 'bcc')),
-    ...(payload ? plainBody(payload) : { body: null, bodyTruncated: false, bodyFormat: 'unsupported' as const }),
+    operationId, internetMessageId: oneHeader(headers, 'message-id'), subject, to, cc, bcc, ...content,
   };
 }
 
 export type GmailClientOptions = { fetch?: typeof fetch; timeoutMs?: number; maxResponseBytes?: number };
-type Request = { kind: 'create'; raw: string } | { kind: 'get'; id: string } | { kind: 'find'; operationId: string };
+type Request = { kind: 'update'; id: string; raw: string } | { kind: 'create'; raw: string } | { kind: 'get'; id: string } | { kind: 'find'; operationId: string };
 
 export class GmailClient {
   readonly #fetch: typeof fetch;
@@ -249,6 +277,14 @@ export class GmailClient {
       // as a verified read of Gmail's saved content; getDraft performs that read.
       return parseDraft(value);
     } catch { throw new GmailClientError('GMAIL_RESPONSE_INVALID', { operationMayHaveSucceeded: true }); }
+  }
+  async updateDraft(accessToken: string, draftId: string, input: GmailUpdateDraftInput, signal?: AbortSignal): Promise<GmailDraft> {
+    const { updateOperationId, ...content } = input;
+    const parsed = createSchema.safeParse(content);
+    if (!parsed.success || !ID.test(draftId) || !OPERATION_ID.test(updateOperationId)) invalid();
+    const value = await this.#request(accessToken, { kind: 'update', id: draftId, raw: mime(parsed.data, updateOperationId) }, signal);
+    try { return parseDraft(value, draftId); }
+    catch { throw new GmailClientError('GMAIL_RESPONSE_INVALID', { operationMayHaveSucceeded: true }); }
   }
   async getDraft(accessToken: string, draftId: string, signal?: AbortSignal): Promise<GmailDraft> {
     if (typeof draftId !== 'string' || !ID.test(draftId)) invalid();
@@ -284,11 +320,12 @@ export class GmailClient {
     if (signal?.aborted) throw new GmailClientError('GMAIL_ABORTED');
     const url = new URL(DRAFTS_URL);
     if (request.kind === 'get') { url.pathname += `/${request.id}`; url.searchParams.set('format', 'full'); }
+    if (request.kind === 'update') url.pathname += `/${request.id}`;
     if (request.kind === 'find') {
       url.searchParams.set('q', `rfc822msgid:${operationMessageId(request.operationId)}`);
       url.searchParams.set('maxResults', String(MAX_RECONCILE_MATCHES));
     }
-    const creating = request.kind === 'create';
+    const creating = request.kind === 'create' || request.kind === 'update';
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, this.#timeoutMs);
@@ -303,7 +340,7 @@ export class GmailClient {
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
       response = await Promise.race([this.#fetch(url.toString(), {
-        method: creating ? 'POST' : 'GET', redirect: 'error', cache: 'no-store', signal: controller.signal,
+        method: request.kind === 'update' ? 'PUT' : creating ? 'POST' : 'GET', redirect: 'error', cache: 'no-store', signal: controller.signal,
         headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json', ...(creating ? { 'Content-Type': 'application/json' } : {}) },
         ...(creating ? { body: JSON.stringify({ message: { raw: request.raw } }) } : {}),
       }), aborted]);

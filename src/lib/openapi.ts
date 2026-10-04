@@ -446,7 +446,7 @@ export function getOpenApiDocument() {
           responses: jsonResponses("Newest creation references and nextCursor.", false, z.toJSONSchema(emailDraftListOutputSchema)) },
       },
       "/mail/drafts/{draft_ref}": {
-        get: { summary: "Read your saved Gmail draft", description: "Requires mail:drafts and the same active connection used to create the draft. Reads only a draft created through this service. Missing does not establish whether it was sent or deleted. Never creates, updates or sends mail.",
+        get: { summary: "Read your saved Gmail draft", description: "Requires mail:drafts and the same active connection used to create the draft. Reads only a draft created through this service, returning its current message_id and editable flag. An edit must use the separate authenticated MCP update_email_draft tool with this fresh version and full replacement content. Missing does not establish whether it was sent or deleted. This REST endpoint never creates, updates or sends mail.",
           operationId: "read_email_draft", security: [{ bearerAuth: [] }],
           parameters: [{ name: "draft_ref", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
           responses: jsonResponses("Current bounded plain-text draft content.", false, z.toJSONSchema(emailDraftReadOutputSchema)) },

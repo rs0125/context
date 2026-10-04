@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import pg, { type PoolClient } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  claimGmailDraftOperation, completeGmailDisconnect, decryptGmailSecret, disconnectGmailConnection,
+  claimGmailDraftOperation, claimGmailDraftUpdateOperation, finishGmailDraftUpdateOperation, getGmailDraftUpdateOperation, completeGmailDisconnect, decryptGmailSecret, disconnectGmailConnection,
   encryptGmailSecret, finishGmailDraftOperation,
   getGmailConnection, getGmailDraftOperation, listGmailDraftReferences, markGmailNeedsReauth, quarantineGmailIssuedToken, saveGmailConnection,
   type GmailOwner,
@@ -63,18 +63,18 @@ const GMAIL_STORAGE_V1_SQL = `
   CREATE POLICY context_runtime ON context_gmail_private.draft_operations FOR ALL TO context_engine_runtime USING (true) WITH CHECK (true);
 `;
 
-async function signV1Table(client: PoolClient, name: 'connections' | 'draft_operations') {
+async function signV1Table(client: PoolClient, name: 'connections' | 'draft_operations', version = 1) {
   const relation = `context_gmail_private.${name}`;
   // Preserve the original JSON property and row ordering, including null defaults.
   const columns = (await client.query(`SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, a.attnotnull AS not_null,
     a.attidentity AS identity, a.attgenerated AS generated, a.attisdropped AS dropped,
     pg_get_expr(d.adbin, d.adrelid) AS default_expression
     FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-    WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 ORDER BY a.attnum`, [relation])).rows;
+    WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, [relation])).rows;
   const constraints = (await client.query(`SELECT conname AS name, contype AS type, convalidated AS validated,
     pg_get_constraintdef(oid, true) AS definition FROM pg_constraint WHERE conrelid = to_regclass($1) ORDER BY conname`, [relation])).rows;
   const signature = createHash('sha256').update(JSON.stringify({ columns, constraints })).digest('hex');
-  await client.query(`COMMENT ON TABLE ${relation} IS 'context-gmail-table-v1:${signature}'`);
+  await client.query(`COMMENT ON TABLE ${relation} IS 'context-gmail-table-v${version}:${signature}'`);
 }
 
 // Dedicated disposable localhost database only. No mailbox or provider traffic.
@@ -112,7 +112,14 @@ describe.skipIf(!databaseUrl)('Gmail lifecycle on isolated PostgreSQL', () => {
     admin = new pg.Pool({ connectionString: databaseUrl });
     const runtimePassword = randomBytes(24).toString('hex');
     await admin.query('CREATE TABLE public."VerifiedNumber" (id integer PRIMARY KEY, email text NOT NULL, is_active boolean NOT NULL)');
-    await admin.query(`CREATE ROLE context_engine_runtime LOGIN PASSWORD '${runtimePassword}'`);
+    const roleClient = await admin.connect();
+    try {
+      await roleClient.query('BEGIN');
+      await roleClient.query('SELECT pg_advisory_xact_lock(1784056941, 1802406261)');
+      await roleClient.query(`CREATE ROLE context_engine_runtime LOGIN PASSWORD '${runtimePassword}'`);
+      await roleClient.query('COMMIT');
+    } catch (error) { await roleClient.query('ROLLBACK'); throw error; }
+    finally { roleClient.release(); }
     await admin.query('GRANT USAGE ON SCHEMA public TO context_engine_runtime');
     await admin.query('GRANT SELECT ON public."VerifiedNumber" TO context_engine_runtime');
     const client = await admin.connect();
@@ -129,8 +136,10 @@ describe.skipIf(!databaseUrl)('Gmail lifecycle on isolated PostgreSQL', () => {
     const result = await runtime.query(`SELECT
       has_table_privilege(current_user, 'context_gmail_private.connections', 'UPDATE') AS can_disconnect,
       has_table_privilege(current_user, 'public."VerifiedNumber"', 'UPDATE') AS can_change_roster,
-      has_table_privilege(current_user, 'context_gmail_private.draft_operations', 'DELETE') AS can_delete_operations`);
-    expect(result.rows[0]).toEqual({ can_disconnect: true, can_change_roster: false, can_delete_operations: false });
+      has_table_privilege(current_user, 'context_gmail_private.draft_operations', 'DELETE') AS can_delete_operations,
+      has_table_privilege(current_user, 'context_gmail_private.draft_update_operations', 'INSERT') AS can_record_updates,
+      has_table_privilege(current_user, 'context_gmail_private.draft_update_operations', 'DELETE, TRUNCATE, REFERENCES, TRIGGER') AS unsafe_update_grants`);
+    expect(result.rows[0]).toEqual({ can_disconnect: true, can_change_roster: false, can_delete_operations: false, can_record_updates: true, unsafe_update_grants: false });
     const columns = await admin.query(`SELECT column_name FROM information_schema.columns
       WHERE table_schema='context_gmail_private' AND table_name='draft_operations'`);
     expect(columns.rows.map(row => row.column_name)).not.toContain('encrypted_content');
@@ -211,7 +220,57 @@ describe.skipIf(!databaseUrl)('Gmail lifecycle on isolated PostgreSQL', () => {
       expect((await client.query('SELECT * FROM context_gmail_private.connections ORDER BY id')).rows).toEqual(oldConnections);
       expect((await client.query('SELECT * FROM context_gmail_private.draft_operations ORDER BY operation_id')).rows).toEqual(expectedOperations);
       expect((await client.query(`SELECT obj_description(oid, 'pg_namespace') AS marker
-        FROM pg_namespace WHERE nspname='context_gmail_private'`)).rows[0].marker).toBe('context-gmail-schema-v2');
+        FROM pg_namespace WHERE nspname='context_gmail_private'`)).rows[0].marker).toBe('context-gmail-schema-v3');
+    } finally { client.release(true); await upgrade.end(); }
+  });
+
+  it('upgrades populated v2 storage additively and preserves active credentials and uncertain outcomes', async () => {
+    await admin.query('CREATE DATABASE context_gmail_v2_upgrade_test');
+    const url = new URL(databaseUrl!); url.pathname = '/context_gmail_v2_upgrade_test';
+    const upgrade = new pg.Pool({ connectionString: url.toString() });
+    const client = await upgrade.connect();
+    try {
+      await client.query(GMAIL_STORAGE_V1_SQL);
+      // Frozen v2 DDL, independent of the current migration implementation.
+      await client.query(`ALTER TABLE context_gmail_private.connections ALTER COLUMN google_sub DROP NOT NULL,
+        DROP CONSTRAINT connections_scopes_check, DROP CONSTRAINT connections_status_check;
+        ALTER TABLE context_gmail_private.connections
+        ADD CONSTRAINT connections_scopes_check CHECK (cardinality(granted_scopes) BETWEEN 0 AND 20 AND array_position(granted_scopes, NULL) IS NULL AND (google_sub IS NULL OR cardinality(granted_scopes) > 0)),
+        ADD CONSTRAINT connections_status_check CHECK ((status IN ('active', 'revoking', 'needs_reauth') AND encrypted_refresh_token IS NOT NULL AND google_sub IS NOT NULL) OR (status = 'disconnected' AND encrypted_refresh_token IS NULL));
+        ALTER TABLE context_gmail_private.draft_operations DROP COLUMN encrypted_content,
+        ADD COLUMN google_sub text, ADD COLUMN retry_at timestamptz, DROP CONSTRAINT draft_operations_state_check;
+        ALTER TABLE context_gmail_private.draft_operations
+        ADD CONSTRAINT draft_operations_subject_check CHECK (google_sub IS NULL OR google_sub ~ '^[A-Za-z0-9_-]{1,255}$'),
+        ADD CONSTRAINT draft_operations_retry_check CHECK ((state = 'retryable' AND retry_at IS NOT NULL) OR (state <> 'retryable' AND retry_at IS NULL)),
+        ADD CONSTRAINT draft_operations_state_check CHECK (state IN ('dispatching', 'created', 'unknown', 'rejected', 'retryable'));
+        COMMENT ON SCHEMA context_gmail_private IS 'context-gmail-schema-v2';`);
+      await signV1Table(client, 'connections', 2);
+      await signV1Table(client, 'draft_operations', 2);
+      const id = randomUUID();
+      const token = encryptGmailSecret('synthetic-v2-refresh-token', { purpose: 'refresh_token', employeeId: 1, id }, env);
+      await client.query(`INSERT INTO context_gmail_private.connections
+        (id, employee_id, employee_email, google_sub, account_email, encrypted_refresh_token, granted_scopes, version, status)
+        VALUES ($1, 1, 'synthetic-v2@wareongo.com', 'subject_v2', 'synthetic-v2@wareongo.com', $2, $3, 8, 'active')`, [id, token, scopes]);
+      for (const state of ['created', 'unknown', 'dispatching', 'retryable', 'rejected']) {
+        await client.query(`INSERT INTO context_gmail_private.draft_operations
+          (employee_id, employee_email, operation_id, connection_id, connection_version, request_hash, state, draft_id, message_id, google_sub, retry_at)
+          VALUES (1, 'synthetic-v2@wareongo.com', $1, $2, 8, $3, $4, $5, $6, 'subject_v2', $7)`,
+        [randomUUID(), id, 'b'.repeat(64), state, state === 'created' ? 'draft_v2' : null,
+          state === 'created' ? 'message_v2' : null, state === 'retryable' ? new Date('2026-10-06T06:00:00Z') : null]);
+      }
+      const beforeConnections = (await client.query('SELECT * FROM context_gmail_private.connections')).rows;
+      const beforeOperations = (await client.query('SELECT * FROM context_gmail_private.draft_operations ORDER BY operation_id')).rows;
+      for (let pass = 0; pass < 2; pass++) {
+        expect(await migrateGmailStorage(client)).toMatchObject({ verified: true, runtimeGranted: true });
+        expect((await client.query('SELECT * FROM context_gmail_private.connections')).rows).toEqual(beforeConnections);
+        expect((await client.query('SELECT * FROM context_gmail_private.draft_operations ORDER BY operation_id')).rows).toEqual(beforeOperations);
+        expect((await client.query('SELECT count(*)::int AS count FROM context_gmail_private.draft_update_operations')).rows[0].count).toBe(0);
+      }
+      const table = (await client.query(`SELECT relrowsecurity, relforcerowsecurity FROM pg_class
+        WHERE oid='context_gmail_private.draft_update_operations'::regclass`)).rows[0];
+      expect(table).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
+      expect(decryptGmailSecret(beforeConnections[0].encrypted_refresh_token, { purpose: 'refresh_token', employeeId: 1, id }, env))
+        .toBe('synthetic-v2-refresh-token');
     } finally { client.release(true); await upgrade.end(); }
   });
 
@@ -371,4 +430,60 @@ describe.skipIf(!databaseUrl)('Gmail lifecycle on isolated PostgreSQL', () => {
     await tx(client => finishGmailDraftOperation(client, owner, draft.operationId, { state: 'unknown', reason: 'PROVIDER_UNCERTAIN' }));
     expect((await tx(client => claimGmailDraftOperation(client, owner, draft))).claimed).toBe(false);
   });
+
+  const savedDraft = async () => {
+    const owner = await employee(), connection = await connect(owner), creation = claimInput(connection);
+    await tx(client => claimGmailDraftOperation(client, owner, creation));
+    await tx(client => finishGmailDraftOperation(client, owner, creation.operationId,
+      { state: 'created', draftId: 'same_draft', messageId: 'initial_message' }));
+    return { owner, connection, creation, update: { ...claimInput(connection),
+      draftRef: creation.operationId, draftId: 'same_draft', expectedMessageId: 'initial_message' } };
+  };
+
+  it('permits one concurrent claim and prevents a different update while the same draft is unresolved', async () => {
+    const h = await savedDraft();
+    const claims = await Promise.all([1, 2, 3].map(() => tx(client => claimGmailDraftUpdateOperation(client, h.owner, h.update))));
+    expect(claims.filter(result => result.claimed)).toHaveLength(1);
+    await expect(tx(client => claimGmailDraftUpdateOperation(client, h.owner,
+      { ...h.update, operationId: randomUUID() }))).rejects.toMatchObject({ code: 'GMAIL_DRAFT_UPDATE_PENDING' });
+    await tx(client => finishGmailDraftUpdateOperation(client, h.owner, h.update.operationId,
+      { state: 'unknown', reason: 'PROVIDER_UNCERTAIN' }));
+    expect((await tx(client => claimGmailDraftUpdateOperation(client, h.owner, h.update))).claimed).toBe(false);
+    await expect(tx(client => claimGmailDraftUpdateOperation(client, h.owner,
+      { ...h.update, operationId: randomUUID() }))).rejects.toMatchObject({ code: 'GMAIL_DRAFT_UPDATE_PENDING' });
+    expect(await tx(client => finishGmailDraftUpdateOperation(client, h.owner, h.update.operationId,
+      { state: 'rejected', reason: 'GMAIL_DRAFT_CHANGED' }))).toMatchObject({ state: 'unknown' });
+    expect(await tx(client => finishGmailDraftUpdateOperation(client, h.owner, h.update.operationId,
+      { state: 'updated', messageId: 'updated_message' }))).toMatchObject({ state: 'updated', draftRef: h.creation.operationId });
+    const next = { ...h.update, operationId: randomUUID(), expectedMessageId: 'updated_message' };
+    expect((await tx(client => claimGmailDraftUpdateOperation(client, h.owner, next))).claimed).toBe(true);
+  });
+
+  it('binds an edit operation to content, revision and original owned app-created draft', async () => {
+    const h = await savedDraft();
+    await tx(client => claimGmailDraftUpdateOperation(client, h.owner, h.update));
+    for (const patch of [{ requestHash: 'c'.repeat(64) }, { expectedMessageId: 'different_message' }])
+      await expect(tx(client => claimGmailDraftUpdateOperation(client, h.owner, { ...h.update, ...patch })))
+        .rejects.toMatchObject({ code: 'GMAIL_OPERATION_CONFLICT' });
+    const other = await savedDraft();
+    await expect(tx(client => claimGmailDraftUpdateOperation(client, other.owner,
+      { ...other.update, draftRef: h.creation.operationId }))).rejects.toMatchObject({ code: 'GMAIL_DRAFT_UNAVAILABLE' });
+    expect(await tx(client => getGmailDraftUpdateOperation(client, other.owner, h.update.operationId))).toBeNull();
+    await expect(tx(client => claimGmailDraftUpdateOperation(client, h.owner,
+      { ...h.update, operationId: randomUUID(), draftId: 'foreign_provider_draft' })))
+      .rejects.toMatchObject({ code: 'GMAIL_DRAFT_UNAVAILABLE' });
+  });
+
+  it('records an in-flight result after revocation without reopening employee access or retrying the write', async () => {
+    const h = await savedDraft();
+    await tx(client => claimGmailDraftUpdateOperation(client, h.owner, h.update));
+    await admin.query('UPDATE public."VerifiedNumber" SET is_active=false WHERE id=$1', [h.owner.employeeId]);
+    expect(await tx(client => finishGmailDraftUpdateOperation(client, h.owner, h.update.operationId,
+      { state: 'updated', messageId: 'updated_after_offboarding' }))).toMatchObject({ state: 'updated' });
+    await expect(tx(client => getGmailDraftUpdateOperation(client, h.owner, h.update.operationId)))
+      .rejects.toMatchObject({ code: 'GMAIL_EMPLOYEE_INACTIVE' });
+    await expect(tx(client => claimGmailDraftUpdateOperation(client, h.owner, h.update)))
+      .rejects.toMatchObject({ code: 'GMAIL_EMPLOYEE_INACTIVE' });
+  });
+
 });
