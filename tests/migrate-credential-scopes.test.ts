@@ -95,7 +95,9 @@ describe.each([
     expect(alterations).toHaveLength(upgraded.length);
     for (const name of upgraded) {
       const alteration = alterations.find(sql => sql.includes(`.${name}`))!;
-      expect(alteration).toContain('BETWEEN 1 AND 8');
+      expect(alteration).toContain('BETWEEN 1 AND 10');
+      expect(alteration).toContain('cms:read');
+      expect(alteration).toContain('cms:write');
       expect(alteration).toContain("'gis:write'");
       expect(alteration).toContain("'mail:drafts'");
       expect(alteration).toContain("'crm.rfq:write'");

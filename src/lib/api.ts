@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { callCms, cmsInputs, type CmsTool } from './cms-tools';
 import type { PoolClient } from 'pg';
 import { authenticateRequestKey, findDatabaseKey, resolvePrincipal, requireScope, type KeyRegistration, type Principal } from './auth';
 import { withReadOnlyTransaction } from './db';
@@ -31,6 +32,7 @@ const ANALYTICS_GUIDANCE = 'Aggregate website analytics for Analysts: /api/v1/an
 const QUERY_GUIDANCE = `Warehouse and CRM dates use Asia/Kolkata and the server clock. For warehouses added today in Bangalore use warehouses?city=Bangalore&period=today&sort=created_desc. For leads created this month use crm/opportunities?period=this_month; add view=created only for leads created BY you. Native Twenty creation time is source_created_at; it is not the mirror insertion time. Use date_field=follow_up&period=tomorrow for tomorrow's follow-ups. A date range uses inclusive YYYY-MM-DD date_from/date_to, or period, not both. Inspect query_context for resolved start_at/end_before and has_more; only summaries give full counts. Use warehouses/summary and crm/summary with the same filters for totals and grouped counts. Use crm/filters for stages, dates, sorting and permitted cities. Use crm/opportunities/{id}/assessment for a requirement checklist; add warehouse_ids as one to five comma-separated IDs for property comparisons and verification questions. Optional criteria must be supplied by the employee, not inferred; overrides never update CRM. Missing dates do not match date filters. Unknown is not zero. Updated timestamps do not establish an edit history, newly available inventory, or historical conversion rates. Keep filters and sort unchanged when passing nextCursor; searches are not frozen snapshots across concurrent source edits.`;
 
 type ApiDependencies = {
+  cmsCall: typeof callCms;
   transaction: <T>(work: (client: PoolClient) => Promise<T>) => Promise<T>;
   authenticate: (request: Request) => KeyRegistration | Promise<KeyRegistration>;
   revalidateKey?: (client: PoolClient, key: KeyRegistration) => Promise<void>;
@@ -50,6 +52,7 @@ type ApiDependencies = {
   audit: (entry: Record<string, unknown>) => void;
 };
 const defaults: ApiDependencies = {
+  cmsCall: callCms,
   transaction: withReadOnlyTransaction,
   authenticate: request => authenticateRequestKey(request, hash => withReadOnlyTransaction(client => findDatabaseKey(client, hash))),
   liveCrmAccess: (principal, view, opportunityId) => getLiveCrmAccess(principal, { view, opportunityId }),
@@ -234,6 +237,22 @@ export async function handleApiRequest(request: Request, path: string[], depende
     const key = await deps.authenticate(request);
     keyId = key.id;
     rateLimit(key.id);
+    if (path[0] === 'cms') {
+      if (path.length !== 2 || !['schema', 'list_pages', 'read_page', 'read_import'].includes(path[1])) throw new HttpError(404, 'NOT_FOUND', 'Endpoint not found.');
+      const query = new URL(request.url).searchParams;
+      const tool = `cms_${path[1]}` as CmsTool;
+      strictQuery(query, Object.keys(cmsInputs[tool].shape));
+      const args: Record<string, unknown> = Object.fromEntries(query);
+      if (args.limit !== undefined) args.limit = /^\d+$/.test(String(args.limit)) ? Number(args.limit) : NaN;
+      if (args.has_import_draft !== undefined) {
+        if (!['true', 'false'].includes(String(args.has_import_draft))) throw new HttpError(400, 'INVALID_QUERY', 'has_import_draft must be true or false.');
+        args.has_import_draft = args.has_import_draft === 'true';
+      }
+      const parsed = cmsInputs[tool].safeParse(args);
+      if (!parsed.success) throw new HttpError(422, 'INVALID_QUERY', 'Use the CMS tool schema for query parameters.');
+      const data = await deps.cmsCall(tool, parsed.data, key, request.signal, deps.revalidateKey ?? (async () => {}), { transaction: deps.transaction });
+      return request.method === 'HEAD' ? new Response(null, { headers }) : Response.json({ data, meta }, { headers });
+    }
     if (path[0] === 'mail') {
       const query = new URL(request.url).searchParams;
       const listing = path.join('/') === 'mail/drafts';

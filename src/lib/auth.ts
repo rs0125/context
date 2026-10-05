@@ -5,9 +5,9 @@ import { HttpError } from './errors';
 import { checkFailedCredential, noteFailedCredential } from './rate-limit';
 import { hasAnalystAccess, readRosterEmployees } from './employee-access';
 
-export const READ_SCOPES = ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read'] as const;
+export const READ_SCOPES = ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read', 'cms:read'] as const;
 /** Supported permissions are not defaults: writes always need an explicit credential grant. */
-export const SCOPES = [...READ_SCOPES, 'gis:write', 'mail:drafts', 'crm.rfq:write', 'crm.notes:write'] as const;
+export const SCOPES = [...READ_SCOPES, 'gis:write', 'mail:drafts', 'crm.rfq:write', 'crm.notes:write', 'cms:write'] as const;
 export type Scope = typeof SCOPES[number];
 export type Principal = { employeeId: number; email: string; scopes: Scope[]; keyId: string; twentyUserId?: string | null; isAnalyst: boolean };
 const registration = z.object({
@@ -20,7 +20,7 @@ const registration = z.object({
 }).strict();
 export type KeyRegistration = z.infer<typeof registration> & { source?: 'database'; employeeId?: number };
 
-type RosterAccess = { dashboardAccess: unknown; adminAccess: unknown; analystAccess?: unknown; twenty_user_id: unknown };
+type RosterAccess = { email?: string; dashboardAccess: unknown; adminAccess: unknown; analystAccess?: unknown; twenty_user_id: unknown };
 export function rosterTwentyUserId(employee: RosterAccess): string | null {
   return typeof employee.twenty_user_id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(employee.twenty_user_id)
     ? employee.twenty_user_id : null;
@@ -32,6 +32,7 @@ export function rosterReadScopes(employee: RosterAccess): Scope[] {
   if (employee.dashboardAccess === true || employee.adminAccess === true) scopes.push('warehouses:read');
   if (hasAnalystAccess(employee) || rosterTwentyUserId(employee)) scopes.push('crm:read');
   if (hasAnalystAccess(employee)) scopes.push('analytics:read');
+  if (hasAnalystAccess(employee)) scopes.push('cms:read');
   return scopes;
 }
 
@@ -42,6 +43,7 @@ export function rosterScopes(employee: RosterAccess): Scope[] {
   // Callers establish current active employee identity before intersecting explicit grants.
   scopes.push('mail:drafts');
   if (rosterTwentyUserId(employee)) scopes.push('crm.rfq:write', 'crm.notes:write');
+  if (hasAnalystAccess(employee)) scopes.push('cms:write');
   return scopes;
 }
 

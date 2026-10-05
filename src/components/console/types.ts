@@ -8,6 +8,7 @@ export const SCOPE_OPTIONS = [
 export const READ_SCOPE_OPTIONS = [
   ...SCOPE_OPTIONS,
   { value: 'analytics:read', label: 'Website analytics' },
+  { value: 'cms:read', label: 'Website CMS pages and schemas' },
 ] as const;
 
 /** Explicit OAuth consent vocabulary; console key issuance still defaults to reads only. */
@@ -17,6 +18,7 @@ export const AGENT_SCOPE_OPTIONS = [
   { value: 'mail:drafts', label: 'Create and read own email drafts' },
   { value: 'crm.rfq:write', label: 'Create, edit and undo own agent RFQs' },
   { value: 'crm.notes:write', label: 'Add deal notes and edit or undo own agent notes' },
+  { value: 'cms:write', label: 'Prepare and save private website content drafts' },
 ] as const;
 
 export type Employee = { email: string; name: string; isAdmin: boolean; isAnalyst: boolean; scopes: string[] };

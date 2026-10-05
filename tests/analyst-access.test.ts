@@ -28,9 +28,9 @@ describe('employee, Analyst and admin permission boundaries', () => {
     [{}, ['knowledge:read']],
     [{ dashboardAccess: true }, ['knowledge:read', 'warehouses:read']],
     [{ twenty_user_id: '11111111-1111-4111-8111-111111111111' }, ['knowledge:read', 'crm:read']],
-    [{ analystAccess: true }, ['knowledge:read', 'crm:read', 'analytics:read']],
-    [{ analystAccess: true, dashboardAccess: true }, ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read']],
-    [{ adminAccess: true }, ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read']],
+    [{ analystAccess: true }, ['knowledge:read', 'crm:read', 'analytics:read', 'cms:read']],
+    [{ analystAccess: true, dashboardAccess: true }, ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read', 'cms:read']],
+    [{ adminAccess: true }, ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read', 'cms:read']],
     [{ analystAccess: 'true', adminAccess: 1 }, ['knowledge:read']],
   ] as const)('derives scopes identically for browser and agent identities (%j)', async (overrides, expected) => {
     const row = { ...employee, ...overrides };
@@ -38,7 +38,7 @@ describe('employee, Analyst and admin permission boundaries', () => {
     expect(rosterReadScopes(row)).toEqual(expected);
     const identity = await resolveConsoleEmployee(db.client, employee.email);
     const key: KeyRegistration = { employeeId: employee.id, id: 'synthetic', hash: 'a'.repeat(64), employeeEmail: employee.email,
-      scopes: ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read'], expiresAt: '2099-01-01T00:00:00Z' };
+      scopes: ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read', 'cms:read'], expiresAt: '2099-01-01T00:00:00Z' };
     const principal = await resolvePrincipal(db.client, key);
     expect(identity.scopes).toEqual(expected); expect(principal.scopes).toEqual(expected);
     expect(identity.isAnalyst).toBe(principal.isAnalyst);

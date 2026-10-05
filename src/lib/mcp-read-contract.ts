@@ -2,44 +2,12 @@
 import { createHash } from 'node:crypto';
 import type { Scope } from './auth';
 import { HttpError } from './errors';
-import type { ToolPromptName } from './prompt-definitions';
+import { READ_CONTRACTS } from './tools/catalog';
+export type { ReadToolName } from './tools/catalog';
+import type { ReadToolName } from './tools/catalog';
 
 export const MCP_READ_CONTRACT_KEY = 'wareongo/context-read-v1';
-type ReadContract = {
-  requiredScopes: Scope[];
-  sourceFamily: 'context' | 'knowledge' | 'warehouses' | 'crm' | 'analytics' | 'mail';
-};
-
-/** Minimum discovery scopes. Individual arguments can require additional live permissions. */
-export type ReadToolName = Exclude<ToolPromptName, 'create_gis_poi' | 'rollback_gis_poi' | 'create_email_draft' | 'update_email_draft' | 'create_crm_rfq' | 'update_crm_rfq' | 'undo_crm_rfq' | 'create_crm_note' | 'update_crm_note' | 'undo_crm_note' | 'delete_crm_rfq' | 'delete_crm_note'>;
-export const MCP_READ_CONTRACTS: Record<ReadToolName, ReadContract> = {
-  read_crm_note: { requiredScopes: ['crm:read', 'crm.notes:write'], sourceFamily: 'crm' },
-  list_crm_note_changes: { requiredScopes: ['crm:read', 'crm.notes:write'], sourceFamily: 'crm' },
-  read_crm_rfq: { requiredScopes: ['crm.rfq:write'], sourceFamily: 'crm' },
-  list_crm_rfq_changes: { requiredScopes: ['crm.rfq:write'], sourceFamily: 'crm' },
-  get_email_connection: { requiredScopes: ['mail:drafts'], sourceFamily: 'mail' },
-  list_email_drafts: { requiredScopes: ['mail:drafts'], sourceFamily: 'mail' },
-  read_email_draft: { requiredScopes: ['mail:drafts'], sourceFamily: 'mail' },
-  get_context: { requiredScopes: [], sourceFamily: 'context' },
-  resolve_location: { requiredScopes: [], sourceFamily: 'context' },
-  analytics_capabilities: { requiredScopes: ['analytics:read'], sourceFamily: 'analytics' },
-  ga4_report: { requiredScopes: ['analytics:read'], sourceFamily: 'analytics' },
-  search_console_report: { requiredScopes: ['analytics:read'], sourceFamily: 'analytics' },
-  search_knowledge: { requiredScopes: ['knowledge:read'], sourceFamily: 'knowledge' },
-  read_knowledge: { requiredScopes: ['knowledge:read'], sourceFamily: 'knowledge' },
-  warehouse_filters: { requiredScopes: ['warehouses:read'], sourceFamily: 'warehouses' },
-  search_warehouses: { requiredScopes: ['warehouses:read'], sourceFamily: 'warehouses' },
-  warehouse_summary: { requiredScopes: ['warehouses:read'], sourceFamily: 'warehouses' },
-  read_warehouse: { requiredScopes: ['warehouses:read'], sourceFamily: 'warehouses' },
-  // Checklist-only calls need CRM; supplying warehouse_ids also needs warehouse permission.
-  assess_shortlist: { requiredScopes: ['crm:read'], sourceFamily: 'crm' },
-  crm_filters: { requiredScopes: ['crm:read'], sourceFamily: 'crm' },
-  search_crm_leads: { requiredScopes: ['crm:read'], sourceFamily: 'crm' },
-  crm_summary: { requiredScopes: ['crm:read'], sourceFamily: 'crm' },
-  read_crm_lead: { requiredScopes: ['crm:read'], sourceFamily: 'crm' },
-  read_crm_lead_context: { requiredScopes: ['crm:read'], sourceFamily: 'crm' },
-  crm_briefing: { requiredScopes: ['crm:read'], sourceFamily: 'crm' },
-};
+export const MCP_READ_CONTRACTS = READ_CONTRACTS;
 
 export function readToolMetadata(name: ReadToolName) {
   return { [MCP_READ_CONTRACT_KEY]: structuredClone(MCP_READ_CONTRACTS[name]) };

@@ -34,7 +34,7 @@ describe('employee-bound encrypted console keys', () => {
     expect(query.mock.calls[0][1][5]).not.toContain('crm.notes:write');
   });
 
-  it.each([{ adminAccess: true, analystAccess: false }, { adminAccess: false, analystAccess: true }, { adminAccess: false, analystAccess: false }])('issues analytics only with current Analyst access (%j)', async ({ adminAccess, analystAccess }) => {
+  it.each([{ adminAccess: true, analystAccess: false }, { adminAccess: false, analystAccess: true }, { adminAccess: false, analystAccess: false }])('issues analytics and CMS reads only with current Analyst or admin access (%j)', async ({ adminAccess, analystAccess }) => {
     const query = vi.fn(async (sql: string, values: unknown[]) => {
       if (sql.includes('FROM public."VerifiedNumber"')) return { rows: [{ id: 7, email: identity.email, name: identity.name,
         is_active: true, dashboardAccess: true, adminAccess, analystAccess, twenty_user_id: '11111111-1111-4111-8111-111111111111' }] };
@@ -44,7 +44,7 @@ describe('employee-bound encrypted console keys', () => {
     const client = { query } as unknown as PoolClient;
     const currentIdentity = await resolveConsoleEmployee(client, identity.email);
     const key = await rotateOwnConsoleKey(client, currentIdentity, now);
-    expect(key.scopes).toEqual(['knowledge:read', 'warehouses:read', 'crm:read', ...((adminAccess || analystAccess) ? ['analytics:read'] : [])]);
+    expect(key.scopes).toEqual(['knowledge:read', 'warehouses:read', 'crm:read', ...((adminAccess || analystAccess) ? ['analytics:read', 'cms:read'] : [])]);
     expect(query.mock.calls[1][1][5]).toEqual(key.scopes);
   });
 

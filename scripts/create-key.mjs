@@ -21,7 +21,7 @@ async function main() {
   const scopes = [...new Set(values.scopes.split(','))];
   // Analytics, GIS writes and mailbox drafts are explicit opt-ins; current employee permissions
   // must independently allow each operation, regardless of this registration.
-  if (!scopes.length || scopes.some(scope => !['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read', 'gis:write', 'mail:drafts', 'crm.rfq:write', 'crm.notes:write'].includes(scope))) throw new Error('Unknown scope.');
+  if (!scopes.length || scopes.some(scope => !['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read', 'gis:write', 'mail:drafts', 'crm.rfq:write', 'crm.notes:write', 'cms:read', 'cms:write'].includes(scope))) throw new Error('Unknown scope.');
   const file = path.resolve('.env.local');
   const env = await readEnv(file);
   let keys;

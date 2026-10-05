@@ -60,7 +60,7 @@ describe('platform-specific MCP tool availability', () => {
   it('keeps existing read tools on both harnesses by default within granted scopes', async () => {
     expect(key.scopes).not.toContain('gis:write');
     const expected = Object.entries(MCP_READ_CONTRACTS)
-      .filter(([, contract]) => contract.requiredScopes.every(scope => key.scopes.includes(scope)))
+      .filter(([name, contract]) => !name.startsWith('cms_') && contract.requiredScopes.every(scope => key.scopes.includes(scope)))
       .map(([name]) => name);
     for (const platform of ['claude', 'whatsapp'] as const) {
       expect(names((await rpc(platform, 'tools/list')).result).sort()).toEqual([...expected].sort());

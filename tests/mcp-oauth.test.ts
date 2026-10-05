@@ -372,12 +372,13 @@ describe('MCP OAuth token lifecycle and employee isolation', () => {
   });
 
   it('advertises supported reads and explicit actions while defaulting to reads', () => {
-    const scopes = [...key.scopes, 'analytics:read', 'gis:write', 'mail:drafts', 'crm.rfq:write', 'crm.notes:write'];
-    expect(oauthScopes(undefined)).toEqual([...key.scopes, 'analytics:read']);
+    const scopes = [...key.scopes, 'analytics:read', 'cms:read', 'gis:write', 'mail:drafts', 'crm.rfq:write', 'crm.notes:write', 'cms:write'];
+    expect(oauthScopes(undefined)).toEqual([...key.scopes, 'analytics:read', 'cms:read']);
     expect(oauthScopes(null)).not.toContain('gis:write');
     expect(oauthScopes(null)).not.toContain('mail:drafts');
     expect(oauthScopes(null)).not.toContain('crm.rfq:write');
     expect(oauthScopes(null)).not.toContain('crm.notes:write');
+    expect(oauthScopes(null)).not.toContain('cms:write');
     expect(authorizationServerMetadata().scopes_supported).toEqual(scopes);
     expect(protectedResourceMetadata().scopes_supported).toEqual(scopes);
     expect(oauthScopes(scopes.join(' '))).toEqual(scopes);
