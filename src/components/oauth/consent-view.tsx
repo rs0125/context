@@ -18,10 +18,12 @@ const permissionLabels: Record<string, string> = {
   'warehouses:read': 'Warehouse listings',
   'crm:read': 'CRM records',
   'analytics:read': 'Website analytics (Analyst access)',
+  'cms:read': 'Website CMS pages and schemas (Analyst or Admin access)',
   'gis:write': 'Create and undo own GIS points',
   'mail:drafts': 'Create and read own email drafts',
   'crm.rfq:write': 'Create, edit and undo own agent RFQs',
   'crm.notes:write': 'Add deal notes and edit or undo own agent notes',
+  'cms:write': 'Prepare and save website content drafts',
 };
 
 export function ConsentView({ details, loading, error, onRetry, onConnect, onCancel }: {
@@ -32,12 +34,13 @@ export function ConsentView({ details, loading, error, onRetry, onConnect, onCan
   const [submitting, setSubmitting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [formError, setFormError] = useState('');
-  const requestsWrites = details?.scopes.some(scope => scope === 'gis:write' || scope === 'mail:drafts' || scope === 'crm.rfq:write' || scope === 'crm.notes:write') === true;
+  const requestsWrites = details?.scopes.some(scope => scope === 'gis:write' || scope === 'mail:drafts' || scope === 'crm.rfq:write' || scope === 'crm.notes:write' || scope === 'cms:write') === true;
   const actionBoundary = [
     ...(details?.scopes.includes('gis:write') ? ['Create and undo your own eligible GIS points.'] : []),
     ...(details?.scopes.includes('mail:drafts') ? ['Create and read drafts in your connected work mailbox. This does not send email or read your inbox.'] : []),
     ...(details?.scopes.includes('crm.rfq:write') ? ['Create RFQs and edit or undo eligible RFQs this agent created for you. This does not grant changes to other deals or deal notes.'] : []),
     ...(details?.scopes.includes('crm.notes:write') ? ['Add notes to deals you currently have access to. Edit or undo only notes this agent created for you; existing notes by others cannot be changed.'] : []),
+    ...(details?.scopes.includes('cms:write') ? ['Validate content and save website drafts. Edits require review of the changes and confirmation. Final approval stays in the CMS; these tools cannot publish content or start a website build.'] : []),
   ].join(' ');
 
   async function connect(event: FormEvent<HTMLFormElement>) {

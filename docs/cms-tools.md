@@ -73,6 +73,42 @@ deployment, not a verified successful live build. No tool publishes, unpublishes
 deletes, uploads images, or triggers deployment. Content writing can later reuse
 this same schema → CSV → preview → draft workflow in a skill.
 
+Drafts are shared per page: one pending import draft can exist for each canonical
+page reference. Import previews and receipts are owned by their author; CMS
+editors can review all saved imports. Private means excluded from native approved
+content and website builds, not a separate draft workspace for every employee.
+
+## Production activation — 6 October 2026 (India time)
+
+The backend-owned CMS migration and both Context Engine credential-scope
+migrations are applied. The CMS and Context Engine signing configuration and
+feature flags are active. Ramesh's issuer registration and running worker now
+include `cms:read` and `cms:write`; its existing deferred loading setting and
+other permissions were preserved. Eligibility still requires current Analyst or
+Admin access and the existing CMS editor allowlist.
+
+Production checks verified all seven schemas and page inventories, ordinary MCP
+discovery, the deployed Ramesh adapter in both loading modes, and rejection of
+ineligible employees and credentials without CMS scopes. One synthetic blog was
+saved, replayed, edited through an immutable diff, and discarded. Its audit
+receipts remain; no native content row, publication or build was created. The
+checks made no model calls and sent no WhatsApp messages. Discovery now ignores
+legacy geography identities that cannot be addressed by the import protocol,
+without rewriting their slugs or blocking valid pages.
+
+Existing personal keys and OAuth grants retain their prior scopes. Claude CMS
+reads need `cms:read`; preparing or saving content also needs an explicitly
+provisioned `cms:write` employee key and OAuth consent. **Replacing a key in the
+console issues read scopes only**, so key replacement and reconnection alone do
+not enable CMS writes. The connector must request both scopes; remove and re-add
+an older connector whose registered scope ceiling excludes them. Its consent
+screen explains draft editing and the separate CMS approval requirement.
+
+The CMS signing key `cms-2026-10` expires on 3 January 2027 at 18:56 UTC. Rotate it
+using the overlapping-public-key procedure below before expiry. The existing
+Ramesh signing registration has its separate 30 December 2026 expiry. Private
+operator backups and detailed verification receipts are outside version control.
+
 ## Provisioning and rollout
 
 Keep both feature flags false until these steps are complete. No live migration,

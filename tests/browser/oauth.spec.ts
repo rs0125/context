@@ -4,7 +4,7 @@ import { mkdir } from 'node:fs/promises';
 const apiKey = `wog_ctx_${'C'.repeat(43)}`;
 const redirectUri = 'https://client.example.test/connector/callback';
 
-async function mockAuthorization(page: Page, options: { rejectKey?: boolean; unsafeRedirect?: boolean; unavailable?: boolean } = {}) {
+async function mockAuthorization(page: Page, options: { rejectKey?: boolean; unsafeRedirect?: boolean; unavailable?: boolean; scopes?: string[] } = {}) {
   const posts: Record<string, unknown>[] = [];
   const requests: string[] = [];
   await page.route('https://client.example.test/**', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<h1>Synthetic client callback</h1>' }));
@@ -14,17 +14,38 @@ async function mockAuthorization(page: Page, options: { rejectKey?: boolean; uns
     if (url.pathname !== '/api/oauth/authorize') return reply({ error: { code: 'UNEXPECTED_TEST_REQUEST', message: 'Only mocked OAuth requests are allowed.' } }, 500);
     if (request.method() === 'GET') {
       if (options.unavailable) return reply({ error: { code: 'MCP_SETUP_REQUIRED', message: 'Synthetic unavailable service.' } }, 503);
-      return reply({ requestHandle: 'synthetic-browser-request', clientName: 'Synthetic AI client', clientOrigin: 'https://client.example.test', redirectOrigin: 'https://client.example.test', redirectUri, resource: `${url.origin}/mcp`, requestedScopes: ['knowledge:read', 'crm:read'] });
+      return reply({ requestHandle: 'synthetic-browser-request', clientName: 'Synthetic AI client', clientOrigin: 'https://client.example.test', redirectOrigin: 'https://client.example.test', redirectUri, resource: `${url.origin}/mcp`, requestedScopes: options.scopes ?? ['knowledge:read', 'crm:read'] });
     }
     const body = request.postDataJSON(); posts.push(body);
     if (options.rejectKey && body.approve) return reply({ error: { code: 'INVALID_KEY', message: 'Synthetic private diagnostic must not be shown.' } }, 401);
     if (options.unsafeRedirect) return reply({ redirectUrl: 'https://unrelated.example.test/callback?code=synthetic-code' });
     return reply({ redirectUrl: body.approve ? `${redirectUri}?code=synthetic-code&state=synthetic-state` : `${redirectUri}?error=access_denied&state=synthetic-state` });
   });
-  const query = new URLSearchParams({ response_type: 'code', client_id: 'synthetic-client', redirect_uri: redirectUri, resource: 'http://localhost:3000/mcp', code_challenge: 'A'.repeat(43), code_challenge_method: 'S256', state: 'synthetic-state', scope: 'knowledge:read crm:read' });
+  const query = new URLSearchParams({ response_type: 'code', client_id: 'synthetic-client', redirect_uri: redirectUri, resource: 'http://localhost:3000/mcp', code_challenge: 'A'.repeat(43), code_challenge_method: 'S256', state: 'synthetic-state', scope: options.scopes?.join(' ') ?? 'knowledge:read crm:read' });
   await page.goto(`/oauth/authorize?${query}`);
   return { posts, requests };
 }
+
+test('CMS consent describes draft writes and editorial approval before connecting', async ({ page }) => {
+  const { posts } = await mockAuthorization(page, { scopes: ['cms:read', 'cms:write'] });
+  await expect(page.getByRole('heading', { name: 'Synthetic AI client wants access to Wareongo' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Requested permissions' })).toBeVisible();
+  await expect(page.getByText('Website CMS pages and schemas (Analyst or Admin access)', { exact: true })).toBeVisible();
+  await expect(page.getByText('Prepare and save website content drafts', { exact: true })).toBeVisible();
+  await expect(page.locator('.consent-boundary')).toContainText('Edits require review of the changes and confirmation.');
+  await expect(page.locator('.consent-boundary')).toContainText('Final approval stays in the CMS');
+  await expect(page.locator('.consent-boundary')).not.toContainText('Nothing can be changed.');
+  await expect(page.locator('#employee-key-help')).toContainText('explicitly granted');
+  expect(posts).toHaveLength(0);
+});
+
+test('CMS consent keeps schema and page reads read-only', async ({ page }) => {
+  const { posts } = await mockAuthorization(page, { scopes: ['cms:read'] });
+  await expect(page.getByRole('heading', { name: 'Can read' })).toBeVisible();
+  await expect(page.locator('.consent-boundary')).toContainText('Nothing can be changed.');
+  await expect(page.getByText('Prepare and save website content drafts', { exact: true })).toHaveCount(0);
+  expect(posts).toHaveLength(0);
+});
 
 test('consent shows the application, complete redirect, and read permissions before any grant', async ({ page }) => {
   const { posts } = await mockAuthorization(page);
