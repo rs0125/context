@@ -259,72 +259,23 @@ describe('CRM notes fixed adapter and note editor compatibility', () => {
   });
 });
 
-describe('CRM note trash adapter', () => {
-  it('uses explicit soft delete on only the exact current note and verifies it is no longer active', async () => {
-    const f = fixture(), current = structuredClone(f.record);
-    expect(await f.trash()).toEqual({ outcome: 'deleted', record: current });
-    expect(f.record.deletedAt).not.toBeNull(); expect(f.mutations()).toHaveLength(1);
-    const [url, init] = f.mutations()[0], parsed = new URL(String(url));
-    expect(parsed.pathname).toBe('/rest/notes'); expect(parsed.searchParams.get('soft_delete')).toBe('true');
-    expect(parsed.searchParams.get('filter')).toBe(`id[eq]:"${noteId}",updatedAt[eq]:"${version}",createdBy.workspaceMemberId[eq]:"${memberId}",deletedAt[is]:NULL`);
-    expect(init?.method).toBe('DELETE'); expect(init?.body).toBeUndefined();
-    const last = new URL(String(f.fetcher.mock.calls.at(-1)![0]));
-    expect(last.pathname).toBe('/rest/notes'); expect(last.searchParams.get('filter')).toBe(`id[eq]:"${noteId}",deletedAt[is]:NULL`);
+describe('CRM note trash adapter is disabled', () => {
+  it.each(['current', 'edited', 'shared', 'link-races-delete', 'disabled'] as const)('never reads or deletes a %s note, including direct adapter calls', async state => {
+    const f = fixture();
+    if (state === 'edited') await f.update();
+    if (state === 'shared') f.targets([f.target, { ...f.target, id: otherId, targetOpportunityId: otherId }]);
+    const before = structuredClone(f.record);
+    f.fetcher.mockClear();
+    if (state === 'link-races-delete') f.fetcher.mockImplementation(async () => { throw new Error('No provider request is safe for note trash.'); });
+    const client = state === 'disabled' ? new CrmNoteClient({ ...env, CONTEXT_CRM_DELETES_ENABLED: 'false' }, f.fetcher) : f.client;
+    expect(await client.trash(f.record, dealId, targetId, signal())).toEqual({ outcome: 'rejected', code: 'CRM_NOTE_DELETE_UNAVAILABLE' });
+    expect(f.fetcher).not.toHaveBeenCalled(); expect(f.record).toEqual(before);
   });
-  it('requires both notes and deletion gates and a dedicated write credential', async () => {
+  it('keeps existing recovery discovery gates without offering fresh deletion', () => {
     expect(crmNotesDeleteAvailability(env)).toEqual({ available: true });
     for (const overrides of [{ CONTEXT_CRM_DELETES_ENABLED: undefined }, { CONTEXT_CRM_DELETES_ENABLED: 'false' },
       { CONTEXT_CRM_NOTES_ENABLED: 'false' }, { CONTEXT_CRM_WRITE_API_KEY: '', TWENTY_CRM_API_KEY: 'read-key' }]) {
-      const currentEnv = { ...env, ...overrides };
-      expect(crmNotesDeleteAvailability(currentEnv)).toEqual({ available: false });
-      const f = fixture(), client = new CrmNoteClient(currentEnv, f.fetcher);
-      expect(await client.trash(f.record, dealId, targetId, signal())).toMatchObject({ outcome: 'rejected' });
-      expect(f.fetcher).not.toHaveBeenCalled();
+      expect(crmNotesDeleteAvailability({ ...env, ...overrides })).toEqual({ available: false });
     }
-  });
-  it.each(['shared', 'moved', 'missing', 'changed-link', 'changed-note', 'changed-content', 'changed-creator'])('refuses %s before dispatch', async reason => {
-    const f = fixture(), current = structuredClone(f.record);
-    if (reason === 'shared') f.targets([f.target, { ...f.target, id: otherId, targetOpportunityId: otherId }]);
-    if (reason === 'moved') f.targets([{ ...f.target, targetOpportunityId: otherId }]);
-    if (reason === 'missing') f.targets([]);
-    if (reason === 'changed-link') f.targets([{ ...f.target, updatedAt: nextVersion }]);
-    if (reason === 'changed-note') f.record.updatedAt = nextVersion;
-    if (reason === 'changed-content') f.record.bodyV2 = noteBodyPayload(changed.body);
-    if (reason === 'changed-creator') f.record.createdBy.workspaceMemberId = otherId;
-    expect(await f.client.trash(current, dealId, targetId, signal())).toMatchObject({ outcome: 'rejected' });
-    expect(f.mutations()).toHaveLength(0);
-  });
-  it('uses the latest version after a verified note edit', async () => {
-    const f = fixture(); await f.update();
-    expect(await f.trash()).toMatchObject({ outcome: 'deleted', record: { title: changed.title, updatedAt: nextVersion } });
-    const [url] = f.mutations()[1];
-    expect(new URL(String(url)).searchParams.get('filter')).toContain(`updatedAt[eq]:"${nextVersion}"`);
-  });
-  it.each(['empty', 'wrong-id', 'multiple-ids', 'bad-json', 'transport', 'active-note', 'unverified-active-read'])('fails closed on %s without retries', async reason => {
-    const f = fixture(), originalFetch = f.fetcher.getMockImplementation()!;
-    f.fetcher.mockImplementation(async (url, init) => {
-      const path = new URL(String(url)).pathname;
-      if (init?.method === 'DELETE') {
-        if (reason === 'empty') return Response.json({ data: { deleteNotes: [] } });
-        if (reason === 'wrong-id') return Response.json({ data: { deleteNotes: [{ id: otherId }] } });
-        if (reason === 'multiple-ids') return Response.json({ data: { deleteNotes: [{ id: noteId }, { id: otherId }] } });
-        if (reason === 'bad-json') return new Response('not json');
-        if (reason === 'transport') throw new Error('connection lost');
-        if (reason === 'active-note') return Response.json({ data: { deleteNotes: [{ id: noteId }] } });
-      }
-      if (reason === 'unverified-active-read' && init?.method === 'GET' && path === '/rest/notes') return new Response('unavailable', { status: 503 });
-      return originalFetch(url, init);
-    });
-    expect(await f.trash()).toMatchObject({ outcome: reason === 'empty' ? 'rejected' : 'outcome_unknown' });
-    expect(f.mutations()).toHaveLength(1);
-  });
-  it('reports a version conflict if the provider changes the note after preflight', async () => {
-    const f = fixture(), originalFetch = f.fetcher.getMockImplementation()!;
-    f.fetcher.mockImplementation(async (url, init) => {
-      if (init?.method === 'DELETE') f.record.updatedAt = nextVersion;
-      return originalFetch(url, init);
-    });
-    expect(await f.trash()).toMatchObject({ outcome: 'rejected', code: 'CRM_NOTE_VERSION_CONFLICT' });
-    expect(f.record.deletedAt).toBeNull(); expect(f.mutations()).toHaveLength(1);
   });
 });

@@ -20,8 +20,8 @@ beforeEach(() => {
   vi.stubEnv('TWENTY_CRM_BASE_URL', 'https://crm.example.test'); vi.stubEnv('CONTEXT_CRM_WRITE_API_KEY', 'synthetic');
 });
 afterEach(() => vi.unstubAllEnvs());
-describe('direct CRM trash tools', () => {
-  it.each(['claude', 'whatsapp'] as const)('advertises both deletes with explicit source-bound direct policy on %s', async platform => {
+describe('RFQ trash and compatible note-trash recovery', () => {
+  it.each(['claude', 'whatsapp'] as const)('preserves operation contracts and labels note recovery on %s', async platform => {
     const { result } = await wire(await handleMcpRequest(rpc('tools/list'), { authenticate: async () => key(), platform }));
     for (const name of names) {
       const tool = result.tools.find((t: { name: string }) => t.name === name);
@@ -31,6 +31,11 @@ describe('direct CRM trash tools', () => {
       expect(tool.inputSchema.required).toEqual(expect.arrayContaining(['expected_updated_at', 'operation_id', 'raw_text']));
       expect(tool.inputSchema.properties).not.toHaveProperty('hard_delete');
       expect(MCP_READ_CONTRACTS).not.toHaveProperty(name);
+      if (name === 'delete_crm_note') {
+        expect(tool.title).toMatch(/Recover/);
+        expect(tool.description).toMatch(/Recovery only/);
+        expect(tool.description).toMatch(/New note deletion is unavailable/);
+      }
     }
   });
   it.each(['disabled', 'read-only', 'write-without-read', 'platform', 'credential'] as const)('hides and rejects both tools when %s', async reason => {
@@ -47,11 +52,39 @@ describe('direct CRM trash tools', () => {
     }
     expect(mutate).not.toHaveBeenCalled();
   });
+  it('keeps recovery guidance server-owned even when a saved tool prompt still advertises note trash', async () => {
+    const { result } = await wire(await handleMcpRequest(rpc('tools/list'), {
+      authenticate: async () => key(), prompts: async () => ({ 'tool.delete_crm_note': 'OLD PROMPT: send a new note deletion.' }),
+    }));
+    const tool = result.tools.find((item: { name: string }) => item.name === 'delete_crm_note');
+    expect(tool.description).toMatch(/Recovery only/);
+    expect(tool.description).not.toContain('OLD PROMPT');
+  });
+  it('does not list note-trash recovery as a currently available write capability', async () => {
+    const read = vi.fn(async () => Response.json({ data: { employee_id: 7, scopes,
+      read_only: true, knowledge_discovery: { permitted: false, status: 'not_permitted', index_path: '/wiki', search_path: '/wiki/search' },
+      server_clock: { as_of: '2026-10-05T10:00:00.000Z', timezone: 'Asia/Kolkata', local_date: '2026-10-05' },
+    }, meta: { requestId: 'capabilities', generatedAt: '2026-10-05T10:00:00.000Z' } }));
+    const { result } = await wire(await handleMcpRequest(rpc('tools/call', { name: 'get_context', arguments: {} }), { authenticate: async () => key(), read }));
+    expect(result.structuredContent.data.write_capabilities).toContain('delete_crm_rfq');
+    expect(result.structuredContent.data.write_capabilities).not.toContain('delete_crm_note');
+  });
+  it('reports new note trash as not dispatched without making it a successful deletion receipt', async () => {
+    const args = input('delete_crm_note'), read = vi.fn();
+    const recovery = vi.fn(async () => ({ operation_id: args.operation_id, outcome: 'not_dispatched' as const,
+      code: 'CRM_NOTE_DELETE_UNAVAILABLE', message: 'New note trash is unavailable.' }));
+    const { result } = await wire(await handleMcpRequest(rpc('tools/call', { name: 'delete_crm_note', arguments: args }),
+      { authenticate: async () => key(), read, crmNoteDelete: recovery }));
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ outcome: 'not_dispatched', code: 'CRM_NOTE_DELETE_UNAVAILABLE' });
+    expect(read).not.toHaveBeenCalled();
+  });
   it.each(names)('binds the %s deletion receipt to the exact request without calling the read router', async name => {
     const args = input(name), read = vi.fn();
-    const mutate = vi.fn(async () => ({ operation_id: args.operation_id, outcome: 'deleted' as const, code: 'CRM_DELETED', message: 'Moved to CRM trash.' }));
+    const outcome = name === 'delete_crm_note' ? 'replayed' as const : 'deleted' as const;
+    const mutate = vi.fn(async () => ({ operation_id: args.operation_id, outcome, code: 'CRM_RECEIPT', message: 'Verified operation receipt.' }));
     const { result } = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: args }), { authenticate: async () => key(), read, crmRfqDelete: mutate, crmNoteDelete: mutate }));
-    expect(result.isError).not.toBe(true); expect(result.structuredContent.outcome).toBe('deleted');
+    expect(result.isError).not.toBe(true); expect(result.structuredContent.outcome).toBe(outcome);
     expect(result.structuredContent.meta).toEqual({ toolName: name, employeeId: 7, argumentsSha256: argumentsSha256(args) });
     expect(mutate).toHaveBeenCalledWith(args, expect.objectContaining({ employeeId: 7 }), expect.any(AbortSignal), expect.any(Function));
     expect(read).not.toHaveBeenCalled();

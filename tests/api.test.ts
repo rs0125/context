@@ -183,6 +183,11 @@ describe('REST access boundary', () => {
     expect(body).not.toContain('shortlisting-recommendation');
     expect(body).toContain('/api/v1/warehouses/filters');
     expect(body).toContain('data needs verification');
+    expect(body).toContain('retains unknown numeric candidates by default');
+    expect(body).toContain('A provisional shortlist may recommend candidates');
+    expect(body).toContain('include_unknown=false');
+    expect(body).toContain('do not assume the first search hit');
+    expect(body).not.toMatch(/disclose that relaxation|For every uncertain entry|before a recommendation or commitment/);
   });
   it('refuses stale CRM assignment data before querying deals', async () => {
     const deps = harness({ stale: true });

@@ -132,6 +132,16 @@ describe('requirement checklist and provenance', () => {
     expect((await assessment({ description: null })).output.requirement_context.description).toMatchObject({ state: 'missing', text: null });
     expect((await assessment({ description: { secret: 'hidden payload' } })).output.requirement_context.description).toMatchObject({ state: 'unsupported', text: null });
   });
+  it('allows provisional recommendations while keeping conflicts and commitment verification visible', async () => {
+    const { output } = await assessment({}, { city: 'Pune', clear_height_ft: null });
+    expect(fieldCheck(output, 'city').state).toBe('conflict');
+    const guidance = output.guidance.join(' ');
+    expect(guidance).toContain('Provisional recommendations may use the available evidence');
+    expect(guidance).toContain('material conflicts and uncertainty');
+    expect(guidance).toContain('Verify specifications, current availability and client acceptance before a commitment');
+    expect(guidance).toContain('Reuse requirement_context or CRM detail already read');
+    expect(guidance).not.toContain('Verify every candidate before a recommendation');
+  });
   it('asks about missing technical needs without claiming that each is mandatory', async () => {
     const { output } = await assessment();
     expect(fieldRequirement(output, 'dock_count').follow_up_question).toBe('Is there a minimum dock count?');

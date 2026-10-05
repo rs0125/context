@@ -48,6 +48,10 @@ async function execute(action: Action, raw: unknown, key: KeyRegistration, signa
       return { actor, stored, original };
     });
     if (stored) return replay(stored);
+    // Keep the original operation/hash recovery contract, but never reserve or
+    // dispatch new note trash: the provider cannot atomically guard deal links.
+    if (action === 'delete_crm_note') return result('not_dispatched', 'CRM_NOTE_DELETE_UNAVAILABLE',
+      'Note trash is unavailable because a concurrent deal link cannot be protected. This tool only recovers an existing deletion operation with its original ID and unchanged arguments. Manage new note deletion in CRM; do not substitute undo or create another operation.');
     const creator = await deps.crm.creator(actor, signal);
     let originalSnapshot: NoteSnapshot | undefined;
     if ('original_operation_id' in input) {
@@ -74,8 +78,7 @@ async function execute(action: Action, raw: unknown, key: KeyRegistration, signa
     const undoCreation = action === 'undo_crm_note' && originalSnapshot?.kind === 'create';
     const before = current ? noteText(current) : undefined;
     let desired: NoteContent;
-    if (action === 'delete_crm_note') desired = before!;
-    else if ('original_operation_id' in input) {
+    if ('original_operation_id' in input) {
       desired = undoCreation ? before! : originalSnapshot!.before!;
     } else if ('note_id' in input) desired = {
       title: 'title' in input && typeof input.title === 'string' ? input.title : before!.title,
@@ -98,10 +101,9 @@ async function execute(action: Action, raw: unknown, key: KeyRegistration, signa
     signal.throwIfAborted();
     const changed = action === 'create_crm_note'
       ? await deps.crm.create(noteId, targetId, dealId, desired, creator, signal)
-      : action === 'delete_crm_note' ? await deps.crm.trash(current!, dealId, targetId, signal)
-        : undoCreation ? await deps.crm.undoCreate(current!, dealId, targetId, signal)
+      : undoCreation ? await deps.crm.undoCreate(current!, dealId, targetId, signal)
         : await deps.crm.update(current!, dealId, targetId, desired, signal);
-    const expectedOutcome = action === 'create_crm_note' ? 'created' : action === 'delete_crm_note' ? 'deleted' : undoCreation ? 'rolled_back' : 'updated';
+    const expectedOutcome = action === 'create_crm_note' ? 'created' : undoCreation ? 'rolled_back' : 'updated';
     const success = changed.outcome === expectedOutcome;
     if (!success) {
       const outcome = changed.outcome === 'rejected' ? 'rejected' : 'outcome_unknown';
@@ -112,19 +114,17 @@ async function execute(action: Action, raw: unknown, key: KeyRegistration, signa
     const verified = 'record' in changed ? changed.record : current!;
     // Quote provider-verified text, never an imagined completion or the tool input alone.
     const text = noteText(verified);
-    const snapshot: NoteSnapshot = { kind: action === 'create_crm_note' ? 'create' : action === 'update_crm_note' ? 'update' : action === 'delete_crm_note' ? 'delete' : 'undo',
+    const snapshot: NoteSnapshot = { kind: action === 'create_crm_note' ? 'create' : action === 'update_crm_note' ? 'update' : 'undo',
       note_id: noteId, deal_id: dealId, target_id: targetId, target_updated_at: verified.targetUpdatedAt,
       after_updated_at: verified.updatedAt, after: text,
-      ...(action === 'update_crm_note' ? { before } : {}), ...(action === 'undo_crm_note' ? { undo_kind: undoCreation ? 'creation' as const : 'edit' as const } : {}),
-      ...(action === 'delete_crm_note' ? { deletion_kind: 'note' as const } : {}) };
-    const outcome = action === 'create_crm_note' ? 'created' : action === 'update_crm_note' ? 'updated' : action === 'delete_crm_note' ? 'deleted' : 'rolled_back';
+      ...(action === 'update_crm_note' ? { before } : {}), ...(action === 'undo_crm_note' ? { undo_kind: undoCreation ? 'creation' as const : 'edit' as const } : {}) };
+    const outcome = action === 'create_crm_note' ? 'created' : action === 'update_crm_note' ? 'updated' : 'rolled_back';
     await deps.writeTransaction(client => deps.finish(client, actor, operation, hash, action, { outcome, id: noteId,
       encryptedSnapshot: encryptCrmSnapshot(snapshot, snapshotContext, deps.env) }));
     await recheckNoteActor(deps, authorize, actor);
     deal = await noteDeal(deps, actor, dealId, signal);
-    return result(outcome, action === 'create_crm_note' ? 'CRM_NOTE_CREATED' : action === 'update_crm_note' ? 'CRM_NOTE_UPDATED' : action === 'delete_crm_note' ? 'CRM_NOTE_DELETED' : 'CRM_NOTE_UNDONE',
+    return result(outcome, action === 'create_crm_note' ? 'CRM_NOTE_CREATED' : action === 'update_crm_note' ? 'CRM_NOTE_UPDATED' : 'CRM_NOTE_UNDONE',
       action === 'create_crm_note' ? 'Added the verified note to this deal.' : action === 'update_crm_note' ? 'Updated this note on this deal.'
-        : action === 'delete_crm_note' ? 'Moved this note to CRM trash. The deal was not deleted. Restore the note in CRM if needed.'
         : undoCreation ? 'Removed the note from this deal. The note itself and any other links were not deleted.' : 'Restored the note text from before that edit.',
       { id: noteId, deal, note: text, updated_at: verified.updatedAt, undo_available: action === 'create_crm_note' || action === 'update_crm_note',
         ...(snapshot.undo_kind ? { undo_kind: snapshot.undo_kind } : {}), ...(snapshot.deletion_kind ? { deletion_kind: snapshot.deletion_kind } : {}) });

@@ -31,6 +31,7 @@ export function crmNotesDeleteConfiguration(env: Partial<NodeJS.ProcessEnv> = pr
   if (env.CONTEXT_CRM_DELETES_ENABLED !== 'true') throw new HttpError(503, 'CRM_DELETES_DISABLED', 'CRM deletion is not enabled.');
   return crmNotesConfiguration(env);
 }
+/** Availability of the legacy deletion receipt recovery tool, never new note trash. */
 export function crmNotesDeleteAvailability(env: Partial<NodeJS.ProcessEnv> = process.env) {
   try { crmNotesDeleteConfiguration(env); return { available: true }; } catch { return { available: false }; }
 }
@@ -211,38 +212,10 @@ export class CrmNoteClient {
       return { outcome: 'updated', record: { ...record, targetUpdatedAt: after.updatedAt } };
     } catch (error) { return dispatched ? unknown() : notSent(error); }
   }
-  /** Trash only our current, sole-linked note. Never permanently delete a note. */
-  async trash(current: NoteLive, dealId: string, targetId: string, signal: AbortSignal): Promise<NoteMutationResult> {
-    let dispatched = false;
-    try {
-      crmNotesDeleteConfiguration(this.env);
-      const latest = await this.read(current.id, dealId, targetId, signal);
-      if (!current.createdBy.workspaceMemberId || current.deletedAt !== null
-        || latest.updatedAt !== current.updatedAt || latest.targetUpdatedAt !== current.targetUpdatedAt
-        || latest.createdBy.workspaceMemberId !== current.createdBy.workspaceMemberId
-        || !sameContent(latest, verifiedPlainNote(current))) return conflict();
-      // Twenty guards this note row atomically, but cannot also lock its noteTargets.
-      // Refuse every observed shared/moved link above; a concurrent new relation can
-      // still race the provider's soft-delete cascade across those separate rows.
-      const filter = `id[eq]:"${uuid.parse(current.id)}",updatedAt[eq]:"${rfqVersionSchema.parse(current.updatedAt)}",createdBy.workspaceMemberId[eq]:"${uuid.parse(current.createdBy.workspaceMemberId)}",deletedAt[is]:NULL`;
-      const query = new URLSearchParams({ filter, soft_delete: 'true' });
-      dispatched = true;
-      const response = await this.request(`/rest/notes?${query}`, 'DELETE', signal);
-      if (!response.ok) { await response.body?.cancel(); return rejectedResponse(response); }
-      const deleted = z.object({ data: z.object({ deleteNotes: z.array(z.object({ id: uuid })).max(1) }) }).parse(await json(response)).data.deleteNotes;
-      if (response.status !== 200) return unknown();
-      if (!deleted.length) return conflict();
-      if (!sameId(deleted[0].id, current.id)) return unknown();
-      // Delete responses contain only IDs. Verify the note is no longer active;
-      // a provider outage or a concurrent restore must not produce a success claim.
-      const activeQuery = new URLSearchParams({ depth: '0', limit: '1', filter: `id[eq]:"${uuid.parse(current.id)}",deletedAt[is]:NULL` });
-      const active = await this.request(`/rest/notes?${activeQuery}`, 'GET', signal);
-      if (!active.ok) { await active.body?.cancel(); return unknown(); }
-      const remaining = z.object({ data: z.object({ notes: z.array(z.object({ id: uuid })).max(1) }),
-        pageInfo: z.object({ hasNextPage: z.literal(false) }) }).parse(await json(active)).data.notes;
-      if (remaining.length) return unknown();
-      return { outcome: 'deleted', record: latest };
-    } catch (error) { return dispatched ? unknown() : notSent(error); }
+  /** Compatibility guard: note-level trash cannot atomically protect separate
+   * deal links. No caller may bypass receipt-only recovery and dispatch it. */
+  async trash(_current: NoteLive, _dealId: string, _targetId: string, _signal: AbortSignal): Promise<NoteMutationResult> {
+    return { outcome: 'rejected', code: 'CRM_NOTE_DELETE_UNAVAILABLE' };
   }
   /** Undo addition to this deal by unlinking only our original target. Never delete the note. */
   async undoCreate(current: NoteLive, dealId: string, targetId: string, signal: AbortSignal): Promise<NoteMutationResult> {
