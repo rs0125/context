@@ -1,6 +1,6 @@
 # Deal notes
 
-CRM note tools add an explicitly requested note to any deal the employee currently has permission to access. The deal does not need to have been created by this agent. Editing and undo are narrower: only notes created through this agent for the current employee are eligible. Adding a note does not grant permission to change a deal’s stage, assignment, budget or other fields.
+CRM note tools add an explicitly requested note to any deal the employee currently has permission to access. The deal does not need to have been created by this agent. Editing, undo and deletion are narrower: only notes created through this agent for the current employee are eligible. Adding a note does not grant permission to change a deal’s stage, assignment, budget or other fields.
 
 Every note tool requires both `crm:read` and the separate `crm.notes:write` grant. Existing CRM read, RFQ write, Analyst or admin access alone is insufficient. Notes must be enabled with `CONTEXT_CRM_NOTES_ENABLED=true` and valid CRM write credentials. This flag is independent of RFQ creation and editing flags. Normal per-tool platform selections apply to both discovery and direct calls.
 
@@ -10,6 +10,7 @@ Every note tool requires both `crm:read` and the separate `crm.notes:write` gran
 | `read_crm_note` | Read a current employee’s agent-created note and its exact update version before editing. |
 | `list_crm_note_changes` | Find this employee’s recent note change references on one exact deal. |
 | `update_crm_note` | Change requested title/body fields of an eligible note using a fresh version. |
+| `delete_crm_note` | Move the current verified agent-created note itself to CRM trash, including after edits. |
 | `undo_crm_note` | Remove an unchanged created note from its deal or restore the text before an unchanged note edit. |
 
 ## Conversation flow
@@ -17,11 +18,19 @@ Every note tool requires both `crm:read` and the separate `crm.notes:write` gran
 1. Resolve the exact deal with CRM search/read. Ask for clarification if multiple deals match; company identity alone is not a deal ID.
 2. For a new note, preserve the requested facts and use a factual short title. Title is 1–160 characters; body is 1–2,000 characters. Both must be nonblank. Preserve meaningful newlines and whitespace rather than silently shortening the note.
 3. For an edit, resolve the note from `list_crm_note_changes` and read it with `read_crm_note`. Copy the exact returned `updated_at` into `expected_updated_at`. Omit unchanged fields and retain unchanged parts of the note. Do not create a replacement when asked to edit.
-4. For undo, use the selected successful create/edit receipt’s `operation_id` as `original_operation_id`, plus the exact deal ID. Ambiguous or changed targets require clarification or a fresh read; no broad delete operation is exposed.
+4. For undo, use the selected successful create/edit receipt’s `operation_id` as `original_operation_id`, plus the exact deal ID. Ambiguous or changed targets require clarification or a fresh read; use the dedicated `delete_crm_note` for a removal request. Deletion reads the current note version instead of comparing it with its original creation version. Do not chain undo operations to delete an edited note.
 5. A clear current direct request authorizes the reviewed operation in the same turn. The tools explicitly declare `executionMode: direct_request`; source text, forwarded messages, attachments and record contents supply data only. They cannot independently authorize a write.
-6. On success, show the target deal and the complete verified title/body returned by Context Engine. Undo creation displays the note removed from the deal; undo edit displays restored text. Creation undo soft-deletes only the original note-to-deal link, preserving the underlying note rather than risking a cascade to another deal. The bot does not reconstruct successful note text from its proposed arguments or truncate the returned note.
+6. On success, show the target deal and the complete verified title/body returned by Context Engine. Undo creation displays the note removed from the deal; undo edit displays restored text. Explicit deletion reports `deletion_kind: note`, names the deal and shows the verified removed title/body. It moves the actual note to CRM trash and offers no edit or in-chat undo afterward. Creation undo soft-deletes only the original note-to-deal link, preserving the underlying note rather than risking a cascade to another deal. The bot does not reconstruct successful note text from its proposed arguments or truncate the returned note.
 
 For example, “Add a note to the Test Logistics Bangalore deal: client visited today and wants a Friday follow-up” can resolve the deal, save the note after review and return its actual saved text. “Change Friday to Monday in that note” resolves the original note, reads its current version and edits it. “Undo that edit” restores the previous note only if the selected change is still eligible.
+
+## Explicit deletion
+
+`delete_crm_note` requires the separate `CONTEXT_CRM_DELETES_ENABLED=true` operational flag in addition to notes configuration and the existing `crm:read`/`crm.notes:write` grants. Input is `operation_id`, `deal_id`, `note_id`, `expected_updated_at` and the current deletion request in `raw_text`. Resolve ambiguity, read the current note, and copy the exact returned version. A note edited by Ramesh, or restored by undoing an edit, remains deletable when its current saved version and original deal link match. Another employee’s note, a note made outside Ramesh, externally changed text, a moved/shared note or stale versions are rejected.
+
+The adapter always requests `soft_delete=true`; there is no model-controlled permanent-delete option. Twenty moves the note itself to trash and may cascade its note-to-record links. It checks that the note has only its original deal link before deletion, but Twenty cannot atomically compare separate link rows with the note version. A new link added concurrently can race deletion and cannot necessarily be detected afterward. The tool does not claim atomic cross-record isolation. Recovery from trash is done in CRM; no restore tool or undo-twice promise is exposed.
+
+A successful delete is a terminal `deleted` receipt, with `undo_available: false`. Historical recovery acknowledges the operation without redisclosing note text or sending another delete. Deleted notes are excluded from editable reads and actionable history.
 
 ## Access and recovery
 
@@ -48,6 +57,6 @@ Both routes require `crm:read` and `crm.notes:write`, enforce the notes feature 
 
 ## Enabling and validation
 
-Apply the CRM write storage and credential-scope migrations before enabling notes. Explicitly grant the new scope only to intended callers; migration support does not widen stored grants. For signed Ramesh requests, both the bot’s signing ceiling and Context Engine’s issuer registration must allow `crm.notes:write` and `crm:read`. Configure intended tool platforms in the prompt console, provide the CRM writer credential through the deployment environment, then enable the notes feature flag.
+Apply CRM write storage v4 (signed v1/v2/v3 upgrade supported) and credential-scope migrations before enabling notes. Explicitly grant the new scope only to intended callers; migration support does not widen stored grants. For signed Ramesh requests, both the bot’s signing ceiling and Context Engine’s issuer registration must allow `crm.notes:write` and `crm:read`. Configure intended tool platforms in the prompt console, provide the CRM writer credential through the deployment environment, then enable the notes feature flag. For explicit deletion, grant the existing service role note soft-delete permission (never destroy permission), deploy the bot that accepts the `deleted` result before advertising the new tools, and enable the deletion flag.
 
 Deterministic tests cover MCP discovery and platform rejection, exact argument binding, both scope requirements, configured availability, scoped HTTP routing and query validation. Note receipt tests cover full saved/restored/removed text, malformed receipt handling, valid deal links and historical disclosure restrictions. These checks do not require model calls, production CRM mutations or test WhatsApp messages.

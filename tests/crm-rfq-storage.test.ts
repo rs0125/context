@@ -78,7 +78,7 @@ describe.skipIf(!connection)('isolated CRM receipt migration and concurrency', (
     });
     expect(await tx(runtime, c => findAgentCreatedRfq(c, actor, legacyResource))).toMatchObject({ operation_id: legacyOperation });
     const marker = (await owner.query("SELECT obj_description('context_crm_private'::regnamespace, 'pg_namespace') AS marker")).rows[0].marker;
-    expect(marker).toBe('context-crm-write-schema-v3');
+    expect(marker).toBe('context-crm-write-schema-v4');
   });
   it('verifies and upgrades v2 without changing existing RFQ edits or encrypted snapshots', async () => {
     const operation = randomUUID();
@@ -91,7 +91,9 @@ describe.skipIf(!connection)('isolated CRM receipt migration and concurrency', (
     const before = (await owner.query('SELECT * FROM context_crm_private.write_operations ORDER BY operation_id')).rows;
     // Reproduce the deployed v2 table exactly, retaining its rows and runtime policy.
     await owner.query(`ALTER TABLE context_crm_private.write_operations DROP CONSTRAINT write_operations_action_check,
-      ADD CONSTRAINT write_operations_action_check CHECK (action IN ('create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq'));
+      ADD CONSTRAINT write_operations_action_check CHECK (action IN ('create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq')),
+      DROP CONSTRAINT write_operations_state_check, ADD CONSTRAINT write_operations_state_check CHECK (state IN ('dispatching', 'created', 'updated', 'undone', 'unknown', 'rejected')),
+      DROP CONSTRAINT write_operations_result_check, ADD CONSTRAINT write_operations_result_check CHECK ((state IN ('created', 'updated', 'undone')) = (resource_id IS NOT NULL));
       COMMENT ON SCHEMA context_crm_private IS 'context-crm-write-schema-v2';
       COMMENT ON TABLE context_crm_private.write_operations IS 'context-crm-write-receipts-v2:wrong'`);
     const signature = await tableSignature();
@@ -107,6 +109,28 @@ describe.skipIf(!connection)('isolated CRM receipt migration and concurrency', (
     expect(upgradedSignature).not.toBe(signature);
     expect(await migrate()).toMatchObject({ verified: true });
     expect(await tableSignature()).toBe(upgradedSignature);
+  });
+  it('upgrades signed v3 notes receipts to v4 without changing old rows or ciphertext', async () => {
+    const operation = randomUUID(), noteId = randomUUID();
+    const env = { CONTEXT_KEY_ENCRYPTION_SECRET: 'test-only-notes-snapshot-key-over-32-characters' };
+    const context = { employeeId: actor.employeeId!, email: actor.email!, memberId: actor.twentyUserId!, operationId: operation, action: 'create_crm_note' as const, requestHash: hash };
+    const ciphertext = encryptCrmSnapshot({ kind: 'create', note_id: noteId, body: 'Existing note' }, context, env);
+    await tx(runtime, c => claimCrmChange(c, actor, operation, hash, 'create_crm_note', ciphertext));
+    await tx(runtime, c => finishCrmChange(c, actor, operation, hash, 'create_crm_note', { outcome: 'created', id: noteId }));
+    const before = (await owner.query('SELECT * FROM context_crm_private.write_operations ORDER BY operation_id')).rows;
+    await owner.query(`ALTER TABLE context_crm_private.write_operations
+      DROP CONSTRAINT write_operations_action_check, ADD CONSTRAINT write_operations_action_check CHECK (action IN ('create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq', 'create_crm_note', 'update_crm_note', 'undo_crm_note')),
+      DROP CONSTRAINT write_operations_state_check, ADD CONSTRAINT write_operations_state_check CHECK (state IN ('dispatching', 'created', 'updated', 'undone', 'unknown', 'rejected')),
+      DROP CONSTRAINT write_operations_result_check, ADD CONSTRAINT write_operations_result_check CHECK ((state IN ('created', 'updated', 'undone')) = (resource_id IS NOT NULL));
+      COMMENT ON SCHEMA context_crm_private IS 'context-crm-write-schema-v3';
+      COMMENT ON TABLE context_crm_private.write_operations IS 'context-crm-write-receipts-v3:wrong'`);
+    const signature = await tableSignature();
+    await expect(migrate()).rejects.toThrow('CRM_RELATION_COLLISION');
+    await owner.query(`COMMENT ON TABLE context_crm_private.write_operations IS 'context-crm-write-receipts-v3:${signature}'`);
+    expect(await migrate()).toMatchObject({ verified: true, runtimeGranted: true });
+    expect((await owner.query('SELECT * FROM context_crm_private.write_operations ORDER BY operation_id')).rows).toEqual(before);
+    const receipt = await tx(runtime, c => loadCrmChange(c, actor, operation));
+    expect(decryptCrmSnapshot(receipt!.encrypted_snapshot!, crmSnapshotContext(receipt!), env)).toEqual({ kind: 'create', note_id: noteId, body: 'Existing note' });
   });
   it('admits one concurrent claim across connections and rejects payload or member rebinding', async () => {
     const operation = randomUUID();
@@ -246,6 +270,22 @@ describe.skipIf(!connection)('isolated CRM receipt migration and concurrency', (
     expect((await tx(runtime, c => listCrmChanges(c, actor, 1)))[0].action.endsWith('_rfq')).toBe(true);
     for (const limit of [0, 51, 1.5]) await expect(tx(runtime, c => listCrmNoteChanges(c, actor, limit))).rejects.toMatchObject({ code: 'CRM_RECEIPT_UNAVAILABLE' });
     await expect(tx(runtime, c => listCrmNoteChanges(c, actor, 10, "' OR true --"))).rejects.toMatchObject({ code: 'CRM_RECEIPT_UNAVAILABLE' });
+  });
+  it.each(['delete_crm_rfq', 'delete_crm_note'] as const)('records one terminal deleted receipt for %s without granting provenance', async action => {
+    const operation = randomUUID(), id = randomUUID();
+    const claims = await Promise.all(Array.from({ length: 8 }, () => tx(runtime, c => claimCrmChange(c, actor, operation, hash, action))));
+    expect(claims.filter(c => c.fresh)).toHaveLength(1);
+    await expect(tx(runtime, c => finishCrmChange(c, actor, operation, hash, action, { outcome: 'rolled_back', id })))
+      .rejects.toMatchObject({ code: 'CRM_RECEIPT_UNAVAILABLE' });
+    await tx(runtime, c => finishCrmChange(c, actor, operation, hash, action, { outcome: 'deleted', id }));
+    expect(await tx(runtime, c => claimCrmChange(c, actor, operation, hash, action))).toMatchObject({ fresh: false, receipt: { state: 'deleted', resource_id: id } });
+    expect(await tx(runtime, c => findAgentCreatedNote(c, actor, id))).toBeNull();
+    expect(await tx(runtime, c => findAgentCreatedRfq(c, actor, id))).toBeNull();
+    expect(await tx(runtime, c => loadCrmChange(c, { ...actor, employeeId: 88 }, operation))).toBeNull();
+    const history = await tx(runtime, c => action === 'delete_crm_note' ? listCrmNoteChanges(c, actor, 50, id) : listCrmChanges(c, actor, 50));
+    expect(history).toEqual(expect.arrayContaining([expect.objectContaining({ action, state: 'deleted', resource_id: id })]));
+    await expect(tx(runtime, c => finishCrmChange(c, actor, operation, hash, action, { outcome: 'deleted', id })))
+      .rejects.toMatchObject({ code: 'CRM_RECEIPT_UNAVAILABLE' });
   });
   it('does not grant public/API access, receipt deletion or business-table writes', async () => {
     const privacy = (await owner.query(`SELECT rolname, has_schema_privilege(rolname, 'context_crm_private', 'USAGE') AS schema,

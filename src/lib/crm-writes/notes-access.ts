@@ -17,7 +17,7 @@ export type NoteDependencies = {
   principal: typeof resolvePrincipal; liveAccess: typeof getLiveCrmAccess;
   find: typeof findCrmChange; claim: typeof claimCrmChange; finish: typeof finishCrmChange;
   origin: typeof findAgentCreatedNote; load: typeof loadCrmChange; list: typeof listCrmNoteChanges;
-  crm: Pick<CrmNoteClient, 'creator' | 'deal' | 'read' | 'create' | 'update' | 'undoCreate'>;
+  crm: Pick<CrmNoteClient, 'creator' | 'deal' | 'read' | 'create' | 'update' | 'undoCreate' | 'trash'>;
   env: Partial<NodeJS.ProcessEnv>;
 };
 export type NoteRevalidate = (client: PoolClient, key: KeyRegistration) => Promise<void>;
@@ -46,18 +46,20 @@ export async function noteDeal(deps: NoteDependencies, actor: Principal, id: str
   if (live.id.toLowerCase() !== id || live.deletedAt !== null) throw new HttpError(403, 'CRM_DEAL_NOT_ACCESSIBLE', 'This deal is not currently available.');
   return { id, name: redactCrmText(live.name, { maxCharacters: 500 }).text || 'CRM deal', url: rfqRecordUrl(id, crmNotesConfiguration(deps.env).origin) };
 }
-export const noteSnapshotSchema = z.object({ kind: z.enum(['create', 'update', 'undo']),
+export const noteSnapshotSchema = z.object({ kind: z.enum(['create', 'update', 'undo', 'delete']),
   note_id: z.string().uuid(), deal_id: z.string().uuid(), target_id: z.string().uuid(),
   target_updated_at: rfqVersionSchema, after_updated_at: rfqVersionSchema,
   after: noteContentSchema, before: noteContentSchema.optional(), undo_kind: z.enum(['creation', 'edit']).optional(),
+  deletion_kind: z.enum(['deal_link', 'note']).optional(),
 }).strict();
 export type NoteSnapshot = z.infer<typeof noteSnapshotSchema>;
 export function noteSnapshot(receipt: CrmWriteReceipt, env: Partial<NodeJS.ProcessEnv>): NoteSnapshot {
   if (!receipt.encrypted_snapshot || !receipt.action.endsWith('_crm_note')) throw new HttpError(409, 'CRM_NOTE_RECEIPT_UNAVAILABLE', 'The original note receipt could not be verified.');
   const snapshot = noteSnapshotSchema.parse(decryptCrmSnapshot(receipt.encrypted_snapshot, crmSnapshotContext(receipt), env));
-  const kinds = { create_crm_note: 'create', update_crm_note: 'update', undo_crm_note: 'undo' };
+  const kinds = { create_crm_note: 'create', update_crm_note: 'update', undo_crm_note: 'undo', delete_crm_note: 'delete' };
   if (snapshot.note_id !== receipt.resource_id || kinds[receipt.action as keyof typeof kinds] !== snapshot.kind
-    || (snapshot.kind === 'update' && !snapshot.before) || (snapshot.kind === 'undo' && !snapshot.undo_kind)) {
+    || (snapshot.kind === 'update' && !snapshot.before) || (snapshot.kind === 'undo' && !snapshot.undo_kind)
+    || (snapshot.kind === 'delete' && !snapshot.deletion_kind)) {
     throw new HttpError(409, 'CRM_NOTE_RECEIPT_UNAVAILABLE', 'The saved note change does not match its receipt.');
   }
   return snapshot;
@@ -76,12 +78,15 @@ export function assertNote(record: NoteLive, saved: NoteSnapshot, actor: Princip
 export async function ownedNote(deps: NoteDependencies, actor: Principal, noteId: string, dealId: string) {
   return deps.readTransaction(async client => {
     const origin = await deps.origin(client, actor, noteId);
-    if (!origin) throw new HttpError(403, 'CRM_NOTE_NOT_EDITABLE', 'Only notes created by this agent for you can be edited or undone.');
+    if (!origin) throw new HttpError(403, 'CRM_NOTE_NOT_EDITABLE', 'Only notes created by this agent for you can be edited, removed or undone.');
     const first = noteSnapshot(origin, deps.env);
     if (first.deal_id !== dealId) throw new HttpError(403, 'CRM_NOTE_DEAL_MISMATCH', 'That note was not added by this agent to this deal.');
     const recent = await deps.list(client, actor, 1, noteId);
     const current = noteSnapshot(recent[0] ?? origin, deps.env);
     if (current.deal_id !== dealId || current.note_id !== noteId || current.target_id !== first.target_id) throw new HttpError(409, 'CRM_NOTE_RECEIPT_UNAVAILABLE', 'The note history could not be verified.');
+    if (current.kind === 'delete' || (current.kind === 'undo' && current.undo_kind === 'creation')) {
+      throw new HttpError(409, 'CRM_NOTE_REMOVED', 'This note was already removed from this deal. No further change is available here.');
+    }
     return { origin, latest: recent[0] ?? origin, saved: current };
   });
 }

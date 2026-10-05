@@ -11,7 +11,7 @@ type ReadContract = {
 };
 
 /** Minimum discovery scopes. Individual arguments can require additional live permissions. */
-export type ReadToolName = Exclude<ToolPromptName, 'create_gis_poi' | 'rollback_gis_poi' | 'create_email_draft' | 'update_email_draft' | 'create_crm_rfq' | 'update_crm_rfq' | 'undo_crm_rfq' | 'create_crm_note' | 'update_crm_note' | 'undo_crm_note'>;
+export type ReadToolName = Exclude<ToolPromptName, 'create_gis_poi' | 'rollback_gis_poi' | 'create_email_draft' | 'update_email_draft' | 'create_crm_rfq' | 'update_crm_rfq' | 'undo_crm_rfq' | 'create_crm_note' | 'update_crm_note' | 'undo_crm_note' | 'delete_crm_rfq' | 'delete_crm_note'>;
 export const MCP_READ_CONTRACTS: Record<ReadToolName, ReadContract> = {
   read_crm_note: { requiredScopes: ['crm:read', 'crm.notes:write'], sourceFamily: 'crm' },
   list_crm_note_changes: { requiredScopes: ['crm:read', 'crm.notes:write'], sourceFamily: 'crm' },

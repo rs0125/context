@@ -37,13 +37,13 @@ export async function listCrmNoteChanges(raw: unknown, key: KeyRegistration, sig
   const items = [];
   for (const { receipt, saved } of candidates) {
     // Never disclose stored note text from an inaccessible/shared/moved note.
-    const own = await ownedNote(deps, actor, saved.note_id, id);
     try {
+      const own = await ownedNote(deps, actor, saved.note_id, id);
       const live = await deps.crm.read(saved.note_id, id, saved.target_id, signal);
       assertNote(live, own.saved, actor);
       items.push({ operation_id: receipt.operation_id, action: receipt.action, note_id: saved.note_id,
         title: live.title, updated_at: live.updatedAt,
-        undo_available: saved.kind !== 'undo' && saved.after_updated_at === live.updatedAt && saved.target_updated_at === live.targetUpdatedAt });
+        undo_available: !['undo', 'delete'].includes(saved.kind) && saved.after_updated_at === live.updatedAt && saved.target_updated_at === live.targetUpdatedAt });
     } catch (error) {
       if (!(error instanceof HttpError) || ![403, 404, 409].includes(error.status)) throw error;
     }

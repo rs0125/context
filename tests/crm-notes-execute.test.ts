@@ -3,7 +3,7 @@ import type { PoolClient } from 'pg';
 import type { KeyRegistration, Principal } from '../src/lib/auth';
 import { HttpError } from '../src/lib/errors';
 import type { NoteDependencies } from '../src/lib/crm-writes/notes-access';
-import { executeCrmNoteCreate, executeCrmNoteUndo, executeCrmNoteUpdate } from '../src/lib/crm-writes/notes-execute';
+import { executeCrmNoteCreate, executeCrmNoteDelete, executeCrmNoteUndo, executeCrmNoteUpdate } from '../src/lib/crm-writes/notes-execute';
 import { listCrmNoteChanges, readCrmNote } from '../src/lib/crm-writes/notes-read';
 import { noteBodyPayload } from '../src/lib/crm-writes/notes-client';
 import type { NoteLive } from '../src/lib/crm-writes/notes';
@@ -16,6 +16,7 @@ const otherId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
 const createOp = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const updateOp = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const undoOp = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+const deleteOp = '11111111-1111-4111-8111-111111111111';
 const version = '2026-10-05T08:00:00.000Z', nextVersion = '2026-10-05T08:01:00.000Z';
 const args = { operation_id: createOp, deal_id: dealId, title: 'Site visit', body: '  Client needs two docks.\nVisit on Tuesday.  ',
   raw_text: 'Add a note: Client needs two docks. Visit on Tuesday.' };
@@ -28,7 +29,7 @@ function fixture() {
   const actor = structuredClone(principal);
   const receipts = new Map<string, CrmWriteReceipt>(), notes = new Map<string, NoteLive>(), removed = new Set<string>();
   let accessible = true, mutationSequence = 0;
-  const env: NodeJS.ProcessEnv = { NODE_ENV: 'test', CONTEXT_CRM_NOTES_ENABLED: 'true',
+  const env: NodeJS.ProcessEnv = { NODE_ENV: 'test', CONTEXT_CRM_NOTES_ENABLED: 'true', CONTEXT_CRM_DELETES_ENABLED: 'true',
     CONTEXT_CRM_RFQ_WRITES_ENABLED: 'false', CONTEXT_CRM_WRITE_API_KEY: 'synthetic', TWENTY_CRM_BASE_URL: 'https://crm.example.test',
     CONTEXT_KEY_ENCRYPTION_SECRET: 'synthetic-note-encryption-secret-32-characters-long' };
   const client = {} as PoolClient;
@@ -56,6 +57,11 @@ function fixture() {
       return { outcome: 'updated', record: structuredClone(record) };
     }),
     undoCreate: vi.fn<NoteDependencies['crm']['undoCreate']>(async current => { removed.add(current.id); return { outcome: 'rolled_back' }; }),
+    trash: vi.fn<NoteDependencies['crm']['trash']>(async current => {
+      const record = structuredClone(notes.get(current.id)!);
+      notes.get(current.id)!.deletedAt = nextVersion; removed.add(current.id);
+      return { outcome: 'deleted', record };
+    }),
   };
   const deps: NoteDependencies = { env, crm, readTransaction: transaction, writeTransaction: transaction,
     principal: vi.fn(async () => structuredClone(actor)),
@@ -90,16 +96,19 @@ function fixture() {
       const found = receipts.get(operation); return found && belongsTo(found, current) ? structuredClone(found) : null;
     }),
     list: vi.fn(async (_client, current, limit, noteId) => [...receipts.values()].reverse().filter(receipt => belongsTo(receipt, current)
-      && ['created', 'updated', 'undone'].includes(receipt.state) && (noteId === undefined || receipt.resource_id === noteId)).slice(0, limit)),
+      && ['created', 'updated', 'undone', 'deleted'].includes(receipt.state) && (noteId === undefined || receipt.resource_id === noteId)).slice(0, limit)),
   };
   const noteId = () => receipts.get(createOp)!.resource_id!;
   const updateArgs = () => ({ operation_id: updateOp, deal_id: dealId, note_id: noteId(), expected_updated_at: notes.get(noteId())!.updatedAt,
     body: 'Client needs three docks.', raw_text: 'Change my note to three docks.' });
   const undoArgs = () => ({ operation_id: undoOp, deal_id: dealId, original_operation_id: updateOp, raw_text: 'Undo the last note change' });
-  return { actor, env, deps, crm, notes, receipts, removed, noteId, updateArgs, undoArgs, setAccessible: (value: boolean) => { accessible = value; },
+  const deleteArgs = () => ({ operation_id: deleteOp, deal_id: dealId, note_id: noteId(), expected_updated_at: notes.get(noteId())!.updatedAt,
+    raw_text: 'Delete this note' });
+  return { actor, env, deps, crm, notes, receipts, removed, noteId, updateArgs, undoArgs, deleteArgs, setAccessible: (value: boolean) => { accessible = value; },
     create: (input: unknown = args, abort = signal()) => executeCrmNoteCreate(input, key, abort, undefined, deps),
     update: (input: unknown = updateArgs()) => executeCrmNoteUpdate(input, key, signal(), undefined, deps),
     undo: (input: unknown = undoArgs()) => executeCrmNoteUndo(input, key, signal(), undefined, deps),
+    delete: (input: unknown = deleteArgs()) => executeCrmNoteDelete(input, key, signal(), undefined, deps),
     read: (input: unknown = { deal_id: dealId, note_id: noteId() }) => readCrmNote(input, key, signal(), undefined, deps),
     list: () => listCrmNoteChanges({ deal_id: dealId }, key, signal(), undefined, deps) };
 }
@@ -258,5 +267,87 @@ describe('own-agent note read and history disclosure', () => {
   it('withholds known shared or changed notes from history without exposing saved body text', async () => {
     const f = fixture(); await f.create(); f.crm.read.mockRejectedValue(new HttpError(409, 'CRM_NOTE_LINK_CHANGED', 'Shared note.'));
     const history = await f.list(); expect(history.items).toEqual([]); expect(JSON.stringify(history)).not.toContain(args.body);
+  });
+});
+
+describe('direct removal of an owned current note', () => {
+  it.each(['creation', 'edit', 'undo-edit'])('trashes the latest verified note after %s without requiring a creation undo', async step => {
+    const f = fixture(); await f.create();
+    if (step !== 'creation') await f.update();
+    if (step === 'undo-edit') await f.undo();
+    const current = structuredClone(f.notes.get(f.noteId())!);
+    const result = await f.delete();
+    expect(result).toMatchObject({ outcome: 'deleted', code: 'CRM_NOTE_DELETED', data: { id: current.id,
+      deal: { id: dealId, name: 'Test Logistics - Hoskote' }, note: { title: current.title, body: current.bodyV2.markdown },
+      undo_available: false, deletion_kind: 'note' } });
+    expect(result.data?.undo_kind).toBeUndefined(); expect(f.crm.undoCreate).not.toHaveBeenCalled();
+    expect(f.crm.trash).toHaveBeenCalledOnce(); expect(f.crm.trash.mock.calls[0][0].updatedAt).toBe(current.updatedAt);
+    expect(f.notes.get(f.noteId())!.deletedAt).not.toBeNull();
+    const receipt = f.receipts.get(deleteOp)!;
+    expect(receipt).toMatchObject({ action: 'delete_crm_note', state: 'deleted', resource_id: current.id });
+    expect(decryptCrmSnapshot(receipt.encrypted_snapshot!, crmSnapshotContext(receipt), f.env)).toMatchObject({
+      kind: 'delete', deletion_kind: 'note', after_updated_at: current.updatedAt,
+      after: { title: current.title, body: current.bodyV2.markdown }, deal_id: dealId, note_id: current.id });
+  });
+  it.each(['delete-gate', 'notes-gate', 'key', 'read-scope', 'write-scope', 'identity', 'other-note', 'other-actor', 'other-deal', 'stale-version', 'external-text', 'external-version', 'changed-target', 'deal-access'])('refuses %s before reserving or dispatching deletion', async reason => {
+    const f = fixture(); await f.create(); await f.update(); const input = f.deleteArgs();
+    vi.mocked(f.deps.claim).mockClear();
+    if (reason === 'delete-gate') delete f.env.CONTEXT_CRM_DELETES_ENABLED;
+    if (reason === 'notes-gate') f.env.CONTEXT_CRM_NOTES_ENABLED = 'false';
+    if (reason === 'key') delete f.env.CONTEXT_CRM_WRITE_API_KEY;
+    if (reason === 'read-scope') f.actor.scopes = ['crm.notes:write'];
+    if (reason === 'write-scope') f.actor.scopes = ['crm:read'];
+    if (reason === 'identity') f.actor.twentyUserId = otherId;
+    if (reason === 'other-note') input.note_id = otherId;
+    if (reason === 'other-actor') f.actor.employeeId += 1;
+    if (reason === 'other-deal') input.deal_id = otherId;
+    if (reason === 'stale-version') input.expected_updated_at = version;
+    if (reason === 'external-text') f.notes.get(f.noteId())!.bodyV2 = noteBodyPayload('Someone else updated this note.');
+    if (reason === 'external-version') f.notes.get(f.noteId())!.updatedAt = '2026-10-05T10:00:00.000Z';
+    if (reason === 'changed-target') f.notes.get(f.noteId())!.targetUpdatedAt = nextVersion;
+    if (reason === 'deal-access') f.setAccessible(false);
+    expect(await f.delete(input)).toMatchObject({ outcome: 'not_dispatched' });
+    expect(f.deps.claim).not.toHaveBeenCalled(); expect(f.crm.trash).not.toHaveBeenCalled();
+  });
+  it.each(['soft_delete', 'permanent', 'target_id', 'ownerId', 'body'])('rejects deletion parameter injection via %s', async field => {
+    const f = fixture(); await f.create();
+    expect(await f.delete({ ...f.deleteArgs(), [field]: 'injected' })).toMatchObject({ outcome: 'not_dispatched', code: 'CRM_NOTE_INVALID' });
+    expect(f.crm.trash).not.toHaveBeenCalled();
+  });
+  it('admits one deletion and replays its receipt without CRM reads or old note text', async () => {
+    const f = fixture(); await f.create(); const input = f.deleteArgs();
+    await Promise.all([f.delete(input), f.delete(input), f.delete(input)]);
+    expect(f.crm.trash).toHaveBeenCalledOnce(); f.crm.read.mockClear(); f.crm.deal.mockClear();
+    expect(await f.delete(input)).toMatchObject({ outcome: 'replayed' });
+    expect((await f.delete(input)).data).toBeUndefined();
+    expect(f.crm.read).not.toHaveBeenCalled(); expect(f.crm.deal).not.toHaveBeenCalled();
+  });
+  it('does not offer edit or undo after deletion, even if the provider record is restored externally', async () => {
+    const f = fixture(); await f.create(); await f.delete();
+    f.removed.delete(f.noteId()); f.notes.get(f.noteId())!.deletedAt = null;
+    f.crm.read.mockClear();
+    await expect(f.read()).rejects.toMatchObject({ code: 'CRM_NOTE_REMOVED' });
+    expect(await f.list()).toMatchObject({ items: [] });
+    expect(await f.update()).toMatchObject({ outcome: 'not_dispatched', code: 'CRM_NOTE_REMOVED' });
+    expect(await f.undo({ ...f.undoArgs(), original_operation_id: createOp })).toMatchObject({ outcome: 'not_dispatched', code: 'CRM_NOTE_REMOVED' });
+    expect(f.crm.read).not.toHaveBeenCalled(); expect(f.crm.update).not.toHaveBeenCalled();
+  });
+  it('does not send a fresh deletion after creation was already undone', async () => {
+    const f = fixture(); await f.create(); await f.undo({ ...f.undoArgs(), original_operation_id: createOp });
+    expect(await f.delete()).toMatchObject({ outcome: 'not_dispatched', code: 'CRM_NOTE_REMOVED' });
+    expect(f.crm.trash).not.toHaveBeenCalled();
+  });
+  it('keeps uncertain deletion terminal instead of automatically dispatching again', async () => {
+    const f = fixture(); await f.create(); const input = f.deleteArgs(); f.crm.trash.mockResolvedValue({ outcome: 'outcome_unknown' });
+    expect(await f.delete(input)).toMatchObject({ outcome: 'outcome_unknown' });
+    expect(await f.delete(input)).toMatchObject({ outcome: 'outcome_unknown' });
+    expect(f.crm.trash).toHaveBeenCalledOnce(); expect(f.receipts.get(deleteOp)).toMatchObject({ state: 'unknown' });
+  });
+  it('retains successful deletion but withholds the note when live access is lost before the response', async () => {
+    const f = fixture(); await f.create(); const trash = f.crm.trash.getMockImplementation()!;
+    f.crm.trash.mockImplementation(async (...args) => { const result = await trash(...args); f.setAccessible(false); return result; });
+    const result = await f.delete();
+    expect(result).toMatchObject({ outcome: 'outcome_unknown' }); expect(result.data).toBeUndefined();
+    expect(f.receipts.get(deleteOp)).toMatchObject({ state: 'deleted' }); expect(f.crm.trash).toHaveBeenCalledOnce();
   });
 });

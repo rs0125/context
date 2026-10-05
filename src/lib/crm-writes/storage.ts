@@ -5,17 +5,17 @@ import type { Principal } from '../auth';
 import { HttpError } from '../errors';
 import { RFQ_ACTION } from './rfq';
 
-export const crmWriteActionSchema = z.enum(['create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq', 'create_crm_note', 'update_crm_note', 'undo_crm_note']);
+export const crmWriteActionSchema = z.enum(['create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq', 'create_crm_note', 'update_crm_note', 'undo_crm_note', 'delete_crm_rfq', 'delete_crm_note']);
 export type CrmWriteAction = z.infer<typeof crmWriteActionSchema>;
 const receipt = z.object({ employee_id: z.number().int().positive(), employee_email: z.string().email(),
   operation_id: z.string().uuid(), member_id: z.string().uuid(), action: crmWriteActionSchema, request_hash: z.string().regex(/^[a-f0-9]{64}$/),
-  state: z.enum(['dispatching', 'created', 'updated', 'undone', 'rejected', 'unknown']), resource_id: z.string().uuid().nullable(),
+  state: z.enum(['dispatching', 'created', 'updated', 'undone', 'deleted', 'rejected', 'unknown']), resource_id: z.string().uuid().nullable(),
   encrypted_snapshot: z.string().max(90_000).nullable().default(null) });
 // Optional at the type boundary for legacy receipt fixtures; parsed database rows always contain null or ciphertext.
 export type CrmWriteReceipt = Omit<z.infer<typeof receipt>, 'encrypted_snapshot'> & { encrypted_snapshot?: string | null };
 const columns = 'employee_id, employee_email, operation_id, member_id, action, request_hash, state, resource_id, encrypted_snapshot';
 const successfulState = { create_crm_rfq: 'created', update_crm_rfq: 'updated', undo_crm_rfq: 'undone',
-  create_crm_note: 'created', update_crm_note: 'updated', undo_crm_note: 'undone' } as const;
+  create_crm_note: 'created', update_crm_note: 'updated', undo_crm_note: 'undone', delete_crm_rfq: 'deleted', delete_crm_note: 'deleted' } as const;
 function unavailable(): never { throw new HttpError(503, 'CRM_RECEIPT_UNAVAILABLE', 'The change receipt could not be verified.'); }
 function verifyReceipt(row: unknown, actor: Principal, operation?: string, hash?: string, action?: CrmWriteAction): CrmWriteReceipt {
   const stored = receipt.safeParse(row);
@@ -24,7 +24,7 @@ function verifyReceipt(row: unknown, actor: Principal, operation?: string, hash?
     || (action !== undefined && stored.data.action !== action) || (hash !== undefined && stored.data.request_hash !== hash)) {
     throw new HttpError(409, 'CRM_OPERATION_CONFLICT', 'This operation ID is already bound to another request or employee identity.');
   }
-  const success = ['created', 'updated', 'undone'].includes(stored.data.state);
+  const success = ['created', 'updated', 'undone', 'deleted'].includes(stored.data.state);
   if (success !== (stored.data.resource_id !== null) || (success && stored.data.state !== successfulState[stored.data.action])) unavailable();
   return stored.data;
 }
@@ -49,10 +49,10 @@ export async function claimCrmChange(client: PoolClient, actor: Principal, opera
 }
 
 export type CrmChangeResult =
-  | { outcome: 'created' | 'updated' | 'rolled_back'; id: string; encryptedSnapshot?: string }
+  | { outcome: 'created' | 'updated' | 'rolled_back' | 'deleted'; id: string; encryptedSnapshot?: string }
   | { outcome: 'rejected' | 'outcome_unknown'; encryptedSnapshot?: string };
 export async function finishCrmChange(client: PoolClient, actor: Principal, operation: string, hash: string, action: CrmWriteAction, result: CrmChangeResult) {
-  const success = ['created', 'updated', 'rolled_back'].includes(result.outcome);
+  const success = ['created', 'updated', 'rolled_back', 'deleted'].includes(result.outcome);
   const state = result.outcome === 'outcome_unknown' ? 'unknown' : result.outcome === 'rolled_back' ? 'undone' : result.outcome;
   if (!crmWriteActionSchema.safeParse(action).success || (success && state !== successfulState[action])
     || (result.encryptedSnapshot !== undefined && (typeof result.encryptedSnapshot !== 'string' || result.encryptedSnapshot.length > 90_000))) unavailable();
@@ -82,7 +82,7 @@ export async function listCrmChanges(client: PoolClient, actor: Principal, limit
   if (!Number.isInteger(limit) || limit < 1 || limit > 50) unavailable();
   const { rows } = await client.query(`SELECT ${columns} FROM context_crm_private.write_operations
     WHERE employee_id = $1 AND employee_email = $2 AND member_id = $3
-      AND action IN ('create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq')
+      AND action IN ('create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq', 'delete_crm_rfq')
     ORDER BY created_at DESC, operation_id DESC LIMIT $4`, [actor.employeeId, actor.email, actor.twentyUserId, limit]);
   return rows.map(row => verifyReceipt(row, actor));
 }
@@ -99,7 +99,7 @@ export async function listCrmNoteChanges(client: PoolClient, actor: Principal, l
   if (!Number.isInteger(limit) || limit < 1 || limit > 50 || (noteId !== undefined && !z.string().uuid().safeParse(noteId).success)) unavailable();
   const { rows } = await client.query(`SELECT ${columns} FROM context_crm_private.write_operations
     WHERE employee_id = $1 AND employee_email = $2 AND member_id = $3
-      AND action IN ('create_crm_note', 'update_crm_note', 'undo_crm_note') AND state IN ('created', 'updated', 'undone')
+      AND action IN ('create_crm_note', 'update_crm_note', 'undo_crm_note', 'delete_crm_note') AND state IN ('created', 'updated', 'undone', 'deleted')
       AND ($5::uuid IS NULL OR resource_id = $5)
     ORDER BY created_at DESC, operation_id DESC LIMIT $4`, [actor.employeeId, actor.email, actor.twentyUserId, limit, noteId ?? null]);
   return rows.map(row => verifyReceipt(row, actor));

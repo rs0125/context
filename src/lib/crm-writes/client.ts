@@ -164,7 +164,28 @@ export class CrmRfqClient {
       return { outcome: 'rolled_back', id: record.id };
     } catch { return { outcome: 'outcome_unknown' }; }
   }
+  /** Explicit removal of the current owned opportunity, even after edits or stage changes. */
+  async delete(current: RfqLiveRecord, signal: AbortSignal): Promise<CrmRfqDeleteOutcome> {
+    const filter = guardedFilter(current);
+    if (!filter || this.env.CONTEXT_CRM_DELETES_ENABLED !== 'true') return { outcome: 'rejected', code: 'CRM_RFQ_DELETE_INVALID' };
+    try {
+      const query = new URLSearchParams({ filter, soft_delete: 'true' });
+      const response = await this.request(`/rest/opportunities?${query}`, 'DELETE', signal);
+      if (!response.ok) {
+        await response.body?.cancel();
+        return { outcome: [400, 401, 403, 404, 409, 412, 422].includes(response.status) && !response.redirected ? 'rejected' : 'outcome_unknown' };
+      }
+      const result = z.object({ data: z.object({ deleteOpportunities: z.array(z.object({ id: z.string().uuid() })).max(1) }) }).parse(await json(response, 64_000));
+      if (response.status !== 200) return { outcome: 'outcome_unknown' };
+      const record = result.data.deleteOpportunities[0];
+      if (!record) return { outcome: 'rejected', code: 'CRM_RFQ_VERSION_CONFLICT' };
+      if (record.id.toLowerCase() !== current.id.toLowerCase()) return { outcome: 'outcome_unknown' };
+      return { outcome: 'deleted', id: record.id };
+    } catch { return { outcome: 'outcome_unknown' }; }
+  }
 }
+export type CrmRfqDeleteOutcome = { outcome: 'deleted'; id: string }
+  | { outcome: 'rejected' | 'outcome_unknown'; code?: string };
 export type CrmRfqChangeOutcome = { outcome: 'updated'; id: string; record: RfqLiveRecord }
   | { outcome: 'rolled_back'; id: string }
   | { outcome: 'rejected' | 'outcome_unknown'; code?: string };

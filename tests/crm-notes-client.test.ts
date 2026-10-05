@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Principal } from '../src/lib/auth';
-import { CrmNoteClient, crmNotesAvailability, noteBodyPayload, verifiedPlainNote } from '../src/lib/crm-writes/notes-client';
+import { CrmNoteClient, crmNotesAvailability, crmNotesDeleteAvailability, noteBodyPayload, verifiedPlainNote } from '../src/lib/crm-writes/notes-client';
 import type { NoteLive } from '../src/lib/crm-writes/notes';
 
 const noteId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -12,7 +12,7 @@ const version = '2026-10-05T08:00:00.000Z', nextVersion = '2026-10-05T08:01:00.0
 const content = { title: 'Site visit', body: '  Client visited today.\n\nNeeds two additional docks.  ' };
 const changed = { title: 'Site visit update', body: 'Client needs three additional docks.' };
 const creator = { id: memberId, name: 'Synthetic Employee' };
-const env = { CONTEXT_CRM_NOTES_ENABLED: 'true', CONTEXT_CRM_RFQ_WRITES_ENABLED: 'false',
+const env = { CONTEXT_CRM_NOTES_ENABLED: 'true', CONTEXT_CRM_DELETES_ENABLED: 'true', CONTEXT_CRM_RFQ_WRITES_ENABLED: 'false',
   TWENTY_CRM_BASE_URL: 'https://crm.example.test', CONTEXT_CRM_WRITE_API_KEY: 'synthetic-note-key' };
 const actor: Principal = { employeeId: 7, email: 'employee@wareongo.com', keyId: 'synthetic',
   twentyUserId: memberId, scopes: ['crm:read', 'crm.notes:write'], isAnalyst: false };
@@ -37,6 +37,7 @@ function fixture() {
       return Response.json({ data: { createNoteTarget: target } }, { status: 201 });
     }
     if (init?.method === 'GET' && url.pathname === `/rest/notes/${noteId}`) return Response.json({ data: { note: record } });
+    if (init?.method === 'GET' && url.pathname === '/rest/notes') return Response.json({ data: { notes: record.deletedAt === null ? [record] : [] }, pageInfo: { hasNextPage: false } });
     if (init?.method === 'GET' && url.pathname === '/rest/noteTargets') return Response.json({ data: { noteTargets: targets }, pageInfo: { hasNextPage: false } });
     if (init?.method === 'PATCH' && url.pathname === '/rest/notes') {
       if (!url.searchParams.get('filter')?.includes(`updatedAt[eq]:"${record.updatedAt}"`)) return Response.json({ data: { updateNotes: [] } });
@@ -47,6 +48,11 @@ function fixture() {
       targets = targets.filter(value => value.id !== targetId);
       return Response.json({ data: { deleteNoteTargets: [{ id: targetId }] } });
     }
+    if (init?.method === 'DELETE' && url.pathname === '/rest/notes') {
+      if (!url.searchParams.get('filter')?.includes(`updatedAt[eq]:"${record.updatedAt}"`)) return Response.json({ data: { deleteNotes: [] } });
+      record.deletedAt = nextVersion; targets = [];
+      return Response.json({ data: { deleteNotes: [{ id: noteId }] } });
+    }
     throw new Error('Unexpected endpoint');
   });
   const client = new CrmNoteClient(env, fetcher);
@@ -55,6 +61,7 @@ function fixture() {
     read: () => client.read(noteId, dealId, targetId, signal()),
     update: () => client.update(structuredClone(record), dealId, targetId, changed, signal()),
     undo: () => client.undoCreate(structuredClone(record), dealId, targetId, signal()),
+    trash: () => client.trash(structuredClone(record), dealId, targetId, signal()),
     mutations: () => fetcher.mock.calls.filter(([, init]) => init?.method !== 'GET') };
 }
 
@@ -249,5 +256,75 @@ describe('CRM notes fixed adapter and note editor compatibility', () => {
     const f = fixture(), abort = new AbortController(); abort.abort();
     expect(await f.client.create(noteId, targetId, dealId, content, creator, abort.signal)).toEqual({ outcome: 'outcome_unknown' });
     expect(f.fetcher).not.toHaveBeenCalled();
+  });
+});
+
+describe('CRM note trash adapter', () => {
+  it('uses explicit soft delete on only the exact current note and verifies it is no longer active', async () => {
+    const f = fixture(), current = structuredClone(f.record);
+    expect(await f.trash()).toEqual({ outcome: 'deleted', record: current });
+    expect(f.record.deletedAt).not.toBeNull(); expect(f.mutations()).toHaveLength(1);
+    const [url, init] = f.mutations()[0], parsed = new URL(String(url));
+    expect(parsed.pathname).toBe('/rest/notes'); expect(parsed.searchParams.get('soft_delete')).toBe('true');
+    expect(parsed.searchParams.get('filter')).toBe(`id[eq]:"${noteId}",updatedAt[eq]:"${version}",createdBy.workspaceMemberId[eq]:"${memberId}",deletedAt[is]:NULL`);
+    expect(init?.method).toBe('DELETE'); expect(init?.body).toBeUndefined();
+    const last = new URL(String(f.fetcher.mock.calls.at(-1)![0]));
+    expect(last.pathname).toBe('/rest/notes'); expect(last.searchParams.get('filter')).toBe(`id[eq]:"${noteId}",deletedAt[is]:NULL`);
+  });
+  it('requires both notes and deletion gates and a dedicated write credential', async () => {
+    expect(crmNotesDeleteAvailability(env)).toEqual({ available: true });
+    for (const overrides of [{ CONTEXT_CRM_DELETES_ENABLED: undefined }, { CONTEXT_CRM_DELETES_ENABLED: 'false' },
+      { CONTEXT_CRM_NOTES_ENABLED: 'false' }, { CONTEXT_CRM_WRITE_API_KEY: '', TWENTY_CRM_API_KEY: 'read-key' }]) {
+      const currentEnv = { ...env, ...overrides };
+      expect(crmNotesDeleteAvailability(currentEnv)).toEqual({ available: false });
+      const f = fixture(), client = new CrmNoteClient(currentEnv, f.fetcher);
+      expect(await client.trash(f.record, dealId, targetId, signal())).toMatchObject({ outcome: 'rejected' });
+      expect(f.fetcher).not.toHaveBeenCalled();
+    }
+  });
+  it.each(['shared', 'moved', 'missing', 'changed-link', 'changed-note', 'changed-content', 'changed-creator'])('refuses %s before dispatch', async reason => {
+    const f = fixture(), current = structuredClone(f.record);
+    if (reason === 'shared') f.targets([f.target, { ...f.target, id: otherId, targetOpportunityId: otherId }]);
+    if (reason === 'moved') f.targets([{ ...f.target, targetOpportunityId: otherId }]);
+    if (reason === 'missing') f.targets([]);
+    if (reason === 'changed-link') f.targets([{ ...f.target, updatedAt: nextVersion }]);
+    if (reason === 'changed-note') f.record.updatedAt = nextVersion;
+    if (reason === 'changed-content') f.record.bodyV2 = noteBodyPayload(changed.body);
+    if (reason === 'changed-creator') f.record.createdBy.workspaceMemberId = otherId;
+    expect(await f.client.trash(current, dealId, targetId, signal())).toMatchObject({ outcome: 'rejected' });
+    expect(f.mutations()).toHaveLength(0);
+  });
+  it('uses the latest version after a verified note edit', async () => {
+    const f = fixture(); await f.update();
+    expect(await f.trash()).toMatchObject({ outcome: 'deleted', record: { title: changed.title, updatedAt: nextVersion } });
+    const [url] = f.mutations()[1];
+    expect(new URL(String(url)).searchParams.get('filter')).toContain(`updatedAt[eq]:"${nextVersion}"`);
+  });
+  it.each(['empty', 'wrong-id', 'multiple-ids', 'bad-json', 'transport', 'active-note', 'unverified-active-read'])('fails closed on %s without retries', async reason => {
+    const f = fixture(), originalFetch = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      if (init?.method === 'DELETE') {
+        if (reason === 'empty') return Response.json({ data: { deleteNotes: [] } });
+        if (reason === 'wrong-id') return Response.json({ data: { deleteNotes: [{ id: otherId }] } });
+        if (reason === 'multiple-ids') return Response.json({ data: { deleteNotes: [{ id: noteId }, { id: otherId }] } });
+        if (reason === 'bad-json') return new Response('not json');
+        if (reason === 'transport') throw new Error('connection lost');
+        if (reason === 'active-note') return Response.json({ data: { deleteNotes: [{ id: noteId }] } });
+      }
+      if (reason === 'unverified-active-read' && init?.method === 'GET' && path === '/rest/notes') return new Response('unavailable', { status: 503 });
+      return originalFetch(url, init);
+    });
+    expect(await f.trash()).toMatchObject({ outcome: reason === 'empty' ? 'rejected' : 'outcome_unknown' });
+    expect(f.mutations()).toHaveLength(1);
+  });
+  it('reports a version conflict if the provider changes the note after preflight', async () => {
+    const f = fixture(), originalFetch = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (url, init) => {
+      if (init?.method === 'DELETE') f.record.updatedAt = nextVersion;
+      return originalFetch(url, init);
+    });
+    expect(await f.trash()).toMatchObject({ outcome: 'rejected', code: 'CRM_NOTE_VERSION_CONFLICT' });
+    expect(f.record.deletedAt).toBeNull(); expect(f.mutations()).toHaveLength(1);
   });
 });

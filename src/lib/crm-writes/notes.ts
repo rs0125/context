@@ -24,20 +24,26 @@ export const noteUpdateInputSchema = z.object({ ...common,
 export const noteUndoInputSchema = z.object({ ...common,
   original_operation_id: z.string().uuid().describe('Successful create/edit operation from list_crm_note_changes. Undo removes an unchanged created note or restores the text before an unchanged edit.'),
 }).strict();
+export const noteDeleteInputSchema = z.object({ ...common,
+  note_id: z.string().uuid().describe('An existing note created by this agent for the current employee on this exact deal, including notes edited by the agent since creation.'),
+  expected_updated_at: rfqVersionSchema.describe('Exact current updated_at from read_crm_note. Never invent a version.'),
+}).strict();
 export const noteReadInputSchema = z.object({ deal_id: common.deal_id, note_id: z.string().uuid() }).strict();
 export const noteListInputSchema = z.object({ deal_id: common.deal_id, limit: z.number().int().min(1).max(10).optional() }).strict();
 export const noteDealSchema = z.object({ id: z.string().uuid(), name: z.string().min(1).max(500), url: z.string().url() }).strict();
 export const noteResultDataSchema = z.object({ id: z.string().uuid(), deal: noteDealSchema, note: noteContentSchema,
   updated_at: rfqVersionSchema.optional(), undo_available: z.boolean(), undo_kind: z.enum(['creation', 'edit']).optional(),
+  deletion_kind: z.enum(['deal_link', 'note']).optional(),
 }).strict();
 export const noteOutputSchema = z.object({ operation_id: z.string().uuid(),
-  outcome: z.enum(['created', 'updated', 'rolled_back', 'replayed', 'not_dispatched', 'rejected', 'outcome_unknown']),
+  outcome: z.enum(['created', 'updated', 'deleted', 'rolled_back', 'replayed', 'not_dispatched', 'rejected', 'outcome_unknown']),
   code: z.string().regex(/^[A-Z][A-Z0-9_]{0,95}$/), message: z.string().min(1).max(2000), data: noteResultDataSchema.optional(),
 }).strict();
 export type NoteContent = z.infer<typeof noteContentSchema>;
 export type NoteCreateInput = z.infer<typeof noteCreateInputSchema>;
 export type NoteUpdateInput = z.infer<typeof noteUpdateInputSchema>;
 export type NoteUndoInput = z.infer<typeof noteUndoInputSchema>;
+export type NoteDeleteInput = z.infer<typeof noteDeleteInputSchema>;
 export type NoteResult = z.infer<typeof noteOutputSchema>;
 export type NoteResultData = z.infer<typeof noteResultDataSchema>;
 

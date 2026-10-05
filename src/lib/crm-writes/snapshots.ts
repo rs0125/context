@@ -8,7 +8,7 @@ const MAX_BYTES = 65_536;
 const contextSchema = z.object({
   employeeId: z.number().int().positive(), email: z.string().max(254).regex(/^[^\s@]+@wareongo\.com$/),
   memberId: z.string().uuid(), operationId: z.string().uuid(),
-  action: z.enum(['create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq', 'create_crm_note', 'update_crm_note', 'undo_crm_note']),
+  action: z.enum(['create_crm_rfq', 'update_crm_rfq', 'undo_crm_rfq', 'create_crm_note', 'update_crm_note', 'undo_crm_note', 'delete_crm_rfq', 'delete_crm_note']),
   requestHash: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
 export type CrmSnapshotContext = {
