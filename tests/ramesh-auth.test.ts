@@ -141,6 +141,58 @@ describe('Ramesh signed request authentication', () => {
 });
 
 describe('parallel MCP entry points', () => {
+  it.each([false, true])('preserves CRM replies for Ramesh (admin=%s) without changing ordinary API redaction', async admin => {
+    rows[0].adminAccess = admin;
+    const leadId = '00000000-0000-4000-8000-000000000001';
+    const description = 'Call +91 98765 43210 or alex@example.test. See https://example.test/lead.';
+    const lead = { opportunity_id: leadId, name: 'Alex 9876543210', stage: 'NEW_LEAD', description,
+      loss_reason: 'Email alex@example.test', assigned_to: ['alex@example.test'], poc_phone: '919999999999' };
+    const sourceDb = { query: vi.fn(async (sql: string, values?: unknown[]) => {
+      if (sql.includes('VerifiedNumber')) return { rows };
+      if (sql.includes('sync_checkpoints')) return { rows: [{ object: 'opportunities', last_run_at: new Date(), last_run_status: 'ok' }] };
+      if (sql.includes('FROM public.opportunities')) return { rows: Array.isArray(values?.[1]) && !values[1].includes(leadId) ? [] : [lead] };
+      return { rows: [] };
+    }) } as unknown as PoolClient;
+    const liveCrmAccess = vi.fn(async () => ({ mode: 'related' as const, memberId: employee().twenty_user_id, ids: [leadId] }));
+    const read: typeof handleApiRequest = (request, path, overrides) => handleApiRequest(request, path, {
+      ...overrides, transaction: async work => work(sourceDb), liveCrmAccess, audit: () => {},
+    });
+    const transport = new StreamableHTTPClientTransport(new URL(endpoint), { fetch: async (input, init) => {
+      const incoming = new Request(input, init);
+      return handleRameshMcpRequest(incoming.method === 'POST' ? await signed({ content: await incoming.text() }) : incoming,
+        { auth: deps, read, prompts: async () => ({}), audit: () => {} });
+    } });
+    const client = new Client({ name: 'crm-presentation-test', version: '1' });
+    try {
+      await client.connect(transport);
+      expect(client.getInstructions()).toContain('CRM contact masking is disabled');
+      const context = await client.callTool({ name: 'get_context', arguments: {} });
+      expect(context.structuredContent).toMatchObject({ data: { constraints: {
+        contacts: 'crm_text_unredacted', narrative_context: 'unredacted_lead_context',
+      } } });
+      const result = await client.callTool({ name: 'read_crm_lead', arguments: { id: leadId } });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ data: {
+        name: lead.name, description: { text: description, redacted: false, state: 'present' },
+        loss_reason: { text: lead.loss_reason, redacted: false },
+        ownership: { assigned_to: { values: lead.assigned_to, redacted: false } },
+      } });
+      expect(JSON.stringify(result)).not.toContain(lead.poc_phone);
+
+      const key = await authenticateRameshRequest(await signed(), deps);
+      const ordinary = await read(new Request(`${origin}/api/v1/crm/opportunities/${leadId}`), ['crm', 'opportunities', leadId], { authenticate: () => key });
+      expect(ordinary.status).toBe(200);
+      const ordinaryData = (await ordinary.json()).data;
+      expect(ordinaryData.description.redacted).toBe(true);
+      expect(JSON.stringify(ordinaryData)).not.toMatch(/98765|alex@example|https:\/\/example/);
+
+      liveCrmAccess.mockResolvedValue({ mode: 'related', memberId: employee().twenty_user_id, ids: [] });
+      const denied = await client.callTool({ name: 'read_crm_lead', arguments: { id: leadId } });
+      expect(denied.isError).toBe(true);
+      expect(JSON.stringify(denied)).not.toContain(description);
+    } finally { await client.close(); }
+  });
+
   it('exposes the full analytics catalogue for a registered admin and removes it after demotion', async () => {
     registration.scopes.push('analytics:read');
     vi.stubEnv('CONTEXT_RAMESH_PUBLIC_KEYS_JSON', JSON.stringify([registration]));

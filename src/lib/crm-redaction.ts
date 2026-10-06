@@ -40,7 +40,7 @@ function record(value: unknown): value is Record<string, unknown> {
 /** BlockNote's stored JSON array is a sequence of blocks with text/link inline
  * content and optional children. Never stringify unknown objects or properties.
  */
-function blocknoteText(value: unknown): { text: string; omitted: boolean } | null {
+function blocknoteText(value: unknown, redactContacts: boolean): { text: string; omitted: boolean } | null {
   let blocks = value;
   if (typeof blocks === 'string') {
     if (blocks.length > MAX_INPUT) return null;
@@ -58,13 +58,13 @@ function blocknoteText(value: unknown): { text: string; omitted: boolean } | nul
       if (++visited > 2000 || !record(node)) return null;
       if (node.type === 'text' && typeof node.text === 'string') output += node.text;
       else if (node.type === 'link' && Array.isArray(node.content)) {
-        omitted = true;
-        // Only link label text is retained. Nested links and hidden attributes
-        // are deliberately unsupported rather than treated as visible text.
+        // Nested links and unknown attributes are never treated as visible text.
         for (const child of node.content) {
           if (++visited > 2000 || !record(child) || child.type !== 'text' || typeof child.text !== 'string') return null;
           output += child.text;
         }
+        if (!redactContacts && typeof node.href === 'string') output += ` (${node.href})`;
+        else omitted = true;
       } else return null;
       if (output.length > MAX_INPUT) return null;
     }
@@ -92,10 +92,26 @@ function blocknoteText(value: unknown): { text: string; omitted: boolean } | nul
  * prefix of a detected phone/email. No original source value is returned.
  */
 export function redactCrmText(value: unknown, options: CrmTextOptions = {}): RedactedCrmText {
+  return renderCrmText(value, options, true);
+}
+
+/** Preserve contacts and link destinations while retaining bounded text conversion. */
+export function unredactedCrmText(value: unknown, options: CrmTextOptions = {}): RedactedCrmText {
+  return renderCrmText(value, options, false);
+}
+
+function finishText(text: string, maxCharacters: number, redacted: boolean): RedactedCrmText {
+  text = text.replace(/[ \t]+/g, ' ').replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  const truncated = text.length > maxCharacters;
+  if (truncated) text = text.slice(0, maxCharacters).trimEnd();
+  return { state: truncated ? 'truncated' : redacted ? 'redacted' : text ? 'present' : 'missing', text: text || null, redacted, truncated };
+}
+
+function renderCrmText(value: unknown, options: CrmTextOptions, redactContacts: boolean): RedactedCrmText {
   if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) return { ...EMPTY };
   const maxCharacters = Math.min(MAX_OUTPUT, Math.max(1, Math.floor(options.maxCharacters ?? 4000)));
   if (!Number.isFinite(maxCharacters)) return { ...UNSUPPORTED };
-  const converted = options.format === 'blocknote' ? blocknoteText(value) : null;
+  const converted = options.format === 'blocknote' ? blocknoteText(value, redactContacts) : null;
   const input = options.format === 'blocknote' ? converted?.text ?? null : typeof value === 'string' ? value : null;
   if (input === null || input.length > MAX_INPUT) return { ...UNSUPPORTED };
   if (!input.trim()) return { ...EMPTY };
@@ -136,8 +152,17 @@ export function redactCrmText(value: unknown, options: CrmTextOptions = {}): Red
     comment = text.indexOf('<!--', start);
   }
   text = html + text.slice(start);
+  if (!redactContacts) {
+    // Preserve visible email/URL autolinks before stripping HTML formatting.
+    text = text.replace(/<([^<>\s]{1,4000})>/g, (whole, label: string) =>
+      /^(?:https?:\/\/|mailto:|tel:)/i.test(label) || /^[^@]{1,64}@[^@]{1,253}\.[^.@]{2,63}$/.test(label) ? label : whole);
+  }
   mask(/<[^<>]{0,2000}>/g, ' ');
   mask(/!\[[^\[\]\n]{0,2000}\]\([^()\n]{0,4000}\)/g, '[media omitted]');
+  if (!redactContacts) {
+    mask(/\b(?:javascript|vbscript|data|file):[^\s<>]+/gi, '[link omitted]');
+    return finishText(text, maxCharacters, redacted);
+  }
   mask(/\[([^\[\]\n]{0,2000})\]\([^()\n]{0,4000}\)/g, (_whole, label) => label);
   mask(/(?:https?:\/\/|ftp:\/\/|www\.|(?:wa\.me|api\.whatsapp\.com|t\.me)\/)[^\s<>]+/gi, '[link omitted]');
   mask(/(?:mailto:|tel:|sms:|whatsapp:)[^\s<>]+/gi, '[contact omitted]');
@@ -171,8 +196,5 @@ export function redactCrmText(value: unknown, options: CrmTextOptions = {}): Red
   // the supported decodings. Withhold that token rather than echoing it.
   mask(/&(?:amp;)*(?:#[a-z0-9]+|[a-z]+);/gi, '[entity omitted]');
   text = text.replace(new RegExp(`${prefix}([0-9]+)END`, 'g'), (_whole, index: string) => protectedValues[Number(index)]);
-  text = text.replace(/[ \t]+/g, ' ').replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-  const truncated = text.length > maxCharacters;
-  if (truncated) text = text.slice(0, maxCharacters).trimEnd();
-  return { state: truncated ? 'truncated' : redacted ? 'redacted' : text ? 'present' : 'missing', text: text || null, redacted, truncated };
+  return finishText(text, maxCharacters, redacted);
 }

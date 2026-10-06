@@ -8,7 +8,7 @@ import { RFQ_SCOPE, rfqInputSchema, rfqProblems, rfqPayload, type RfqResult } fr
 import { claimCrmRfq, findCrmRfq, finishCrmRfq, type CrmWriteReceipt } from './storage';
 import { rfqRecordUrl, type RfqLiveRecord } from './changes';
 import { encryptCrmSnapshot } from './snapshots';
-import { redactCrmText } from '../crm-redaction';
+import { crmText } from '../crm-presentation';
 
 export type CrmRfqDependencies = {
   readTransaction: typeof withReadOnlyTransaction; writeTransaction: typeof withCrmWriteTransaction;
@@ -30,7 +30,7 @@ export async function executeCrmRfq(raw: unknown, key: KeyRegistration, signal: 
   const result = (outcome: RfqResult['outcome'], code: string, message: string, id?: string, record?: RfqLiveRecord, undo = false): RfqResult => ({
     operation_id: operation, outcome, code, message, ...(id ? { data: { id, stage: 'RFQ_RECEIVED',
       ...(origin ? { url: rfqRecordUrl(id, origin) } : {}), undo_available: undo,
-      ...(record ? { name: redactCrmText(record.name, { maxCharacters: 500 }).text ?? '', updated_at: record.updatedAt } : {}) } as const } : {}),
+      ...(record ? { name: crmText(record.name, { maxCharacters: 500 }).text ?? '', updated_at: record.updatedAt } : {}) } as const } : {}),
   });
   const unknown = () => result('outcome_unknown', 'CRM_OUTCOME_UNKNOWN', 'The RFQ may have been created. Keep this operation ID and exact arguments. Recovery checks the receipt only and never sends another creation. Ask an administrator to reconcile an unresolved result before creating it again.');
   function replay(receipt: CrmWriteReceipt): RfqResult {

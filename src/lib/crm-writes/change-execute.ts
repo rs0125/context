@@ -2,7 +2,7 @@ import type { PoolClient } from 'pg';
 import type { KeyRegistration } from '../auth';
 import { HttpError } from '../errors';
 import { argumentsSha256 } from '../mcp-read-contract';
-import { redactCrmText } from '../crm-redaction';
+import { crmText } from '../crm-presentation';
 import { rfqBeforePatch, rfqEditPayload, rfqEditProblems, rfqRecordUrl, rfqUndoInputSchema, rfqUpdateInputSchema, type RfqChangeResult, type RfqLiveRecord } from './changes';
 import { changeAuthorizer, changeConfiguration, changeDependencies, changeSnapshot, requireOrigin, requireOwnedRfq, sameActor, type CrmChangeDependencies } from './change-access';
 import { encryptCrmSnapshot } from './snapshots';
@@ -23,7 +23,7 @@ async function execute(action: Extract<CrmWriteAction, 'update_crm_rfq' | 'undo_
   const result = (outcome: RfqChangeResult['outcome'], code: string, message: string, id?: string, record?: RfqLiveRecord, undo = false): RfqChangeResult => ({
     operation_id: operation, outcome, code, message,
     ...(id ? { data: { id, url: rfqRecordUrl(id, origin), undo_available: undo,
-      ...(record ? { name: redactCrmText(record.name, { maxCharacters: 500 }).text ?? '', updated_at: record.updatedAt } : {}) } } : {}),
+      ...(record ? { name: crmText(record.name, { maxCharacters: 500 }).text ?? '', updated_at: record.updatedAt } : {}) } } : {}),
   });
   const unknown = () => result('outcome_unknown', 'CRM_OUTCOME_UNKNOWN', 'The change may have completed. Keep the same operation ID and arguments. Recovery checks the receipt only; do not submit a replacement operation until the outcome is reconciled.');
   const replay = (receipt: CrmWriteReceipt) => {

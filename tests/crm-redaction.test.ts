@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { redactCrmText } from '../src/lib/crm-redaction';
+import { redactCrmText, unredactedCrmText } from '../src/lib/crm-redaction';
 
 describe('CRM plain-text context redaction', () => {
   it('preserves ordinary business context', () => {
@@ -98,5 +98,50 @@ describe('bounded BlockNote conversion', () => {
     '[{"type":"paragraph","content":"unexpected"}]',
   ])('marks unknown structure unsupported without echoing serialized payload', value => {
     expect(redactCrmText(value, { format: 'blocknote' })).toMatchObject({ state: 'unsupported', text: null });
+  });
+});
+
+describe('unredacted CRM text', () => {
+  it('preserves phone numbers, emails, domains and Markdown link destinations', () => {
+    const text = 'Call +91 98765 43210 or alex@example.test. See example.test and [Brochure](https://example.test/lead?id=9876543210).';
+    expect(unredactedCrmText(text)).toEqual({ state: 'present', text, redacted: false, truncated: false });
+    expect(unredactedCrmText('<alex@example.test> <https://example.test/lead>').text)
+      .toBe('alex@example.test https://example.test/lead');
+  });
+
+  it('preserves supported BlockNote contact text and links without serializing unknown attributes', () => {
+    const blocks = [{ type: 'paragraph', props: { hidden: 'private metadata' }, content: [
+      { type: 'text', text: 'Call 9876543210. ' },
+      { type: 'link', href: 'https://example.test/lead', content: [{ type: 'text', text: 'Brochure' }] },
+    ] }];
+    expect(unredactedCrmText(JSON.stringify(blocks), { format: 'blocknote' })).toEqual({
+      state: 'present', text: 'Call 9876543210. Brochure (https://example.test/lead)', redacted: false, truncated: false,
+    });
+  });
+
+  it('keeps bounds and unsupported-source states when contact masking is disabled', () => {
+    expect(unredactedCrmText('Call 9876543210. More details', { maxCharacters: 16 }))
+      .toEqual({ state: 'truncated', text: 'Call 9876543210.', redacted: false, truncated: true });
+    expect(unredactedCrmText(null)).toMatchObject({ state: 'missing', text: null });
+    for (const value of [{ text: 'unexpected' }, 'x'.repeat(100001)]) {
+      expect(unredactedCrmText(value)).toMatchObject({ state: 'unsupported', text: null });
+    }
+    expect(unredactedCrmText('[{"type":"image"}]', { format: 'blocknote' }))
+      .toMatchObject({ state: 'unsupported', text: null });
+  });
+
+  it('still removes active markup, executable links and embedded media', () => {
+    const result = unredactedCrmText('Call 9876543210 <script>secret</script> <!--hidden--> javascript:alert(1) ![photo](https://example.test/photo)');
+    expect(result.text).toContain('Call 9876543210');
+    expect(result.text).not.toMatch(/secret|hidden|javascript|example|<|>/);
+    expect(result.redacted).toBe(true);
+  });
+
+  it('bounds conversion of malformed autolinks', () => {
+    const started = performance.now();
+    for (const value of [`<a@${'.'.repeat(99000)}`, `<https://${'a'.repeat(99000)}`, '<alex@example.'.repeat(7000)]) {
+      expect(unredactedCrmText(value).text?.length ?? 0).toBeLessThanOrEqual(4000);
+    }
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 });

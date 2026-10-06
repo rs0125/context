@@ -1,4 +1,4 @@
-import { redactCrmText } from './crm-redaction';
+import { crmText } from './crm-presentation';
 
 type Row = Record<string, unknown>;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -8,14 +8,14 @@ function labels(value: unknown) {
   if (!Array.isArray(value) || value.length > 32 || !value.every(item => typeof item === 'string' && item.length <= 500)) {
     return { state: 'unsupported' as const, values: null, redacted: false };
   }
-  const parsed = value.map(item => redactCrmText(item, { maxCharacters: 160 }));
+  const parsed = value.map(item => crmText(item, { maxCharacters: 160 }));
   if (parsed.some(item => item.state === 'unsupported' || item.truncated)) return { state: 'unsupported' as const, values: null, redacted: parsed.some(item => item.redacted) };
   const values = [...new Set(parsed.map(item => item.text).filter((item): item is string => item !== null))];
   const redacted = parsed.some(item => item.redacted);
   return { state: redacted ? 'redacted' as const : values.length ? 'present' as const : 'missing' as const, values: values.length ? values : null, redacted };
 }
 function actor(id: unknown, name: unknown, source: unknown) {
-  return { workspace_member_id: uuid(id), name: redactCrmText(name, { maxCharacters: 160 }), source: redactCrmText(source, { maxCharacters: 80 }) };
+  return { workspace_member_id: uuid(id), name: crmText(name, { maxCharacters: 160 }), source: crmText(source, { maxCharacters: 80 }) };
 }
 /** Only explicitly projected aliases are accepted, never a whole upstream row. */
 export function crmOwnership(row: Row) {
@@ -28,5 +28,5 @@ export function crmOwnership(row: Row) {
 }
 
 export function crmNarrative(row: Row) {
-  return { description: redactCrmText(row.description, { maxCharacters: 6000 }), loss_reason: redactCrmText(row.loss_reason, { maxCharacters: 2000 }) };
+  return { description: crmText(row.description, { maxCharacters: 6000 }), loss_reason: crmText(row.loss_reason, { maxCharacters: 2000 }) };
 }

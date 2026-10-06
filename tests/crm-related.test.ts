@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Principal } from '../src/lib/auth';
 import type { CrmAccess } from '../src/lib/crm-live';
 import { getRelatedCrmContext, RELATED_CRM_QUERIES, RELATED_CRM_RECORD_QUERIES, type RelatedCrmSection } from '../src/lib/crm-related';
+import { withCrmTextPolicy } from '../src/lib/crm-presentation';
 
 const id = (value: number) => `00000000-0000-4000-8000-${String(value).padStart(12, '0')}`;
 const leadId = id(1);
@@ -59,6 +60,17 @@ function harness(section: RelatedCrmSection, changes: Record<string, unknown> = 
 }
 
 describe('bounded live CRM related context', () => {
+  it.each(['notes', 'tasks'] as const)('preserves %s contacts for Ramesh while enforcing relationship coverage', async section => {
+    const { options } = harness(section);
+    const result = await withCrmTextPolicy('unredacted', () => getRelatedCrmContext(principal, leadId, options));
+    expect(result.items[0]).toMatchObject({ body: {
+      text: 'Needs 40,000 sqft. Call 9876543210 or alex@example.test.', state: 'present', redacted: false,
+    } });
+    expect(result.coverage).toMatchObject({ returned: 1, withheld: 0, relationship_policy: 'single_lead_only' });
+    expect(result.text_guidance).toContain('CRM contact masking is disabled');
+    expect(JSON.stringify(result)).not.toMatch(/private@example|synthetic-test-key/);
+  });
+
   it.each(['notes', 'tasks'] as const)('reads %s with two bounded batches and redacts only the allowed text projection', async section => {
     const { fetcher, options } = harness(section);
     const result = await getRelatedCrmContext(principal, leadId, options);

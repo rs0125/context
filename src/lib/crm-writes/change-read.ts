@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg';
 import type { KeyRegistration } from '../auth';
 import { rfqEditableView, rfqListChangesInputSchema, rfqReadInputSchema, rfqRecordUrl } from './changes';
-import { redactCrmText } from '../crm-redaction';
+import { crmText } from '../crm-presentation';
 import { HttpError } from '../errors';
 import { canUndo, changeAuthorizer, changeConfiguration, changeDependencies, requireOrigin, requireOwnedRfq, sameActor, type CrmChangeDependencies } from './change-access';
 
@@ -62,7 +62,7 @@ export async function listCrmRfqChanges(limit: number | undefined, key: KeyRegis
     }
     const live = records.get(id);
     if (live) items.push({ operation_id: receipt.operation_id, action: receipt.action, id,
-      name: redactCrmText(live.name, { maxCharacters: 500 }), url: rfqRecordUrl(id, origin),
+      name: crmText(live.name, { maxCharacters: 500 }), url: rfqRecordUrl(id, origin),
       updated_at: live.updatedAt, undo_available: canUndo(receipt, live, deps.env) });
   }
   sameActor(await deps.readTransaction(authorize), actor);

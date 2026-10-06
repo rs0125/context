@@ -1,9 +1,10 @@
-import { redactCrmText, type RedactedCrmText } from './crm-redaction';
+import { crmText } from './crm-presentation';
+import type { RedactedCrmText } from './crm-redaction';
 
 /** Business classifications from Twenty's opportunity schema. These are recorded
  * values, not proof of a client-confirmed requirement: upstream parsing can apply
  * defaults. Only documented values enter typed categories; unknown values are
- * preserved separately as bounded, contact-masked source evidence.
+ * preserved separately as bounded source evidence under the CRM text policy.
  */
 export const CRM_LEAD_SOURCES = [
   'OUTREACH', 'WEBSITE_SEO', 'WHATSAPP_INBOUND', 'EXISTING_CLIENT',
@@ -97,10 +98,10 @@ function sourceText(value: unknown): RedactedCrmText {
   // Flat enum arrays may contain unknown classifications; expose only their
   // visible strings, never arbitrary object serialization or nested payloads.
   if (Array.isArray(value)) {
-    if (value.length <= CRM_ENUM_ARRAY_LIMIT && value.every(item => typeof item === 'string')) return redactCrmText(value.join(', '), { maxCharacters: 500 });
+    if (value.length <= CRM_ENUM_ARRAY_LIMIT && value.every(item => typeof item === 'string')) return crmText(value.join(', '), { maxCharacters: 500 });
     return { state: 'unsupported', text: null, redacted: false, truncated: false };
   }
-  return redactCrmText(typeof value === 'number' && Number.isFinite(value) ? String(value) : value, { maxCharacters: 500 });
+  return crmText(typeof value === 'number' && Number.isFinite(value) ? String(value) : value, { maxCharacters: 500 });
 }
 
 function evidence(value: unknown, parsed: boolean, includeSource = false): CrmFieldEvidence {

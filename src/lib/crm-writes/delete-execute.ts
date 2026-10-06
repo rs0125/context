@@ -2,7 +2,7 @@ import type { PoolClient } from 'pg';
 import { requireScope, type KeyRegistration, type Principal } from '../auth';
 import { HttpError } from '../errors';
 import { argumentsSha256 } from '../mcp-read-contract';
-import { redactCrmText } from '../crm-redaction';
+import { crmText } from '../crm-presentation';
 import { CrmRfqClient } from './client';
 import { changeDependencies, requireOwnedRfq, sameActor, type CrmChangeDependencies } from './change-access';
 import { rfqRecordUrl } from './changes';
@@ -84,7 +84,7 @@ export async function executeCrmRfqDelete(raw: unknown, key: KeyRegistration, si
     await deps.writeTransaction(client => deps.finish(client, actor, operation, hash, action, changed));
     sameActor(await deps.readTransaction(authorize), actor);
     if (changed.outcome === 'deleted') return { ...result('deleted', 'CRM_RFQ_DELETED', 'Moved the requested opportunity to CRM trash. It was not permanently destroyed.'),
-      data: { id: current.id, name: redactCrmText(current.name, { maxCharacters: 500 }).text ?? '',
+      data: { id: current.id, name: crmText(current.name, { maxCharacters: 500 }).text ?? '',
         url: rfqRecordUrl(current.id, origin), deletion_kind: 'trash', undo_available: false } };
     if (changed.outcome === 'rejected') return result('rejected', changed.code ?? 'CRM_RFQ_DELETE_REJECTED', 'No opportunity was deleted. The record may have changed or CRM rejected access. Read it again before preparing another deletion.');
     return unknown();

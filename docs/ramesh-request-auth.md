@@ -2,6 +2,8 @@
 
 Ramesh uses `POST /mcp/ramesh` alongside the Claude connector's OAuth-only `/mcp`. Both entry points use the existing MCP tools, current employee permissions, record restrictions, response projections and evidence envelopes. No employee OAuth enrollment, access-token table or refresh-token table is needed for this first-party path. Claude's OAuth grants remain independent.
 
+Ramesh CRM replies currently preserve phone numbers, emails and links in the permitted CRM text for every authorized employee. This applies to WhatsApp replies, which the admin inbox also displays, and the signed chat playground. `ramesh-mcp.ts` selects the request-local `unredacted` policy in `crm-presentation.ts`; the existing redactor remains available for later role scoping. REST/OAuth clients, warehouse text and analytics keep their existing masking. Record authorization, field projections, text bounds, unsupported-format handling and active-content removal still apply. Deploy Context Engine for new replies to use this policy; previously stored replies are not rewritten.
+
 ## Trust and request flow
 
 1. The gateway derives a phone from the actual WhatsApp sender or reciprocal, encrypted Baileys LID mappings. Message text, contact cards, quoted messages and model arguments cannot select an employee.

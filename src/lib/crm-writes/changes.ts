@@ -1,7 +1,7 @@
 /** RFQ detail edits only. Stage, assignment, arbitrary fields and other deals are excluded. */
 import { z } from 'zod';
 import { CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS, CRM_SQFT_PATTERN, parseCrmArea } from '../crm-fields';
-import { redactCrmText } from '../crm-redaction';
+import { crmText } from '../crm-presentation';
 import { HttpError } from '../errors';
 import { capacityValid, indianPhone, rfqInputSchema } from './rfq';
 
@@ -117,9 +117,9 @@ export function rfqRecordUrl(id: string, origin: string): string {
   return new URL(`/object/opportunity/${z.string().uuid().parse(id)}`, origin).href;
 }
 
-/** Editing does not create a bypass for the CRM reader's contact masking policy. */
+/** Editing uses the same request-scoped text policy as CRM reads. */
 export function rfqEditableView(record: RfqLiveRecord, origin: string) {
-  const readable = (value: unknown, maxCharacters = 500) => redactCrmText(value, { maxCharacters });
+  const readable = (value: unknown, maxCharacters = 500) => crmText(value, { maxCharacters });
   return { id: record.id, updated_at: record.updatedAt, url: rfqRecordUrl(record.id, origin), stage: record.stage,
     fields: { title: readable(record.name), company_name: readable(record.companyName), city: readable(record.city),
       micro_market: readable(record.microMarket), budget: readable(record.budget),

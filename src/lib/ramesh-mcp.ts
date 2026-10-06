@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { handleMcpRequest, type McpDependencies } from './mcp';
 import { authenticateRameshRequest, revalidateRameshRequest, type RameshAuthDependencies } from './ramesh-auth';
 import { HttpError } from './errors';
+import { withCrmTextPolicy } from './crm-presentation';
 
 export async function handleRameshMcpRequest(request: Request, overrides: {
   auth?: Partial<RameshAuthDependencies>; read?: McpDependencies['read']; prompts?: McpDependencies['prompts'];
@@ -12,7 +13,9 @@ export async function handleRameshMcpRequest(request: Request, overrides: {
   if (request.headers.has('origin')) return Response.json({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'This endpoint accepts server requests only.' } }, { status: 403, headers: { 'Cache-Control': 'private, no-store' } });
   if (request.method !== 'POST') return Response.json({ error: { code: 'METHOD_NOT_ALLOWED', message: 'Use HTTP POST.' } }, { status: 405, headers: { Allow: 'POST', 'Cache-Control': 'private, no-store' } });
   const requestId = randomUUID(); let employeeId: number | undefined, keyId: string | undefined;
-  const response = await handleMcpRequest(request, {
+  // Ramesh replies currently preserve CRM contacts for every authorized role.
+  // Select future role-specific presentation here, after verifying the actor.
+  const response = await withCrmTextPolicy('unredacted', () => handleMcpRequest(request, {
     ...overrides,
     platform: 'whatsapp',
     authenticationChallenge: 'Ramesh realm="wareongo-context"',
@@ -22,7 +25,7 @@ export async function handleRameshMcpRequest(request: Request, overrides: {
       employeeId = key.employeeId; keyId = key.id; return key;
     },
     revalidateKey: revalidateRameshRequest,
-  });
+  }));
   response.headers.set('X-Request-Id', requestId);
   try { (overrides.audit ?? (entry => console.info(JSON.stringify(entry))))({ event: 'ramesh_mcp_request', actor: 'ramesh', requestId, employeeId, keyId, status: response.status }); }
   catch { /* Audit sinks cannot change an authorization decision. */ }

@@ -26,6 +26,7 @@ import { crmNotesAvailability } from './crm-writes/notes-client';
 import { CRM_NOTE_SCOPE, noteReadInputSchema, noteListInputSchema } from './crm-writes/notes';
 import { WAREHOUSE_RECORDED_FIELD_NAMES, type WarehouseRecordedFieldName } from './warehouse-recorded-context';
 import { WAREHOUSE_EVIDENCE_GUIDANCE } from './prompt-definitions';
+import { crmContactsRedacted, crmTextGuidance } from './crm-presentation';
 
 const ANALYTICS_GUIDANCE = 'Aggregate website analytics for Analysts: /api/v1/analytics/capabilities discovers supported reports; /api/v1/analytics/ga4 reports traffic and recorded events; /api/v1/analytics/search-console reports Google organic search. Analytics dates use the source timezone, not necessarily the India server clock. Preserve source_fetched_at, resolved dates, quality warnings and pagination. For form activity per session use ga4?report=form_performance with a landing_page_contains filter; its separate event ratios use matching entry sessions. For relative comparisons resolve period on the first group and reuse the returned dates for later groups. Recent data may change. Event counts are not unique CRM leads or a sequential conversion funnel; Search Console clicks are not GA sessions. Failed reads mean unavailable, never zero.';
 
@@ -109,7 +110,10 @@ async function dispatch(client: PoolClient, principal: Principal, path: string[]
         capabilities_path: principal.scopes.includes('analytics:read') ? '/api/v1/analytics/capabilities' : null },
       ...(principal.scopes.includes('analytics:read') ? { analytics_guidance: ANALYTICS_GUIDANCE } : {}),
       warehouse_guidance: 'Warehouse results are candidates. Provisional recommendations may use available evidence with material conflicts and uncertainty stated. Read field_evidence and verification_required; retain a verification caveat covering the named candidates, using one shared caveat for common gaps. Optional unknown fields do not block a useful recommendation. Approximate values and ranges are not confirmed specifications. Permissive numeric filters include unknowns by default; explicit category/boolean filters remain exact. Do not silently relax a requested strict filter.',
-      constraints: { contacts: 'masked_or_excluded', narrative_context: 'redacted_lead_context', media: 'excluded', crm_scope: 'created or assigned; Analysts (including administrators) see all', max_page_size: 25 } } };
+      ...(!crmContactsRedacted() ? { crm_text_guidance: crmTextGuidance() } : {}),
+      constraints: { contacts: crmContactsRedacted() ? 'masked_or_excluded' : 'crm_text_unredacted',
+        narrative_context: crmContactsRedacted() ? 'redacted_lead_context' : 'unredacted_lead_context',
+        media: 'excluded', crm_scope: 'created or assigned; Analysts (including administrators) see all', max_page_size: 25 } } };
   }
   if (route === 'wiki/search' || route === 'wiki/pages') {
     requireScope(principal, 'knowledge:read');

@@ -4,7 +4,7 @@ import { requireScope, resolvePrincipal, type KeyRegistration, type Principal } 
 import { withReadOnlyTransaction, withCrmWriteTransaction } from '../db';
 import { assertCrmAccess, getLiveCrmAccess } from '../crm-live';
 import { HttpError } from '../errors';
-import { redactCrmText } from '../crm-redaction';
+import { crmText } from '../crm-presentation';
 import { rfqRecordUrl, rfqVersionSchema } from './changes';
 import { CRM_NOTE_SCOPE, noteContentSchema, noteText, type NoteLive } from './notes';
 import { CrmNoteClient, crmNotesConfiguration } from './notes-client';
@@ -44,7 +44,7 @@ export async function noteDeal(deps: NoteDependencies, actor: Principal, id: str
   signal.throwIfAborted();
   const live = await deps.crm.deal(id, signal);
   if (live.id.toLowerCase() !== id || live.deletedAt !== null) throw new HttpError(403, 'CRM_DEAL_NOT_ACCESSIBLE', 'This deal is not currently available.');
-  return { id, name: redactCrmText(live.name, { maxCharacters: 500 }).text || 'CRM deal', url: rfqRecordUrl(id, crmNotesConfiguration(deps.env).origin) };
+  return { id, name: crmText(live.name, { maxCharacters: 500 }).text || 'CRM deal', url: rfqRecordUrl(id, crmNotesConfiguration(deps.env).origin) };
 }
 export const noteSnapshotSchema = z.object({ kind: z.enum(['create', 'update', 'undo', 'delete']),
   note_id: z.string().uuid(), deal_id: z.string().uuid(), target_id: z.string().uuid(),

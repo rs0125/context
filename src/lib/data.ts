@@ -7,7 +7,7 @@ import { addDateConditions, resolveDateQuery, TEMPORAL_PARAMETER_NAMES, DATE_PER
 import { buildPagination } from './query-pagination';
 import { richCrmFields, parseCrmArea, CRM_AREA_PATTERN, CRM_MAGNITUDE_MULTIPLIERS, CRM_NUMERIC_TEXT_LIMIT, CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS, CRM_INDUSTRIES, CRM_ENUM_ARRAY_LIMIT } from './crm-fields';
 import { crmOwnership, crmNarrative } from './crm-detail';
-import { redactCrmText } from './crm-redaction';
+import { crmLabel, crmText } from './crm-presentation';
 
 type Row = Record<string, unknown>;
 
@@ -103,14 +103,14 @@ function opportunity(row: Row) {
   const rich = richCrmFields(row);
   const closeDate = timestamp(row.close_date);
   const followUpCount = numberInRange(row.recorded_follow_up_count, 1_000_000, true, true);
-  const labels = { name: sanitizeLabel(row.name), stage: typeof row.stage === 'string' && ALL_STAGES.includes(row.stage) ? row.stage : null,
-    priority_stars: priority ? Number(priority[1]) : null, city: sanitizeLabel(row.city), company_name: sanitizeLabel(row.company_name), micro_market: sanitizeLabel(row.micro_market) };
+  const labels = { name: crmLabel(row.name), stage: typeof row.stage === 'string' && ALL_STAGES.includes(row.stage) ? row.stage : null,
+    priority_stars: priority ? Number(priority[1]) : null, city: crmLabel(row.city), company_name: crmLabel(row.company_name), micro_market: crmLabel(row.micro_market) };
   const sourceFields: Record<string, unknown> = { ...row, priority_stars: row.priority };
   const fieldEvidence = { ...rich.field_evidence, requirement_sqft: area,
     ...Object.fromEntries(Object.entries({ ...labels, close_date: closeDate, recorded_follow_up_count: followUpCount }).map(([field, value]) => {
       const raw = sourceFields[field];
       const missing = raw == null || (typeof raw === 'string' && !raw.trim());
-      return [field, { state: missing ? 'missing' : value !== null ? 'parsed' : 'unsupported', source: missing || value !== null ? null : redactCrmText(raw, { maxCharacters: 500 }) }];
+      return [field, { state: missing ? 'missing' : value !== null ? 'parsed' : 'unsupported', source: missing || value !== null ? null : crmText(raw, { maxCharacters: 500 }) }];
     })) };
   return {
     id: row.opportunity_id as string,
@@ -396,8 +396,8 @@ export async function getCrmStageHistory(client: PoolClient, principal: Principa
     WHERE ${scope} AND t.opportunity_id = $1 AND t.id > $2::bigint ORDER BY t.id ASC LIMIT $3`, values);
   const hasMore = result.rows.length > limit;
   const selected = result.rows.slice(0, limit);
-  const items = selected.map(row => ({ id: String(row.id), from_stage: redactCrmText(row.from_stage, { maxCharacters: 100 }).text,
-    to_stage: redactCrmText(row.to_stage, { maxCharacters: 100 }).text, changed_at: timestamp(row.changed_at) }));
+  const items = selected.map(row => ({ id: String(row.id), from_stage: crmText(row.from_stage, { maxCharacters: 100 }).text,
+    to_stage: crmText(row.to_stage, { maxCharacters: 100 }).text, changed_at: timestamp(row.changed_at) }));
   const last = items.at(-1);
   if (items.some(item => !/^[1-9][0-9]{0,18}$/.test(item.id) || !item.changed_at)) {
     throw new HttpError(503, 'CRM_CONTEXT_UNAVAILABLE', 'The observed CRM history could not be verified.');
