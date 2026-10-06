@@ -37,6 +37,29 @@ describe('RFQ intake SOP and Twenty schema', () => {
   it.each(['TBD', 'anywhere', 'India', '123'])('rejects non-specific location %s', location => {
     expect(rfqProblems({ ...rfq, raw_text: `5000 sqft in ${location}`, location, requirement: '5000 sqft', company_name: undefined, budget: undefined })).toContain('location');
   });
+  it.each([
+    ['city', 'TBD', { city: 'TBD' }],
+    ['micro_market', 'Anywhere', { microMarket: 'Anywhere' }],
+    ['company_name', 'N/A', { companyName: 'N/A' }],
+    ['poc_name', 'unknown', { pocName: { firstName: 'unknown', lastName: '' } }],
+    ['budget', 'TBD', { budget: 'TBD' }],
+  ] as const)('preserves the user-supplied optional %s value %s', (field, value, expected) => {
+    const raw_text = `${rfq.raw_text}\n${field}: ${value}`;
+    const input = rfqInputSchema.parse({ ...rfq, raw_text, [field]: value });
+    expect(rfqProblems(input)).toEqual([]);
+    expect(rfqPayload(input, creator)).toMatchObject({ ...expected, description: raw_text });
+  });
+  it.each(['city', 'micro_market', 'company_name', 'poc_name', 'budget'] as const)('rejects an invented optional %s placeholder', field => {
+    const input = rfqInputSchema.parse({ ...rfq, [field]: 'TBD' });
+    expect(rfqProblems(input)).toContain(`${field} (verbatim source required)`);
+  });
+  it('preserves a user-supplied budget placeholder and billing terms from separate messages', () => {
+    const raw_text = `${rfq.raw_text}\nBudget: TBD\n\nper sqft per month`;
+    const input = rfqInputSchema.parse({ ...rfq, raw_text, budget: 'TBD; per sqft per month' });
+    expect(rfqProblems(input)).toEqual([]);
+    expect(rfqPayload(input, creator)).toMatchObject({ budget: 'TBD; per sqft per month', description: raw_text });
+    expect(rfqProblems({ ...input, budget: 'TBD; per sqft per year' })).toContain('budget (verbatim source required)');
+  });
   it('rejects unsupported claims and guessed city even when the locality is real', () => {
     expect(rfqProblems({ ...rfq, city: 'Bangalore' })).toContain('city (verbatim source required)');
     expect(rfqProblems({ ...rfq, lease_duration: { value: 'LONG_TERM', quote: '5 years' } })).toContain('lease_duration (supporting source required)');

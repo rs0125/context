@@ -29,13 +29,13 @@ The intake follows the existing WhatsApp logistics bot and CRM Automations SOP: 
 | Original text | Required, complete and verbatim, including whitespace, newlines and tags. Never summarize it. |
 | Location | Required: a specific city, locality, corridor or alternatives. Do not infer a city from a locality. TBD, anywhere and India are insufficient. |
 | Requirement | Required: positive quantity, bound or ordered range with an explicit unit. Supports sqft, sqm, acres, pallets, tonnes/MT, cbm and containers. Repeated range units must agree. |
-| Company, contact, budget | Optional; exact source excerpts only. Budget preserves currency, area basis, period and range, including terms split across clarifications. |
+| Optional text fields | Exact source excerpts only; explicitly supplied values such as locality `Anywhere`, company `N/A` or budget `TBD` are accepted. Budget preserves currency, area basis, period and range, including terms split across clarifications. |
 | Source, duration, repeat client | Optional classifications with an exact supporting quote; no guessed defaults. |
 | Stage, creator and owner | Server-owned: `RFQ_RECEIVED`, with creator and owner set to the live-verified linked employee. |
 
 Every supplied creation text field must occur verbatim in `raw_text`, except that a budget may join at most three nonempty exact source excerpts with `; ` when its terms span a clarification. For example, `20 rs /sqft; per month` retains both the original area basis and the later billing period. Do not invent or drop units while joining excerpts. This establishes source provenance; the independent request review must also check semantic correctness. The structured contact number accepts unambiguous Indian numbers. Other contact information remains in the full original description.
 
-The title is `Company or TBD - Requirement - Location`. Only exact integer square-foot requirements populate `requirementInSft`. Ranges, bounds, approximations and other capacities remain intact in the title/description. Do not choose a midpoint, infer missing units or calculate a total deal value. Unknown optional fields are omitted.
+The title is `Company or TBD - Requirement - Location`. Only exact integer square-foot requirements populate `requirementInSft`. Ranges, bounds, approximations and other capacities remain intact in the title/description. Do not choose a midpoint, infer missing units or calculate a total deal value. Optional fields absent from the source are omitted. User-supplied optional text such as `TBD`, `unknown` or `Anywhere` is preserved verbatim; it does not satisfy the separate required location or capacity checks. Phone and classification fields retain their supported formats and values.
 
 Ramesh fills `raw_text` from complete stored sources selected through `_source_message_ids`; the model cannot supply or rewrite it. Multiple sources join in selection order with exactly two newlines. `raw_text` is bounded at 3,000 characters, and Ramesh also bounds the complete staged arguments. Oversized input is rejected rather than truncated.
 

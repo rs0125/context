@@ -12,7 +12,7 @@ export const rfqInputSchema = z.object({
   location: text(160).describe('Exact location excerpt from raw_text: a city, locality, corridor or alternatives. Required. Never infer a city from a locality.'),
   requirement: text(120).describe('Exact quantified space/capacity excerpt including its unit, e.g. 25,000-35,000 sqft or 100 pallets. Required; preserve ranges, bounds and approximation words instead of extracting a single exact value.'),
   city: text(120).optional().describe('City explicitly supplied in raw_text; omit if only a locality/corridor is known.'),
-  micro_market: text(160).optional().describe('Explicit locality/corridor excerpt from raw_text.'),
+  micro_market: text(160).optional().describe('Exact optional locality/corridor excerpt from raw_text. Preserve user-supplied values such as Anywhere or TBD; the required location must still be specific.'),
   company_name: text(120).optional(),
   poc_name: text(120).optional(),
   poc_phone: text(40).optional().describe('Exact Indian phone excerpt, only when supplied for this RFQ. International numbers remain in raw_text; no guessed country code.'),
@@ -33,7 +33,7 @@ export const rfqOutputSchema = z.object({
 export type RfqResult = z.infer<typeof rfqOutputSchema>;
 export type CrmCreator = { id: string; name: string };
 
-const placeholder = /^(?:tbd|tbc|unknown|not\s+(?:known|available|provided|mentioned|specified)|n\/?a|none|nil|anywhere|any\s+(?:city|location)|india|pan[ -]?india|[-?]+)$/i;
+const nonSpecificLocation = /^(?:tbd|tbc|unknown|not\s+(?:known|available|provided|mentioned|specified)|n\/?a|none|nil|anywhere|any\s+(?:city|location)|india|pan[ -]?india|[-?]+)$/i;
 const capacityUnits = [CRM_SQFT_PATTERN, 'sq\\.?\\s*m\\.?|sqm|m²|square\\s*met(?:er|re)s?',
   'acres?', 'pallets?', '(?:metric\\s*)?ton(?:ne)?s?|mt', 'cbm|m³|cubic\\s*met(?:er|re)s?', 'containers?'];
 const capacityUnit = `(?:${capacityUnits.join('|')})`;
@@ -55,18 +55,20 @@ export function capacityValid(value: string) {
 export function rfqProblems(input: RfqInput): string[] {
   const issues: string[] = [];
   if (!input.raw_text.trim()) issues.push('raw_text');
-  if (placeholder.test(input.location) || !/\p{L}/u.test(input.location)) issues.push('location');
+  if (nonSpecificLocation.test(input.location) || !/\p{L}/u.test(input.location)) issues.push('location');
   if (!capacityValid(input.requirement)) issues.push('requirement (positive quantity and explicit unit)');
+  // Optional text may explicitly be "Anywhere", "TBD", etc. Require source
+  // evidence, without applying the mandatory location's specificity rule.
   for (const field of ['location', 'requirement', 'city', 'micro_market', 'company_name', 'poc_name', 'poc_phone'] as const) {
     const value = input[field];
-    if (value !== undefined && (placeholder.test(value) || !input.raw_text.includes(value))) issues.push(`${field} (verbatim source required)`);
+    if (value !== undefined && !input.raw_text.includes(value)) issues.push(`${field} (verbatim source required)`);
   }
   if (input.budget !== undefined) {
     const fragments = input.budget.split('; ');
-    const exact = !placeholder.test(input.budget) && input.raw_text.includes(input.budget);
+    const exact = input.raw_text.includes(input.budget);
     const joined = fragments.length >= 2 && fragments.length <= 3
       && fragments.every(fragment => fragment.length > 0 && fragment === fragment.trim()
-        && !placeholder.test(fragment) && input.raw_text.includes(fragment));
+        && input.raw_text.includes(fragment));
     if (!exact && !joined) issues.push('budget (verbatim source required)');
   }
   for (const field of ['lead_source', 'lease_duration', 'repeat_client'] as const) {

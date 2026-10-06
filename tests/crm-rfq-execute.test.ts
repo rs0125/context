@@ -52,6 +52,22 @@ describe('RFQ dispatch and recovery boundary', () => {
     expect(f.crm.creator).toHaveBeenCalledOnce();
     expect(vi.mocked(f.deps.claim).mock.invocationCallOrder[0]).toBeLessThan(f.crm.create.mock.invocationCallOrder[0]);
   });
+  it.each([['Coimbatore', '30,000sft', 'market rate'], ['Visakhapatnam', '25,000sft', 'TBD']])(
+    'creates an RFQ in %s with an explicitly unrestricted locality', async (city, requirement, budget) => {
+      const f = fixture();
+      const raw_text = `Company Name - Acme\nCity - ${city}\nLocality - Anywhere\nArea required - ${requirement}\nBudget - ${budget}\nAdd this to crm as a separate rfq`;
+      const input = { ...args, raw_text, location: city, city, requirement, company_name: 'Acme', micro_market: 'Anywhere', budget };
+      expect(await f.call(input)).toMatchObject({ outcome: 'created', data: { id } });
+      expect(f.crm.create.mock.calls[0][0]).toMatchObject({ city, microMarket: 'Anywhere', budget, description: raw_text });
+      expect(await f.call(input)).toMatchObject({ outcome: 'replayed', data: { id } });
+      expect(f.crm.create).toHaveBeenCalledOnce();
+    });
+  it('does not dispatch an optional value absent from the original request', async () => {
+    const f = fixture();
+    expect(await f.call({ ...args, micro_market: 'Anywhere' })).toMatchObject({ outcome: 'not_dispatched', code: 'CRM_RFQ_INCOMPLETE' });
+    expect(f.deps.claim).not.toHaveBeenCalled();
+    expect(f.crm.create).not.toHaveBeenCalled();
+  });
   it('captures a bound encrypted create version for undo only after verified creation', async () => {
     const f = fixture();
     f.deps.env.CONTEXT_CRM_RFQ_EDITS_ENABLED = 'true';
