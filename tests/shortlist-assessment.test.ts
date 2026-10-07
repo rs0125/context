@@ -79,7 +79,7 @@ describe('requirement checklist and provenance', () => {
   });
   it('preserves both recorded and changed explicit values without changing the lead', async () => {
     const { output, lead } = await assessment({ city: 'Pune', requirement_sqft: '40k' }, {}, { city: 'Bengaluru', area_min_sqft: 20000 });
-    expect(fieldRequirement(output, 'city')).toMatchObject({ recorded_value: 'Pune', effective_value: 'Bengaluru', source: 'employee_override', override_differs_from_record: true });
+    expect(fieldRequirement(output, 'city')).toMatchObject({ recorded_value: 'Pune', effective_value: 'Bengaluru', source: 'caller_override', override_differs_from_record: true });
     expect(fieldRequirement(output, 'area_sqft')).toMatchObject({ recorded_value: { kind: 'exact', value: 40000 },
       effective_value: { kind: 'explicit_bounds', min: 20000, max: null }, override_differs_from_record: true });
     expect(lead.city).toBe('Pune');
@@ -118,7 +118,7 @@ describe('requirement checklist and provenance', () => {
       requirement_sqft: { state: 'parsed', kind: 'approximate', value: 40000, source: { text: 'about 40k' } },
       budget: { state: 'unsupported', source: { text: 'subject to fit-out costs' } },
     });
-    expect(fieldRequirement(output, 'area_sqft')).toMatchObject({ source: 'employee_override', effective_value: { min: 30000 } });
+    expect(fieldRequirement(output, 'area_sqft')).toMatchObject({ source: 'caller_override', effective_value: { min: 30000 } });
     expect(output.requirement_context.description.text).toBe('Need a compliant building with yard access.');
   });
   it('retains narrative truncation and missing or unsupported states without exposing arbitrary lead data', async () => {
@@ -152,8 +152,8 @@ describe('requirement checklist and provenance', () => {
 
 describe('location comparisons', () => {
   it.each([
-    ['Bangalore', 'Bengaluru', 'meets_recorded_requirement'], ['Gurgaon', 'Gurugram', 'meets_recorded_requirement'],
-    ['Pune, Bangalore', 'Bengaluru', 'meets_recorded_requirement'], ['New Delhi', 'Delhi', 'conflict'],
+    ['Bangalore', 'Bengaluru', 'meets_effective_requirement'], ['Gurgaon', 'Gurugram', 'meets_effective_requirement'],
+    ['Pune, Bangalore', 'Bengaluru', 'meets_effective_requirement'], ['New Delhi', 'Delhi', 'conflict'],
     ['Bengaluru', 'Bengaluru North', 'conflict'], ['Pune', null, 'unknown'], [null, 'Pune', 'unknown'],
   ])('matches only exact normalized city alternatives: %s / %s', async (required, recorded, expected) => {
     const { output } = await assessment({ city: required }, { city: recorded });
@@ -166,12 +166,29 @@ describe('location comparisons', () => {
   });
   it('honours one explicitly supplied micromarket and checks exact tags', async () => {
     const { output } = await assessment({ micro_market: 'Hoskote, Whitefield' }, { micromarkets: ['  HOSKOTE  '] }, { micromarket: 'Hoskote' });
-    expect(fieldCheck(output, 'micromarket').state).toBe('meets_recorded_requirement');
+    expect(fieldCheck(output, 'micromarket').state).toBe('meets_effective_requirement');
     expect(fieldRequirement(output, 'micromarket').override_differs_from_record).toBe(true);
   });
 });
 
 describe('offered-area alternatives and requirement uncertainty', () => {
+  it('does not promote a caller area ceiling to an employee statement or a match against the CRM target', async () => {
+    const leadFields = { requirement_sqft: '10000', description: 'Need 10000 sqft max budget 25 rupees.' };
+    for (const area of [4000, 5000]) {
+      const recorded = (await assessment(leadFields, { total_space_sqft: [area] })).output;
+      expect(fieldCheck(recorded, 'area_sqft')).toMatchObject({ state: 'conflict', requirement_source: 'crm_record' });
+      const { output, lead } = await assessment(leadFields, { total_space_sqft: [area] }, { area_max_sqft: 10000 });
+      expect(fieldRequirement(output, 'area_sqft')).toMatchObject({
+        source: 'caller_override', recorded_value: { kind: 'exact', value: 10000 },
+        effective_value: { kind: 'explicit_bounds', min: null, max: 10000 }, override_differs_from_record: true,
+        reason: expect.stringContaining('not verified by this tool'),
+      });
+      expect(fieldCheck(output, 'area_sqft')).toMatchObject({ state: 'meets_effective_requirement', requirement_source: 'caller_override' });
+      expect(lead.requirement_sqft).toBe(10000);
+      expect(JSON.stringify(output)).not.toMatch(/employee_override|meets_recorded_requirement/);
+      expect(output.guidance.join(' ')).toContain('compare it with the original user request');
+    }
+  });
   it('does not sum alternative areas or satisfy opposite bounds with different options', async () => {
     const summed = (await assessment({ requirement_sqft: '40000' }, { total_space_sqft: [20000, 20000] })).output;
     expect(fieldCheck(summed, 'area_sqft').state).toBe('conflict');
@@ -181,7 +198,7 @@ describe('offered-area alternatives and requirement uncertainty', () => {
   });
   it('allows one exact matching alternative while preserving current-availability verification', async () => {
     const { output } = await assessment({}, { total_space_sqft: [10000, 40000, 60000] });
-    expect(fieldCheck(output, 'area_sqft').state).toBe('meets_recorded_requirement');
+    expect(fieldCheck(output, 'area_sqft').state).toBe('meets_effective_requirement');
     expect(output.candidates[0].verification_required).toBe(true);
     expect(output.candidates[0].source_verification_required).toBe(false);
     expect(output.candidates[0].verification_questions.join(' ')).toMatch(/currently available/);
@@ -191,8 +208,8 @@ describe('offered-area alternatives and requirement uncertainty', () => {
     expect(fieldCheck(output, 'area_sqft')).toMatchObject({ state: 'possible', reason: expect.stringMatching(/tolerance.*subdivision/) });
   });
   it('treats explicit minimum-only or maximum-only overrides as open intervals', async () => {
-    expect(fieldCheck((await assessment({}, { total_space_sqft: [50000] }, { area_min_sqft: 20000 })).output, 'area_sqft').state).toBe('meets_recorded_requirement');
-    expect(fieldCheck((await assessment({}, { total_space_sqft: [10000] }, { area_max_sqft: 20000 })).output, 'area_sqft').state).toBe('meets_recorded_requirement');
+    expect(fieldCheck((await assessment({}, { total_space_sqft: [50000] }, { area_min_sqft: 20000 })).output, 'area_sqft').state).toBe('meets_effective_requirement');
+    expect(fieldCheck((await assessment({}, { total_space_sqft: [10000] }, { area_max_sqft: 20000 })).output, 'area_sqft').state).toBe('meets_effective_requirement');
   });
   it.each([
     ['30-50k', [40000], 'possible'], ['30-50k', [20000, 60000], 'conflict'], ['about 40k', [40000], 'possible'],
@@ -205,18 +222,18 @@ describe('offered-area alternatives and requirement uncertainty', () => {
 
 describe('technical evidence comparisons', () => {
   it.each([
-    ['4', 4, 'meets_recorded_requirement'], ['0', 0, 'meets_recorded_requirement'], ['0', 1, 'conflict'],
+    ['4', 4, 'meets_effective_requirement'], ['0', 0, 'meets_effective_requirement'], ['0', 1, 'conflict'],
     ['3', 4, 'conflict'], ['2-4 docks', 4, 'possible'], ['5-6 docks', 4, 'possible'], ['2-3 docks', 4, 'conflict'],
     ['approx 4', 4, 'possible'], ['approx 3', 4, 'possible'], [null, 4, 'unknown'], ['ask owner', 4, 'unknown'],
   ])('does not turn %s docks into an exact specification', async (recorded, minimum, state) => {
     const { output } = await assessment({}, { dock_count: recorded }, { docks_min: minimum });
     expect(fieldCheck(output, 'dock_count').state).toBe(state);
-    if (state !== 'meets_recorded_requirement') expect(fieldCheck(output, 'dock_count').verification_question).toMatch(/required minimum/);
+    if (state !== 'meets_effective_requirement') expect(fieldCheck(output, 'dock_count').verification_question).toMatch(/required minimum/);
   });
   it('checks height and power only when employee supplied and retains evidence', async () => {
     const { output } = await assessment({}, { clear_height_ft: '25–30 ft', power_kva: '50 kVA' }, { clear_height_min_ft: 28, power_min_kva: 40 });
     expect(fieldCheck(output, 'clear_height_ft')).toMatchObject({ state: 'possible', evidence: { kind: 'range', lower: 25, upper: 30 } });
-    expect(fieldCheck(output, 'power_kva')).toMatchObject({ state: 'meets_recorded_requirement', evidence: { kind: 'exact', value: 50 } });
+    expect(fieldCheck(output, 'power_kva')).toMatchObject({ state: 'meets_effective_requirement', evidence: { kind: 'exact', value: 50 } });
     expect(output.candidates[0].verification_required).toBe(true);
   });
   it('adds an actionable question for a required unknown specification without inventing a zero', async () => {
@@ -257,7 +274,7 @@ describe('handover and commercial limitations', () => {
     expect(fieldCheck(output, 'move_in_by').state).toBe('unknown');
   });
   it.each([
-    ['2026-10-01', 'meets_recorded_requirement'], ['2026-09-01', 'meets_recorded_requirement'], ['2026-10-02', 'conflict'],
+    ['2026-10-01', 'meets_effective_requirement'], ['2026-09-01', 'meets_effective_requirement'], ['2026-10-02', 'conflict'],
     [null, 'unknown'], ['2026-02-30', 'unknown'],
   ])('compares a recorded calendar handover date %s with an explicit deadline', async (date, state) => {
     const { output } = await assessment({}, { handover_date: date, availability: 'Immediate' }, { move_in_by: '2026-10-01' });

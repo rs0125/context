@@ -149,7 +149,7 @@ describe('shortlist assessment REST authorization and consistency', () => {
     expect(body.data.candidates[0]).toMatchObject({ id: 12, source_path: '/api/v1/warehouses/12',
       source_updated_at: '2026-09-27T10:00:00.000Z', verification_required: true });
     expect(body.data.candidates[0].checks).toEqual(expect.arrayContaining([
-      expect.objectContaining({ field: 'dock_count', state: 'meets_recorded_requirement', requirement: 4 }),
+      expect.objectContaining({ field: 'dock_count', state: 'meets_effective_requirement', requirement: 4 }),
     ]));
     expect(shortlistAssessmentOutput.safeParse(body.data).success).toBe(true);
     expect(JSON.stringify(body.data)).not.toContain(h.initialAt);
