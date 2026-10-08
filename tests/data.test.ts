@@ -135,6 +135,7 @@ describe('warehouse reads', () => {
 describe('employee-scoped CRM reads', () => {
   it('returns core and business fields from one scoped row read in list, detail and briefing', async () => {
     const row = { ...opportunityRow(), lead_source: 'WEBSITE_SEO', lease_duration: 'SHORT_TERM',
+      assigned_to: ['ALEX'], secondary_assignee: 'SAM', supply_owners: ['TAYLOR'],
       industry_verticals: ['FMCG'], occupancy_timelines: ['WITHIN_30_DAYS'], preferred_languages: ['ENGLISH'], repeat_client: ['OPTION1'],
       budget: 'INR 20-25 per sqft per month', amount_micros: '123456789', amount_currency: 'INR', recorded_follow_up_count: '0',
       twenty_updated_at: '2026-09-26T12:00:00Z', last_note_at: '2026-09-26T11:00:00Z', last_task_at: null,
@@ -149,11 +150,14 @@ describe('employee-scoped CRM reads', () => {
     expect(read?.description.state).toBe('missing');
     expect(priority).toMatchObject(listed);
     expect(listed).toMatchObject({ lead_source: 'WEBSITE_SEO', lease_duration: 'SHORT_TERM', industry_verticals: ['FMCG'],
+      ownership: { assigned_to: { values: ['ALEX'] }, supply_owners: { values: ['TAYLOR'] },
+        secondary_assignee: { state: 'present', text: 'SAM', redacted: false, truncated: false } },
       repeat_client: true, recorded_follow_up_count: 0, source_updated_at: '2026-09-26T12:00:00.000Z', last_note_at: '2026-09-26T11:00:00.000Z',
       last_task_at: null, budget: { kind: 'range', min: 20, max: 25, currency: 'INR', period: 'month', area_basis: 'sqft', verification_required: true },
       recorded_value: { amount_micros: '123456789', amount: '123.456789', currency_code: 'INR', verification_required: true } });
     for (const db of [list, detail, briefing]) {
       expect(db.query).toHaveBeenCalledTimes(1);
+      expect(db.query.mock.calls[0][0]).toContain("o.data->'secondaryAssignee' AS secondary_assignee");
       expect(db.query.mock.calls[0][0]).not.toMatch(/JOIN|last_note_text|pocPhone|SELECT\s+o\.data\s*[,\s]/);
     }
     expect(JSON.stringify(listed)).not.toMatch(/Private raw|9876543210|private@example/);
@@ -190,6 +194,20 @@ describe('employee-scoped CRM reads', () => {
     expect((await getOpportunity(db.client, principal, ID_1, related()))).toMatchObject({ lease_duration: 'LONG_TERM', source_updated_at: '2026-09-26T10:00:00.000Z' });
     expect((await getOpportunity(db.client, principal, ID_1, related()))).toMatchObject({ lease_duration: 'SHORT_TERM', source_updated_at: '2026-09-26T11:00:00.000Z' });
     expect(db.query).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes secondary assignee from each snapshot even when the source update clock is unchanged', async () => {
+    const db = database();
+    const row = { ...opportunityRow(), assigned_to: ['ALEX'], twenty_updated_at: '2026-10-08T08:00:00Z' };
+    db.query.mockResolvedValueOnce({ rows: [{ ...row, secondary_assignee: 'SAM', last_polled_at: '2026-10-08T08:10:00Z' }] })
+      .mockResolvedValueOnce({ rows: [{ ...row, secondary_assignee: 'TAYLOR', last_polled_at: '2026-10-08T08:20:00Z' }] });
+    const before = await getOpportunity(db.client, principal, ID_1, related());
+    const after = await getOpportunity(db.client, principal, ID_1, related());
+    expect(before?.ownership.secondary_assignee.text).toBe('SAM');
+    expect(after?.ownership.secondary_assignee.text).toBe('TAYLOR');
+    expect(after?.ownership.assigned_to).toEqual(before?.ownership.assigned_to);
+    expect(after?.source_updated_at).toBe(before?.source_updated_at);
+    expect(after?.last_polled_at).toBe('2026-10-08T08:20:00.000Z');
   });
 
   it('reports independently stale activity even when opportunity sync is healthy', async () => {

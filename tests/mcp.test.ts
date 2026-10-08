@@ -29,7 +29,11 @@ const crmAccess = {
   activity_status: { status: 'current', unavailable_streams: [] }, field_semantics: 'Recorded categories may be defaults; verify monetary units.',
 };
 const missingText = { state: 'missing', text: null, redacted: false, truncated: false };
-const ownership = { assigned_to: { state: 'missing', values: null, redacted: false }, supply_owners: { state: 'missing', values: null, redacted: false }, owner_workspace_member_id: null, created_by: { workspace_member_id: null, name: missingText, source: missingText }, updated_by: { workspace_member_id: null, name: missingText, source: missingText } };
+const ownership = {
+  assigned_to: { state: 'missing', values: null, redacted: false }, supply_owners: { state: 'missing', values: null, redacted: false },
+  secondary_assignee: { state: 'present', text: 'SAM', redacted: false, truncated: false },
+  owner_workspace_member_id: null, created_by: { workspace_member_id: null, name: missingText, source: missingText }, updated_by: { workspace_member_id: null, name: missingText, source: missingText },
+};
 const richLead = {
   close_date: null, ownership, verification_required: true,
   id: '77777777-7777-4777-8777-777777777777', name: 'Synthetic Logistics', stage: 'NEW_LEAD', stage_entered_at: now.toISOString(), source_created_at: now.toISOString(),
@@ -134,6 +138,14 @@ describe('MCP read-only protocol', () => {
     expect(crm.inputSchema.properties).not.toHaveProperty('amount_min');
     expect(crm.description).toContain('view=created, date_field=created, period=this_month');
     expect(crm.outputSchema.properties.data.properties.items.items.required).toContain('stage_entered_at');
+    const leadDetail = result.tools.find((tool: { name: string }) => tool.name === 'read_crm_lead');
+    const briefing = result.tools.find((tool: { name: string }) => tool.name === 'crm_briefing');
+    for (const lead of [crm.outputSchema.properties.data.properties.items.items, leadDetail.outputSchema.properties.data,
+      briefing.outputSchema.properties.data.properties.priorities.items]) {
+      expect(lead.properties.ownership.required).toContain('secondary_assignee');
+      expect(lead.properties.ownership.properties.secondary_assignee.required)
+        .toEqual(expect.arrayContaining(['state', 'text', 'redacted', 'truncated']));
+    }
     const summary = result.tools.find((tool: { name: string }) => tool.name === 'crm_summary');
     expect(summary.inputSchema.properties).not.toHaveProperty('cursor');
     expect(summary.inputSchema.properties.group_by.enum).toEqual(expect.arrayContaining(['lead_source', 'lease_duration']));
@@ -366,6 +378,8 @@ describe('MCP read-only protocol', () => {
   });
   it('documents matching temporal and summary contracts in the REST specification', () => {
     const document = getOpenApiDocument();
+    expect(document.components.schemas.CrmOwnership.required).toContain('secondary_assignee');
+    expect(document.components.schemas.CrmOwnership.properties.secondary_assignee.$ref).toBe('#/components/schemas/CrmText');
     const crm = document.paths['/crm/opportunities'].get.parameters;
     expect(crm.map(parameter => parameter.name)).toEqual(expect.arrayContaining(['q', 'date_field', 'period', 'date_from', 'date_to', 'sort', 'follow_up_status', 'requirement_sqft_min', 'requirement_sqft_max', 'micro_market', 'lead_source', 'lease_duration', 'industry', 'repeat_client']));
     expect(document.components.schemas.Opportunity.properties).toHaveProperty('source_created_at');

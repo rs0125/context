@@ -45,7 +45,7 @@ describe('live CRM authorization', () => {
     expect((fetcher.mock.calls[1][0] as URL).searchParams.get('filter')).toBe(`or(createdBy.workspaceMemberId[eq]:"${MEMBER_ID}",assignedTo[containsAny]:["ALEX"]),deletedAt[is]:NULL`);
   });
 
-  it('includes created OR assigned deals, including created deals reassigned to others, and excludes owner-only/deleted records', async () => {
+  it('includes created OR assigned deals and excludes owner-only, secondary-only and deleted records', async () => {
     const { options } = responses(
       response('workspaceMembers', [member()]),
       response('opportunities', [
@@ -56,6 +56,7 @@ describe('live CRM authorization', () => {
         { ...opportunity(5), assignedTo: null, createdBy: { workspaceMemberId: MEMBER_ID } },
         { ...opportunity(6), assignedTo: ['ALEX', 7] },
         { ...opportunity(7), assignedTo: ['alex'] },
+        { ...opportunity(8), assignedTo: ['OTHER'], secondaryAssignee: 'ALEX', createdBy: { workspaceMemberId: OTHER_MEMBER_ID } },
       ]),
     );
     expect(await getLiveCrmAccess(principal, options)).toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1), opportunityId(2), opportunityId(5)] });

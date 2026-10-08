@@ -31,6 +31,8 @@ describe('request-scoped CRM presentation', () => {
       });
       expect(crmOwnership({ assigned_to: ['alex@example.test'] }).assigned_to)
         .toEqual({ state: 'present', values: ['alex@example.test'], redacted: false });
+      expect(crmOwnership({ secondary_assignee: contact }).secondary_assignee)
+        .toEqual({ state: 'present', text: contact, redacted: false, truncated: false });
       expect(crmLabel('Alex 9876543210')).toBe('Alex 9876543210');
       expect(richCrmFields({ lead_source: contact }).field_evidence.lead_source.source)
         .toMatchObject({ text: contact, redacted: false });
@@ -45,5 +47,24 @@ describe('request-scoped CRM presentation', () => {
       expect(analytics.redacted).toBe(true);
       expect(JSON.stringify([warehouse, analytics])).not.toMatch(/9876543210|alex@example/);
     });
+  });
+});
+
+describe('secondary assignee presentation', () => {
+  it.each([undefined, null, '', ' \t\n '])('keeps absent or blank source text missing: %j', secondary_assignee => {
+    expect(crmOwnership({ secondary_assignee }).secondary_assignee)
+      .toEqual({ state: 'missing', text: null, redacted: false, truncated: false });
+  });
+
+  it.each([['SAM'], { name: 'SAM', phone: '9876543210' }, 123, false].map(value => ({ value })))('withholds unsupported source types: $value', ({ value: secondary_assignee }) => {
+    expect(crmOwnership({ secondary_assignee }).secondary_assignee)
+      .toEqual({ state: 'unsupported', text: null, redacted: false, truncated: false });
+  });
+
+  it('redacts contacts before truncation and reports bounded secondary text', () => {
+    const value = crmOwnership({ secondary_assignee: `${contact} ${'Sam '.repeat(50)}` }).secondary_assignee;
+    expect(value).toMatchObject({ state: 'truncated', redacted: true, truncated: true });
+    expect(value.text!.length).toBeLessThanOrEqual(160);
+    expect(value.text).not.toMatch(/9876543210|alex@example/);
   });
 });

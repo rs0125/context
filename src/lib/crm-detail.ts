@@ -21,6 +21,7 @@ function actor(id: unknown, name: unknown, source: unknown) {
 export function crmOwnership(row: Row) {
   return {
     assigned_to: labels(row.assigned_to), supply_owners: labels(row.supply_owners),
+    secondary_assignee: crmText(row.secondary_assignee, { maxCharacters: 160 }),
     owner_workspace_member_id: uuid(row.owner_workspace_member_id),
     created_by: actor(row.creator_id, row.creator_name, row.creator_source),
     updated_by: actor(row.updater_id, row.updater_name, row.updater_source),

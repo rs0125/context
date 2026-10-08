@@ -313,9 +313,13 @@ const crmActorSchema = {
   properties: { workspace_member_id: { ...nullableLabel, format: "uuid" }, name: { $ref: "#/components/schemas/CrmText" }, source: { $ref: "#/components/schemas/CrmText" } },
 };
 const crmOwnershipSchema = {
-  type: "object", additionalProperties: false, required: ["assigned_to", "supply_owners", "owner_workspace_member_id", "created_by", "updated_by"],
-  description: "Recorded creator, demand assignee, supply owners and owner ID are distinct relationships. These labels do not grant access or imply a current authorization role.",
-  properties: { assigned_to: crmLabelsSchema, supply_owners: crmLabelsSchema, owner_workspace_member_id: { ...nullableLabel, format: "uuid" }, created_by: crmActorSchema, updated_by: crmActorSchema },
+  type: "object", additionalProperties: false, required: ["assigned_to", "supply_owners", "secondary_assignee", "owner_workspace_member_id", "created_by", "updated_by"],
+  description: "Recorded creator, primary demand assignees, secondary assignee, supply owners and owner ID are distinct relationships. These labels do not grant access or imply a current authorization role.",
+  properties: {
+    assigned_to: crmLabelsSchema, supply_owners: crmLabelsSchema,
+    secondary_assignee: { $ref: "#/components/schemas/CrmText", description: "Recorded secondary assignee text from the same mirrored lead, bounded to 160 characters under the current CRM presentation policy. Missing or blank values remain missing. This field does not grant access or change primary assignment." },
+    owner_workspace_member_id: { ...nullableLabel, format: "uuid" }, created_by: crmActorSchema, updated_by: crmActorSchema,
+  },
 };
 const crmRecordedValueSchema = {
   type: ["object", "null"], additionalProperties: false,

@@ -89,6 +89,7 @@ const OPPORTUNITY_JSON_FIELDS = {
   budget: crmScalar('budget'), amount_micros: "CASE WHEN jsonb_typeof(o.data->'amount'->'amountMicros') IN ('string', 'number') THEN to_jsonb(o.data->'amount'->>'amountMicros') ELSE o.data->'amount'->'amountMicros' END",
   amount_currency: "o.data->'amount'->>'currencyCode'", recorded_follow_up_count: crmScalar('followupcount'),
   close_date: "o.data->'closeDate'", assigned_to: "o.data->'assignedTo'", supply_owners: "o.data->'supplyLead'",
+  secondary_assignee: "o.data->'secondaryAssignee'",
   owner_workspace_member_id: "o.data->>'ownerId'", creator_id: "o.data->'createdBy'->>'workspaceMemberId'",
   creator_name: "o.data->'createdBy'->'name'", creator_source: "o.data->'createdBy'->'source'",
   updater_id: "o.data->'updatedBy'->>'workspaceMemberId'", updater_name: "o.data->'updatedBy'->'name'", updater_source: "o.data->'updatedBy'->'source'",

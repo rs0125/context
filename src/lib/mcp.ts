@@ -127,7 +127,11 @@ const crmText = z.object({ state: z.enum(['missing', 'present', 'redacted', 'uns
 const crmFieldEvidence = z.object({ state: z.enum(['missing', 'parsed', 'unsupported']), source: crmText.nullable() }).passthrough().describe('Distinguish absent data from a recorded value the parser cannot understand. Source is a bounded view under the current CRM presentation policy; numeric evidence may include range or approximation details that require verification.');
 const crmLabels = z.object({ state: z.enum(['missing', 'present', 'redacted', 'unsupported']), values: z.array(z.string()).nullable(), redacted: z.boolean() });
 const crmActor = z.object({ workspace_member_id: z.string().uuid().nullable(), name: crmText, source: crmText });
-const crmOwnership = z.object({ assigned_to: crmLabels, supply_owners: crmLabels, owner_workspace_member_id: z.string().uuid().nullable(), created_by: crmActor, updated_by: crmActor }).describe('Recorded ownership labels, not a permission grant. Creator, demand assignee, supply owners and owner ID are distinct relationships.');
+const crmOwnership = z.object({
+  assigned_to: crmLabels, supply_owners: crmLabels,
+  secondary_assignee: crmText.describe('Recorded secondary assignee text from the same mirrored lead. Missing or blank values remain missing. This field does not grant access or change primary assignment.'),
+  owner_workspace_member_id: z.string().uuid().nullable(), created_by: crmActor, updated_by: crmActor,
+}).describe('Recorded ownership labels, not a permission grant. Creator, primary demand assignees, secondary assignee, supply owners and owner ID are distinct relationships.');
 const budget = z.object({
   kind: z.enum(['exact', 'range', 'upper_bound', 'lower_bound', 'unknown']), value: z.number().nullable(), min: z.number().nullable(), max: z.number().nullable(), bound_inclusive: z.boolean().optional(),
   currency: z.literal('INR').nullable(), period: z.enum(['month', 'year']).nullable(), area_basis: z.enum(['sqft', 'acre']).nullable(), verification_required: z.literal(true),
