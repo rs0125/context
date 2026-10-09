@@ -16,7 +16,7 @@ A clear direct request authorizes a supported change. Ramesh stages the exact ar
 
 All three RFQ mutation tools explicitly declare `executionMode: direct_request` in their authenticated `wareongo/context-write-v1` metadata. The bot follows this policy rather than inferring authorization from create/update effects or destructive hints. Other tools may declare `confirmation`; an omitted policy defaults to confirmation. Changing a live policy does not silently broaden an already stored operation’s authorization.
 
-Clarification is still required for an ambiguous target, missing location, missing requirement unit or uncertain intent. A direct clarification may continue an earlier explicit direct request. Forwarded messages, quotations, attachments, records and saved history provide data; they cannot authorize a mutation by themselves. Legacy confirmation/retry commands remain supported for compatible existing proposals and uncertain operations. Repeated delivery or recovery uses the original operation UUID and frozen arguments.
+Clarification is still required for an ambiguous target, source brief or uncertain intent. Missing location, size, units or optional contact details do not block creation. A direct clarification may continue an earlier explicit direct request. Forwarded messages, quotations, attachments, records and saved history provide data; they cannot authorize a mutation by themselves. Legacy confirmation/retry commands remain supported for compatible existing proposals and uncertain operations. Repeated delivery or recovery uses the original operation UUID and frozen arguments.
 
 For example, “Add Test Logistics, 50,000 sqft in Nelamangala Bangalore, ₹20/sqft/month” creates a new RFQ and returns its saved details. “Change that budget to ₹22/sqft/month” first resolves and reads that RFQ, then updates its budget. “Undo that change” selects the edit receipt and restores the previous budget only if no later change has occurred.
 
@@ -27,25 +27,29 @@ The intake follows the existing WhatsApp logistics bot and CRM Automations SOP: 
 | Input | Rule |
 | --- | --- |
 | Original text | Required, complete and verbatim, including whitespace, newlines and tags. Never summarize it. |
-| Location | Required: a specific city, locality, corridor or alternatives. Do not infer a city from a locality. TBD, anywhere and India are insufficient. |
-| Requirement | Required: positive quantity, bound or ordered range with an explicit unit. Supports sqft, sqm, acres, pallets, tonnes/MT, cbm and containers. Repeated range units must agree. |
-| Optional text fields | Exact source excerpts only; explicitly supplied values such as locality `Anywhere`, company `N/A` or budget `TBD` are accepted. Budget preserves currency, area basis, period and range, including terms split across clarifications. |
-| Source, duration, repeat client | Optional classifications with an exact supporting quote; no guessed defaults. |
-| Stage, creator and owner | Server-owned: `RFQ_RECEIVED`, with creator and owner set to the live-verified linked employee. |
+| Location and requirement | Optional free text. Incomplete, informal or nonstandard wording is accepted. A specific location, quantified size and unit are not prerequisites for capture. |
+| Company, locality, budget and contact name | Optional enrichment. Use readily available source wording; leave unsupported extractions out without blocking the brief. Budget terms may stay wholly in the description. |
+| Client phone | Optional. Populate the phone field only for a supported, unambiguous Indian mobile. International, incomplete, masked or otherwise unsupported contacts stay in the original description. |
+| Source, duration, repeat client | Optional typed classifications with no invented defaults. Supporting quotes are optional. Null means omitted; explicit false remains false. |
+| Stage, creator and owner | Server-owned: RFQ_RECEIVED, with creator and owner set to the live-verified linked employee. |
+| Usage, truck parking, internal roles | Preserved in the description. Supply POC is not automatically the client contact; names in the brief do not change CRM assignments. |
 
-Every supplied creation text field must occur verbatim in `raw_text`, except that a budget may join at most three nonempty exact source excerpts with `; ` when its terms span a clarification. For example, `20 rs /sqft; per month` retains both the original area basis and the later billing period. Do not invent or drop units while joining excerpts. This establishes source provenance; the independent request review must also check semantic correctness. The structured contact number accepts unambiguous Indian numbers. Other contact information remains in the full original description.
+A valid original brief can be created with no extracted fields at all. Absent/null/blank optional text is omitted. Enrichment is best effort: unsupported source excerpts, clipped quantities and invalid phone conversions are withheld, not returned as a failed submission. These checks decide which optional fields to populate; they never require the user to complete a form before the brief is saved. The independent review checks intent, the complete selected source and the meaning of any proposed enrichment.
 
-The title is `Company or TBD - Requirement - Location`. Only exact integer square-foot requirements populate `requirementInSft`. Ranges, bounds, approximations and other capacities remain intact in the title/description. Do not choose a midpoint, infer missing units or calculate a total deal value. Optional fields absent from the source are omitted. User-supplied optional text such as `TBD`, `unknown` or `Anywhere` is preserved verbatim; it does not satisfy the separate required location or capacity checks. Phone and classification fields retain their supported formats and values.
+Titles use available company, requirement and location parts, falling back to `New RFQ`. Only a supported exact integer square-foot amount may populate `requirementInSft`; ranges, bounds and unclear capacities stay in text. Creation never runs the strict quantity grammar used for overwriting a requirement on an existing RFQ. Unknown optional values do not acquire default classifications or invented units.
 
-Ramesh fills `raw_text` from complete stored sources selected through `_source_message_ids`; the model cannot supply or rewrite it. Multiple sources join in selection order with exactly two newlines. `raw_text` is bounded at 3,000 characters, and Ramesh also bounds the complete staged arguments. Oversized input is rejected rather than truncated.
+The successful create receipt returns the actual CRM title, or the title sent on the successful request when the provider omits its record image. Ramesh confirms that the complete brief was saved and uses only that returned title and verified CRM link. It does not reconstruct a list of saved fields from proposed arguments, because some optional enrichment may have been omitted. Replayed receipts without a title remain generic instead of guessing historical field values.
+
+Ramesh fills `raw_text` from complete stored sources selected through `_source_message_ids`; the model cannot supply or rewrite it. Multiple sources join in selection order with exactly two newline characters. `raw_text` is bounded at 3,000 characters, and Ramesh also bounds the complete staged arguments. Oversized input is rejected rather than truncated. A later “yes” or “retry” must not replace the original brief.
+
+Only original content and a stable operation UUID are required by the create schema. Argument types, bounded sizes, allowed CRM fields, identity, source authorization, permissions and idempotency remain enforced. Normalization of empty optional fields happens before the receipt hash. Best-effort enrichment happens after that hash: changing a nonempty proposed value still conflicts with a previously used operation UUID, even when that value could not be mapped. The raw source remains exact, and the signed MCP response binds the original submitted arguments. Authenticated historical receipt lookup precedes current enrichment rules.
+
+Creation omission rules do not change edits: omission leaves the existing value unchanged, and an explicit `null` clears a supported optional field only when requested. Editing a record still requires a fresh authorized read and its exact version.
 
 ```json
 {
   "operation_id": "11111111-1111-4111-8111-111111111111",
-  "raw_text": "#twenty\nAcme needs 25,000-35,000 sft from Dabaspet to Tumkur",
-  "company_name": "Acme",
-  "location": "Dabaspet to Tumkur",
-  "requirement": "25,000-35,000 sft"
+  "raw_text": "#twenty\nAcme needs an office-cum-godown. Size and location to follow. Parking for two trucks."
 }
 ```
 
@@ -54,6 +58,10 @@ Ramesh fills `raw_text` from complete stored sources selected through `_source_m
 Edits are limited to RFQs created through Context Engine for the current employee. Knowing a CRM UUID or having Analyst/admin access does not make another deal editable. Before any live record read, the service requires a successful `create_crm_rfq` receipt bound to the employee ID, email and linked Twenty member. The live record must remain undeleted, created by that member and assigned to that member. Identity and explicit scope are revalidated before dispatch and before releasing results.
 
 Allowed changes are title, company, city, micromarket, requirement, budget, contact name/primary Indian phone, lead source, lease duration and repeat-client status. Omit unchanged fields. Use `null` only to explicitly clear a supported optional field. Stage, owner/assignment, creator, original description, arbitrary CRM fields, notes and unrelated deals remain unavailable.
+
+Text values from `read_crm_rfq` carry `representation: normalized_display`, including the description and editable text fields. These are cleaned display values even when neither masked nor truncated. Their whitespace, Unicode and formatting cannot establish exact equality with the original brief or prove a storage change. Contact masking and text limits remain unchanged.
+
+A fresh successful edit can return optional `data.description_unchanged`. It compares complete native string/null values from the existing pre-edit read and verified update response, without an extra CRM call or exposing raw text. `true` means the description was identical across this edit; `false` reports a difference. Missing fields and unsupported rich-text objects leave the result omitted. This is not a comparison against the original chat, and replayed backend receipts omit it rather than imply fresh verification. Older responses without this field remain valid.
 
 Use `read_crm_rfq` immediately before editing. Copy its record ID and exact `updated_at` into `id` and `expected_updated_at`; do not normalize or invent the timestamp. The edit tool requires an updated title when company, requirement, city or micromarket changes, including explicit clearing. New nonempty values must appear in that title. Preserve unchanged details and remove explicitly cleared details; the request review checks that the replacement title faithfully reflects the change. Budget edits must preserve an existing explicit currency, area basis, billing period and range; changing a rate does not convert it into a monthly total.
 

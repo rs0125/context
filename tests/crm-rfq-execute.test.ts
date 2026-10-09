@@ -5,6 +5,7 @@ import { executeCrmRfq, type CrmRfqDependencies } from '../src/lib/crm-writes/ex
 import type { CrmWriteReceipt } from '../src/lib/crm-writes/storage';
 import { HttpError } from '../src/lib/errors';
 import { crmSnapshotContext, decryptCrmSnapshot } from '../src/lib/crm-writes/snapshots';
+import { argumentsSha256 } from '../src/lib/mcp-read-contract';
 
 const args = { operation_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', raw_text: '  Need 5000 sqft in Hoskote\n', location: 'Hoskote', requirement: '5000 sqft' };
 const principal: Principal = { employeeId: 7, email: 'employee@wareongo.com', keyId: 'synthetic', scopes: ['crm.rfq:write'],
@@ -52,6 +53,35 @@ describe('RFQ dispatch and recovery boundary', () => {
     expect(f.crm.creator).toHaveBeenCalledOnce();
     expect(vi.mocked(f.deps.claim).mock.invocationCallOrder[0]).toBeLessThan(f.crm.create.mock.invocationCallOrder[0]);
   });
+  it('normalizes absent optional creation values once and replays without another dispatch', async () => {
+    const f = fixture();
+    const input = { ...args, city: null, company_name: '', budget: '   ', repeat_client: null };
+    expect(await f.call(input)).toMatchObject({ outcome: 'created' });
+    expect(await f.call(input)).toMatchObject({ outcome: 'replayed' });
+    expect(f.crm.create).toHaveBeenCalledOnce();
+    expect(f.crm.create.mock.calls[0][0]).not.toHaveProperty('city');
+    expect(f.crm.create.mock.calls[0][0]).not.toHaveProperty('budget');
+    expect(await f.call({ ...input, raw_text: args.raw_text + '\nNew text' })).toMatchObject({ code: 'CRM_OPERATION_CONFLICT' });
+    expect(f.crm.create).toHaveBeenCalledOnce();
+  });
+  it.each(['created', 'unknown'] as const)('preserves an earlier %s receipt when extraction rules have since become stricter', async state => {
+    const f = fixture();
+    const original = { ...args, raw_text: 'Need at least 5000 sqft in Hoskote' };
+    // The old validator accepted this clipped bound. Never reinterpret a
+    // historical result as proof that no write occurred under the old policy.
+    f.deps.find = vi.fn<CrmRfqDependencies['find']>(async (_client, actor, operation, hash) => {
+      expect(operation).toBe(original.operation_id);
+      expect(hash).toBe(argumentsSha256(original));
+      expect(actor.employeeId).toBe(principal.employeeId);
+      return { employee_id: actor.employeeId, employee_email: actor.email, member_id: actor.twentyUserId!,
+        operation_id: operation, action: 'create_crm_rfq', request_hash: hash, state,
+        resource_id: state === 'created' ? id : null };
+    });
+    expect(await f.call(original)).toMatchObject({ outcome: state === 'created' ? 'replayed' : 'outcome_unknown' });
+    expect(f.crm.creator).not.toHaveBeenCalled();
+    expect(f.crm.create).not.toHaveBeenCalled();
+    expect(f.deps.claim).not.toHaveBeenCalled();
+  });
   it.each([['Coimbatore', '30,000sft', 'market rate'], ['Visakhapatnam', '25,000sft', 'TBD']])(
     'creates an RFQ in %s with an explicitly unrestricted locality', async (city, requirement, budget) => {
       const f = fixture();
@@ -62,11 +92,11 @@ describe('RFQ dispatch and recovery boundary', () => {
       expect(await f.call(input)).toMatchObject({ outcome: 'replayed', data: { id } });
       expect(f.crm.create).toHaveBeenCalledOnce();
     });
-  it('does not dispatch an optional value absent from the original request', async () => {
+  it('dispatches the full brief while omitting an optional value absent from its source', async () => {
     const f = fixture();
-    expect(await f.call({ ...args, micro_market: 'Anywhere' })).toMatchObject({ outcome: 'not_dispatched', code: 'CRM_RFQ_INCOMPLETE' });
-    expect(f.deps.claim).not.toHaveBeenCalled();
-    expect(f.crm.create).not.toHaveBeenCalled();
+    expect(await f.call({ ...args, micro_market: 'Anywhere' })).toMatchObject({ outcome: 'created' });
+    expect(f.crm.create.mock.calls[0][0]).not.toHaveProperty('microMarket');
+    expect(f.crm.create.mock.calls[0][0].description).toBe(args.raw_text);
   });
   it('captures a bound encrypted create version for undo only after verified creation', async () => {
     const f = fixture();
@@ -136,15 +166,33 @@ describe('RFQ dispatch and recovery boundary', () => {
     expect(await f.call({ ...args, raw_text: args.raw_text + 'extra' })).toMatchObject({ outcome: 'not_dispatched', code: 'CRM_OPERATION_CONFLICT' });
     expect(f.crm.create).toHaveBeenCalledOnce();
   });
-  it.each(['raw_text', 'location', 'requirement'])('rejects missing critical %s before authorization or network', async field => {
+  it.each(['raw_text', 'operation_id'])('rejects missing critical %s before authorization or network', async field => {
     const f = fixture(); const input = { ...args, [field]: undefined };
-    expect(await f.call(input)).toMatchObject({ outcome: 'not_dispatched', operation_id: args.operation_id });
+    expect(await f.call(input)).toMatchObject({ outcome: 'not_dispatched', code: 'CRM_RFQ_INVALID' });
     expect(f.deps.claim).not.toHaveBeenCalled(); expect(f.crm.create).not.toHaveBeenCalled();
   });
-  it('provides actionable missing-field errors before any write', async () => {
+  it('rejects an empty source before any write', async () => {
     const f = fixture();
-    expect(await f.call({ ...args, requirement: 'big', raw_text: 'big Hoskote' })).toMatchObject({ outcome: 'not_dispatched', code: 'CRM_RFQ_INCOMPLETE', message: expect.stringContaining('positive quantity') });
+    expect(await f.call({ operation_id: args.operation_id, raw_text: ' \n\t' })).toMatchObject({ outcome: 'not_dispatched', code: 'CRM_RFQ_INCOMPLETE', message: expect.stringContaining('original brief is empty') });
     expect(f.crm.create).not.toHaveBeenCalled();
+  });
+  it('creates once from a brief alone and keeps retries bound to that complete source', async () => {
+    const f = fixture();
+    const input = { operation_id: args.operation_id, raw_text: '  Need a godown with truck parking. Size and location TBD.\n#twenty\n' };
+    expect(await f.call(input)).toMatchObject({ outcome: 'created', data: { name: 'New RFQ' } });
+    expect(f.crm.create.mock.calls[0][0]).toMatchObject({ name: 'New RFQ', description: input.raw_text });
+    expect(await f.call(input)).toMatchObject({ outcome: 'replayed' });
+    expect(await f.call({ ...input, raw_text: input.raw_text + 'Changed brief' })).toMatchObject({ code: 'CRM_OPERATION_CONFLICT' });
+    expect(f.crm.create).toHaveBeenCalledOnce();
+  });
+  it('returns the title actually saved when optional extraction could not be used', async () => {
+    const f = fixture();
+    const input = { operation_id: args.operation_id, raw_text: 'Save this lead. Needs a small godown. Contact +44 (0) 9876543210',
+      requirement: 'small godown', company_name: 'Invented Company', poc_phone: '+44 (0) 9876543210' };
+    expect(await f.call(input)).toMatchObject({ outcome: 'created', data: { name: 'small godown' } });
+    const payload = f.crm.create.mock.calls[0][0];
+    for (const field of ['companyName', 'pocPhoneNumber', 'requirementInSft']) expect(payload).not.toHaveProperty(field);
+    expect(payload.description).toBe(input.raw_text);
   });
   it.each(['scope', 'member', 'flag', 'key', 'membership'])('blocks missing %s before dispatch', async which => {
     const f = fixture();

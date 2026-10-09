@@ -5,7 +5,8 @@ import { HttpError } from '../src/lib/errors';
 import type { CrmChangeDependencies } from '../src/lib/crm-writes/change-access';
 import { executeCrmRfqUndo, executeCrmRfqUpdate } from '../src/lib/crm-writes/change-execute';
 import { listCrmRfqChanges, readCrmRfq } from '../src/lib/crm-writes/change-read';
-import type { RfqLiveRecord } from '../src/lib/crm-writes/changes';
+import { rfqChangeOutputSchema, type RfqLiveRecord } from '../src/lib/crm-writes/changes';
+import { withCrmTextPolicy } from '../src/lib/crm-presentation';
 import { crmSnapshotContext, decryptCrmSnapshot, encryptCrmSnapshot } from '../src/lib/crm-writes/snapshots';
 import type { CrmWriteReceipt } from '../src/lib/crm-writes/storage';
 
@@ -145,6 +146,15 @@ describe('agent-created RFQ access and disclosure', () => {
     expect(JSON.stringify(view)).toContain('omitted');
     expect(f.deps.principal).toHaveBeenCalledTimes(2);
   });
+  it.each(['redacted', 'unredacted'] as const)('labels normalized RFQ text under the %s policy without modifying storage', async policy => {
+    const f = fixture(), original = '  Fixture Banyan needs office + warehouse.\nBudget TBD.\n';
+    f.live.description = original;
+    const view = await withCrmTextPolicy(policy, () => f.read());
+    expect(view.description).toEqual({ state: 'present', text: original.trim(), redacted: false,
+      truncated: false, representation: 'normalized_display' });
+    expect(view.fields.company_name).toMatchObject({ text: 'Test Logistics', representation: 'normalized_display' });
+    expect(f.live.description).toBe(original);
+  });
   it('withholds read results if a grant is revoked after the live read', async () => {
     const f = fixture(); f.crm.read.mockImplementation(async () => { f.actor.scopes = []; return structuredClone(f.live); });
     await expect(f.read()).rejects.toMatchObject({ code: 'FORBIDDEN' });
@@ -191,7 +201,9 @@ describe('RFQ detail updates and guarded undo', () => {
     expect(stored.encrypted_snapshot).not.toContain('20 rs');
     expect(decryptCrmSnapshot(stored.encrypted_snapshot!, crmSnapshotContext(stored), f.env))
       .toMatchObject({ kind: 'update', record_id: id, after_updated_at: editedVersion, before: { budget: '20 rs/sqft per month' } });
-    expect(await f.update()).toMatchObject({ outcome: 'replayed', data: { id } });
+    const replayed = await f.update();
+    expect(replayed).toMatchObject({ outcome: 'replayed', data: { id } });
+    expect(replayed.data).not.toHaveProperty('description_unchanged');
     expect(f.crm.update).toHaveBeenCalledOnce();
     expect(vi.mocked(f.deps.claim).mock.invocationCallOrder[0]).toBeLessThan(f.crm.update.mock.invocationCallOrder[0]);
   });
@@ -236,6 +248,21 @@ describe('RFQ detail updates and guarded undo', () => {
     expect(await f.update({ ...args, changes: { requirement: '20k-30k sqft', title: 'Test Logistics - 20k-30k sqft - Hoskote' } })).toMatchObject({ outcome: 'updated' });
     expect(f.crm.update.mock.calls[0][1]).toEqual({ name: 'Test Logistics - 20k-30k sqft - Hoskote', requirementInSft: null });
   });
+  it('accepts explicit bound syntax on edits and clears an obsolete exact area', async () => {
+    const f = fixture();
+    const requirement = 'between 3,000 and 5,000 sft';
+    expect(await f.update({ ...args, raw_text: `Change the requirement to ${requirement}`,
+      changes: { requirement, title: `Test Logistics - ${requirement} - Hoskote` } })).toMatchObject({ outcome: 'updated' });
+    expect(f.crm.update.mock.calls[0][1]).toEqual({ name: `Test Logistics - ${requirement} - Hoskote`, requirementInSft: null });
+  });
+  it('accepts an explicit Indian prefix on edits without losing secondary phones', async () => {
+    const f = fixture();
+    expect(await f.update({ ...args, raw_text: 'Change primary phone to 0091 99887 76655',
+      changes: { poc_phone: '0091 99887 76655' } })).toMatchObject({ outcome: 'updated' });
+    expect(f.crm.update.mock.calls[0][1]).toMatchObject({ pocPhoneNumber: {
+      primaryPhoneNumber: '9988776655', primaryPhoneCallingCode: '+91', additionalPhones: [{ number: '9123456789' }],
+    } });
+  });
   it.each([
     { field: 'city', native: 'city', value: 'Bengaluru', title: 'Test Logistics - 50000 sqft - Hoskote, Bengaluru' },
     { field: 'micro_market', native: 'microMarket', value: 'Nelamangala', title: 'Test Logistics - 50000 sqft - Nelamangala' },
@@ -260,6 +287,46 @@ describe('RFQ detail updates and guarded undo', () => {
     expect(f.crm.update.mock.calls[0][1]).toEqual({ pocPhoneNumber: { primaryPhoneNumber: '9988776655',
       primaryPhoneCallingCode: '+91', primaryPhoneCountryCode: 'IN', additionalPhones: [{ number: '9123456789' }] } });
     expect(f.live.description).toBe(description);
+  });
+  it.each([
+    [true, ['OPTION1']], [false, ['NO']], [null, []],
+  ] as const)('clears budget and sets repeat client to %s while comparing the untouched stored brief', async (repeat_client, native) => {
+    const f = fixture(), original = '  Fixture Banyan needs office + warehouse.\nBudget TBD.\n#twenty\n';
+    f.live.description = original;
+    const result = await f.update({ ...args, raw_text: `Clear budget and set repeat client to ${repeat_client}; keep the description unchanged.`,
+      changes: { budget: null, repeat_client } });
+    expect(rfqChangeOutputSchema.parse(result)).toMatchObject({ outcome: 'updated', data: { description_unchanged: true } });
+    expect(f.crm.update.mock.calls[0][1]).toEqual({ budget: null, repeatClient: native });
+    expect(f.live.description).toBe(original);
+    expect(f.live.budget).toBeNull();
+    expect(f.live.repeatClient).toEqual(native);
+  });
+  it('leaves an omitted repeat-client value unchanged', async () => {
+    const f = fixture(); f.live.repeatClient = ['OPTION1'];
+    expect(await f.update()).toMatchObject({ outcome: 'updated', data: { description_unchanged: true } });
+    expect(f.live.repeatClient).toEqual(['OPTION1']);
+    expect(f.crm.update.mock.calls[0][1]).not.toHaveProperty('repeatClient');
+  });
+  it.each([
+    { before: '  Same words\n', after: 'Same words', comparison: false },
+    { before: null, after: null, comparison: true },
+    { before: null, after: '', comparison: false },
+    { before: undefined, after: undefined, comparison: undefined },
+    { before: 'Original', after: undefined, comparison: undefined },
+    { before: undefined, after: 'Original', comparison: undefined },
+    { before: { text: 'Original' }, after: { text: 'Original' }, comparison: undefined },
+  ])('reports only an actual native description comparison: $before -> $after', async ({ before, after, comparison }) => {
+    const f = fixture(); f.live.description = before;
+    f.crm.update.mockImplementation(async (_expected, patch) => {
+      Object.assign(f.live, structuredClone(patch), { description: after, updatedAt: editedVersion });
+      return { outcome: 'updated', id, record: structuredClone(f.live) };
+    });
+    const result = rfqChangeOutputSchema.parse(await f.update());
+    expect(result.outcome).toBe('updated');
+    if (comparison === undefined) expect(result.data).not.toHaveProperty('description_unchanged');
+    else expect(result.data?.description_unchanged).toBe(comparison);
+    expect(f.crm.read).toHaveBeenCalledOnce();
+    expect(f.crm.update.mock.calls[0][1]).not.toHaveProperty('description');
   });
   it('rejects operation reuse with changed values and allows only one concurrent dispatch', async () => {
     const f = fixture(); await Promise.all([f.update(), f.update(), f.update()]);

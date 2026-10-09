@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS, CRM_SQFT_PATTERN, parseCrmArea } from '../crm-fields';
 import { crmText } from '../crm-presentation';
 import { HttpError } from '../errors';
-import { capacityValid, indianPhone, rfqInputSchema } from './rfq';
+import { hasSourceExcerpt, indianPhone, rfqInputSchema } from './rfq';
+import { capacityValid } from './capacity';
 
 const text = (max: number) => z.string().trim().min(1).max(max).regex(/^[^\x00-\x1f\x7f]+$/);
 export const rfqVersionSchema = z.string().datetime({ offset: true }).max(40)
@@ -40,7 +41,8 @@ export const rfqChangeOutputSchema = z.object({
   outcome: z.enum(['updated', 'rolled_back', 'replayed', 'not_dispatched', 'rejected', 'outcome_unknown']),
   code: z.string().regex(/^[A-Z][A-Z0-9_]{0,95}$/), message: z.string().min(1).max(2000),
   data: z.object({ id: z.string().uuid(), url: z.string().url(), name: z.string().max(500).optional(),
-    updated_at: rfqVersionSchema.optional(), undo_available: z.boolean() }).strict().optional(),
+    updated_at: rfqVersionSchema.optional(), undo_available: z.boolean(),
+    description_unchanged: z.boolean().optional().describe('Exact comparison of the full stored description immediately before and after this edit, not against the original chat. Omitted when unavailable; a historical receipt does not prove current content.') }).strict().optional(),
 }).strict();
 export type RfqUpdateInput = z.infer<typeof rfqUpdateInputSchema>;
 export type RfqUndoInput = z.infer<typeof rfqUndoInputSchema>;
@@ -62,10 +64,10 @@ export function rfqEditProblems(input: RfqUpdateInput): string[] {
   if (changes.requirement !== undefined && !capacityValid(changes.requirement)) issues.push('requirement with a positive quantity and explicit unit');
   if (['requirement', 'company_name', 'city', 'micro_market'].some(field => changes[field as keyof typeof changes] !== undefined) && !changes.title)
     issues.push('updated title reflecting the company/requirement/location change');
-  if (changes.requirement && changes.title && !changes.title.includes(changes.requirement)) issues.push('title preserving the new requirement');
-  if (changes.company_name && changes.title && !changes.title.includes(changes.company_name)) issues.push('title preserving the new company');
-  if (changes.city && changes.title && !changes.title.includes(changes.city)) issues.push('title preserving the new city');
-  if (changes.micro_market && changes.title && !changes.title.includes(changes.micro_market)) issues.push('title preserving the new micromarket');
+  if (changes.requirement && changes.title && !hasSourceExcerpt(changes.title, changes.requirement)) issues.push('title preserving the new requirement');
+  if (changes.company_name && changes.title && !hasSourceExcerpt(changes.title, changes.company_name)) issues.push('title preserving the new company');
+  if (changes.city && changes.title && !hasSourceExcerpt(changes.title, changes.city)) issues.push('title preserving the new city');
+  if (changes.micro_market && changes.title && !hasSourceExcerpt(changes.title, changes.micro_market)) issues.push('title preserving the new micromarket');
   if (changes.poc_phone && indianPhone(changes.poc_phone) === null) issues.push('an explicitly supplied Indian contact number');
   for (const value of Object.values(changes)) {
     if (typeof value === 'string' && /\[(?:phone|email|link|contact|content|media) omitted\]/i.test(value)) issues.push('original values rather than masked placeholders');
@@ -119,7 +121,11 @@ export function rfqRecordUrl(id: string, origin: string): string {
 
 /** Editing uses the same request-scoped text policy as CRM reads. */
 export function rfqEditableView(record: RfqLiveRecord, origin: string) {
-  const readable = (value: unknown, maxCharacters = 500) => crmText(value, { maxCharacters });
+  // Even unmasked, untruncated text is normalized for display. Never present
+  // this projection as a verbatim read suitable for storage comparisons.
+  const readable = (value: unknown, maxCharacters = 500) => ({
+    ...crmText(value, { maxCharacters }), representation: 'normalized_display' as const,
+  });
   return { id: record.id, updated_at: record.updatedAt, url: rfqRecordUrl(record.id, origin), stage: record.stage,
     fields: { title: readable(record.name), company_name: readable(record.companyName), city: readable(record.city),
       micro_market: readable(record.microMarket), budget: readable(record.budget),

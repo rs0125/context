@@ -93,9 +93,21 @@ async function execute(action: Extract<CrmWriteAction, 'update_crm_rfq' | 'undo_
     } : { outcome: changed.outcome };
     await deps.writeTransaction(client => deps.finish(client, actor, operation, hash, action, finished));
     sameActor(await deps.readTransaction(authorize), actor);
-    if (success) return result(action === 'update_crm_rfq' ? 'updated' : 'rolled_back', action === 'update_crm_rfq' ? 'CRM_RFQ_UPDATED' : 'CRM_RFQ_UNDONE',
-      action === 'update_crm_rfq' ? 'Updated the requested RFQ details.' : undoCreate ? 'Moved the unchanged RFQ to CRM trash.' : 'Restored the details from before that edit.',
-      changed.id, changed.outcome === 'updated' ? changed.record : undefined, action === 'update_crm_rfq');
+    if (success) {
+      const receipt = result(action === 'update_crm_rfq' ? 'updated' : 'rolled_back', action === 'update_crm_rfq' ? 'CRM_RFQ_UPDATED' : 'CRM_RFQ_UNDONE',
+        action === 'update_crm_rfq' ? 'Updated the requested RFQ details.' : undoCreate ? 'Moved the unchanged RFQ to CRM trash.' : 'Restored the details from before that edit.',
+        changed.id, changed.outcome === 'updated' ? changed.record : undefined, action === 'update_crm_rfq');
+      if (action === 'update_crm_rfq' && changed.outcome === 'updated' && receipt.data) {
+        const beforeDescription = current.description, afterDescription = changed.record.description;
+        // Compare native values, never the normalized/masked display. Missing
+        // fields and unsupported rich-text objects cannot establish equality.
+        if ((typeof beforeDescription === 'string' || beforeDescription === null)
+          && (typeof afterDescription === 'string' || afterDescription === null)) {
+          receipt.data.description_unchanged = beforeDescription === afterDescription;
+        }
+      }
+      return receipt;
+    }
     if (changed.outcome === 'rejected') return result('rejected', changed.code ?? 'CRM_RFQ_REJECTED',
       'No change was applied. The RFQ may have changed or CRM rejected access. Read it again before preparing another edit.');
     return unknown();

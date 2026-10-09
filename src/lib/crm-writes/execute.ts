@@ -4,7 +4,7 @@ import { withReadOnlyTransaction, withCrmWriteTransaction } from '../db';
 import { HttpError } from '../errors';
 import { argumentsSha256 } from '../mcp-read-contract';
 import { CrmRfqClient, crmWriteConfiguration } from './client';
-import { RFQ_SCOPE, rfqInputSchema, rfqProblems, rfqPayload, type RfqResult } from './rfq';
+import { RFQ_SCOPE, rfqInputSchema, normalizeRfqInput, rfqProblems, rfqPayload, type RfqResult } from './rfq';
 import { claimCrmRfq, findCrmRfq, finishCrmRfq, type CrmWriteReceipt } from './storage';
 import { rfqRecordUrl, type RfqLiveRecord } from './changes';
 import { encryptCrmSnapshot } from './snapshots';
@@ -38,10 +38,8 @@ export async function executeCrmRfq(raw: unknown, key: KeyRegistration, signal: 
     if (receipt.state === 'rejected') return result('rejected', 'CRM_RFQ_REJECTED', 'CRM rejected this creation. No further creation was sent.');
     return unknown();
   }
-  if (!parsed.success) return result('not_dispatched', 'CRM_RFQ_INVALID', 'Provide the original raw_text, a location and quantified requirement with a unit. Only the advertised RFQ fields are accepted.');
-  const input = { ...parsed.data, operation_id: operation };
-  const problems = rfqProblems(input);
-  if (problems.length) return result('not_dispatched', 'CRM_RFQ_INCOMPLETE', `Please supply or correct: ${problems.join(', ')}. Unknown optional fields should be omitted.`);
+  if (!parsed.success) return result('not_dispatched', 'CRM_RFQ_INVALID', 'Provide the original raw_text and valid advertised fields. All extracted details are optional and may be omitted.');
+  const input = normalizeRfqInput({ ...parsed.data, operation_id: operation });
   let reserved = false;
   async function authorize(client: PoolClient): Promise<Principal> {
     signal.throwIfAborted();
@@ -59,6 +57,10 @@ export async function executeCrmRfq(raw: unknown, key: KeyRegistration, signal: 
       return { actor, stored: await deps.find(client, actor, operation, hash) };
     });
     if (stored) return replay(stored);
+    // Recovery must honor the authenticated historical receipt even if a later
+    // release tightens extraction rules. Revalidate only a new intended create.
+    const problems = rfqProblems(input);
+    if (problems.length) return result('not_dispatched', 'CRM_RFQ_INCOMPLETE', 'The original brief is empty. Retrieve its complete source text before saving; extracted details are optional.');
     const snapshotContext = { employeeId: actor.employeeId, email: actor.email, memberId: actor.twentyUserId!,
       operationId: operation, action: 'create_crm_rfq' as const, requestHash: hash };
     const editsEnabled = deps.env.CONTEXT_CRM_RFQ_EDITS_ENABLED === 'true';
@@ -75,13 +77,20 @@ export async function executeCrmRfq(raw: unknown, key: KeyRegistration, signal: 
     // The durable claim commits before network I/O. A crash or cancellation from
     // this point is uncertain; even a retry in another process cannot POST twice.
     signal.throwIfAborted();
-    const created = await deps.crm.create(rfqPayload(input, creator), signal);
+    const payload = rfqPayload(input, creator);
+    const created = await deps.crm.create(payload, signal);
     const encryptedSnapshot = editsEnabled && created.outcome === 'created' && created.record
       ? encryptCrmSnapshot({ kind: 'create', record_id: created.id, after_updated_at: created.record.updatedAt }, snapshotContext, deps.env) : undefined;
     await deps.writeTransaction(client => deps.finish(client, actor, operation, hash, { ...created, ...(encryptedSnapshot ? { encryptedSnapshot } : {}) }));
     const current = await deps.readTransaction(authorize);
     if (current.employeeId !== actor.employeeId || current.email !== actor.email || current.twentyUserId !== actor.twentyUserId) return unknown();
-    if (created.outcome === 'created') return result('created', 'CRM_RFQ_CREATED', 'Created a new RFQ with the original user text as its description.', created.id, created.record, !!encryptedSnapshot);
+    if (created.outcome === 'created') {
+      const receipt = result('created', 'CRM_RFQ_CREATED', 'Created a new RFQ with the complete original brief as its description. Structured details were populated where supported.', created.id, created.record, !!encryptedSnapshot);
+      // Return the actual CRM title, or the title sent on the successful create.
+      // The caller must not build a save receipt from unaccepted extractions.
+      if (receipt.data) receipt.data.name ??= String(payload.name);
+      return receipt;
+    }
     if (created.outcome === 'rejected') return result('rejected', 'CRM_RFQ_REJECTED', 'CRM rejected this creation. Verify the supplied fields and server access before preparing another proposal.');
     return unknown();
   } catch (error) {

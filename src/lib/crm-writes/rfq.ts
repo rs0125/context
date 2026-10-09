@@ -1,27 +1,59 @@
 /** RFQ creation policy. New CRM actions get their own schema, scope and mapper. */
 import { z } from 'zod';
-import { CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS, CRM_NUMBER_PATTERN, CRM_MAGNITUDE_PATTERN, CRM_MAGNITUDE_MULTIPLIERS, CRM_SQFT_PATTERN, parseCrmArea } from '../crm-fields';
+import { CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS, CRM_NUMBER_PATTERN, CRM_MAGNITUDE_PATTERN, CRM_SQFT_PATTERN, parseCrmArea } from '../crm-fields';
+import { capacityUnit } from './capacity';
 
 export const RFQ_SCOPE = 'crm.rfq:write' as const;
 export const RFQ_ACTION = 'create_crm_rfq' as const;
-const text = (max: number) => z.string().trim().min(1).max(max).regex(/^[^\x00-\x1f\x7f]+$/);
-const quote = text(160).describe('Exact supporting excerpt from raw_text. Do not infer a missing value.');
+// Creation has no existing value to clear. Empty optional text and null mean
+// omitted, while meaningful placeholders such as "TBD" remain source data.
+const optionalText = (max: number) => z.string().trim().max(max).regex(/^[^\x00-\x1f\x7f]*$/).nullable().optional();
+const quote = optionalText(160).describe('Optional supporting excerpt from raw_text. Do not spend extra turns collecting evidence for an optional classification.');
 export const rfqInputSchema = z.object({
   operation_id: z.string().uuid().describe('Stable operation UUID. Persist before dispatch and reuse unchanged on recovery. Never replace an uncertain operation.'),
   raw_text: z.string().min(1).max(3000).regex(/^[^\x00]+$/).describe('Entire original user RFQ message, verbatim, including whitespace and #twenty tags. This becomes the CRM description; never summarize or rewrite it. For multiple selected messages join their complete texts with two newlines in source order.'),
-  location: text(160).describe('Exact location excerpt from raw_text: a city, locality, corridor or alternatives. Required. Never infer a city from a locality.'),
-  requirement: text(120).describe('Exact quantified space/capacity excerpt including its unit, e.g. 25,000-35,000 sqft or 100 pallets. Required; preserve ranges, bounds and approximation words instead of extracting a single exact value.'),
-  city: text(120).optional().describe('City explicitly supplied in raw_text; omit if only a locality/corridor is known.'),
-  micro_market: text(160).optional().describe('Exact optional locality/corridor excerpt from raw_text. Preserve user-supplied values such as Anywhere or TBD; the required location must still be specific.'),
-  company_name: text(120).optional(),
-  poc_name: text(120).optional(),
-  poc_phone: text(40).optional().describe('Exact Indian phone excerpt, only when supplied for this RFQ. International numbers remain in raw_text; no guessed country code.'),
-  budget: text(120).optional().describe('Preserve every explicit currency, area basis, period and range across selected source messages. Prefer one exact excerpt. If terms span a clarification, join at most three nonempty exact excerpts with "; " (for example: 20 rs /sqft; per month). A later monthly clarification does not erase an earlier per-sqft basis. Never calculate total deal value.'),
-  lead_source: z.object({ value: z.enum(CRM_LEAD_SOURCES), quote }).strict().optional(),
-  lease_duration: z.object({ value: z.enum(CRM_LEASE_DURATIONS), quote }).strict().optional(),
-  repeat_client: z.object({ value: z.boolean(), quote }).strict().optional(),
+  location: optionalText(160).describe('Optional location wording from the brief: city, locality, corridor or alternatives. Omit if unknown; never require it before saving the original brief.'),
+  requirement: optionalText(120).describe('Optional space/capacity wording from the brief, including any range, bound or approximation. Informal or incomplete wording is fine; omit if unclear. No quantified size or unit is required to save the brief.'),
+  city: optionalText(120).describe('City explicitly supplied in raw_text; omit if only a locality/corridor is known.'),
+  micro_market: optionalText(160).describe('Optional locality/corridor from raw_text, including supplied wording such as Anywhere or TBD.'),
+  company_name: optionalText(120),
+  poc_name: optionalText(120),
+  poc_phone: optionalText(40).describe('Original Indian mobile number excerpt, only when supplied for this RFQ. Common separators and explicit 91/+91/0091 prefixes are accepted. International numbers remain in raw_text; no guessed country code or extensions.'),
+  budget: optionalText(120).describe('Optional budget wording preserving currency, area basis, period and range. Source fragments may be joined with "; ". Omit if unclear; the full terms remain in the description. Never calculate a total deal value.'),
+  lead_source: z.object({ value: z.enum(CRM_LEAD_SOURCES), quote }).strict().nullable().optional(),
+  lease_duration: z.object({ value: z.enum(CRM_LEASE_DURATIONS), quote }).strict().nullable().optional(),
+  repeat_client: z.object({ value: z.boolean(), quote }).strict().nullable().optional(),
 }).strict();
 export type RfqInput = z.infer<typeof rfqInputSchema>;
+export type NormalizedRfqInput = { [K in keyof RfqInput]: Exclude<RfqInput[K], null> };
+const optionalFields = ['location', 'requirement', 'city', 'micro_market', 'company_name', 'poc_name', 'poc_phone', 'budget', 'lead_source', 'lease_duration', 'repeat_client'] as const;
+export function normalizeRfqInput(input: RfqInput): NormalizedRfqInput {
+  const normalized = { ...input };
+  for (const field of optionalFields) {
+    if (normalized[field] == null || (typeof normalized[field] === 'string' && !normalized[field].trim())) delete normalized[field];
+  }
+  return normalized as NormalizedRfqInput;
+}
+
+const layout = (value: string) => value.replace(/\s+/gu, ' ').trim();
+/** Whole excerpts, never a suffix of a name, number or decimal. */
+function sourceExcerpts(source: string, excerpt: string) {
+  const full = layout(source), part = layout(excerpt), matches: Array<{ before: string; after: string }> = [];
+  if (!part) return matches;
+  for (let start = full.indexOf(part); start !== -1; start = full.indexOf(part, start + 1)) {
+    const before = full.slice(0, start), after = full.slice(start + part.length);
+    if (/[\p{L}\p{N}_]$/u.test(before) && /^[\p{L}\p{N}_]/u.test(part)) continue;
+    if (/[\p{L}\p{N}_]$/u.test(part) && /^[\p{L}\p{N}_]/u.test(after)) continue;
+    if (/\d[.,]$/.test(before) && /^\d/.test(part)) continue;
+    if (/\d$/.test(part) && /^[.,]\d/.test(after)) continue;
+    matches.push({ before, after });
+  }
+  return matches;
+}
+/** Layout differences are harmless; spelling, punctuation, numbers and units still must match. */
+export function hasSourceExcerpt(source: string, excerpt: string): boolean {
+  return sourceExcerpts(source, excerpt).length > 0;
+}
 export const rfqOutputSchema = z.object({
   operation_id: z.string().uuid(),
   outcome: z.enum(['created', 'replayed', 'not_dispatched', 'rejected', 'outcome_unknown']),
@@ -33,60 +65,63 @@ export const rfqOutputSchema = z.object({
 export type RfqResult = z.infer<typeof rfqOutputSchema>;
 export type CrmCreator = { id: string; name: string };
 
-const nonSpecificLocation = /^(?:tbd|tbc|unknown|not\s+(?:known|available|provided|mentioned|specified)|n\/?a|none|nil|anywhere|any\s+(?:city|location)|india|pan[ -]?india|[-?]+)$/i;
-const capacityUnits = [CRM_SQFT_PATTERN, 'sq\\.?\\s*m\\.?|sqm|m²|square\\s*met(?:er|re)s?',
-  'acres?', 'pallets?', '(?:metric\\s*)?ton(?:ne)?s?|mt', 'cbm|m³|cubic\\s*met(?:er|re)s?', 'containers?'];
-const capacityUnit = `(?:${capacityUnits.join('|')})`;
-const unitFamilies = capacityUnits.map(pattern => new RegExp(`^(?:${pattern})$`, 'i'));
-const capacity = new RegExp(`^(?:(?:~|≈|approx(?:imately)?\\.?|around|about|circa|at least|at most|up to|over|above|under|below|[<>]=?)\\s*)?(${CRM_NUMBER_PATTERN})\\s*(${CRM_MAGNITUDE_PATTERN})?(?:\\s*(${capacityUnit})?\\s*(?:-|–|—|to)\\s*(${CRM_NUMBER_PATTERN})\\s*(${CRM_MAGNITUDE_PATTERN})?)?\\s*(${capacityUnit})$`, 'i');
-export function capacityValid(value: string) {
-  const match = capacity.exec(value);
-  if (!match) return false;
-  const quantity = (raw: string, magnitude?: string) => Number(raw.replaceAll(',', '')) * (magnitude ? CRM_MAGNITUDE_MULTIPLIERS[magnitude.toLowerCase()] : 1);
-  // Repeated units must agree. An explicit left unit also prevents borrowing
-  // the right magnitude: "5 sqft - 10k sqft" starts at five, not five thousand.
-  if (match[3] && !unitFamilies.some(unit => unit.test(match[3]) && unit.test(match[6]))) return false;
-  const first = quantity(match[1], match[2] ?? (match[3] ? undefined : match[5]));
-  const second = match[4] ? quantity(match[4], match[5]) : first;
-  return Number.isFinite(first) && Number.isFinite(second) && first > 0 && second >= first && second <= 1_000_000_000;
+const qualifier = '(?:~|≈|approx(?:imately)?\\.?|around|about|circa|at least|at most|up to|upto|over|above|under|below|[<>]=?|min(?:imum)?\\.?|max(?:imum)?\\.?|no less than|not less than|no more than|not more than|more than|less than|between)';
+const suffixQualifier = '(?:min(?:imum)?\\.?|max(?:imum)?\\.?|approx(?:imately)?\\.?|at least|at most|or more|or less)';
+const precedingQualifier = new RegExp(`(?:^|[^\\p{L}\\p{N}_])${qualifier}\\s*$`, 'iu');
+const followingQualifier = new RegExp(`^\\s*${suffixQualifier}(?=$|[^\\p{L}\\p{N}_])(?!\\s+\\d)`, 'iu');
+const precedingRange = new RegExp(`${CRM_NUMBER_PATTERN}\\s*(?:${CRM_MAGNITUDE_PATTERN})?\\s*(?:${capacityUnit})?\\s*(?:[-–—]|to)\\s*$`, 'i');
+const precedingBetween = new RegExp(`\\bbetween\\s+${CRM_NUMBER_PATTERN}\\s*(?:${CRM_MAGNITUDE_PATTERN})?\\s*(?:${capacityUnit})?\\s+and\\s*$`, 'i');
+const followingRange = new RegExp(`^\\s*(?:[-–—]|to)\\s*${CRM_NUMBER_PATTERN}\\s*(?:${CRM_MAGNITUDE_PATTERN})?\\s*${capacityUnit}(?=$|[^\\p{L}\\p{N}_])`, 'iu');
+
+/** Controls optional enrichment only; never prevents capturing the brief. */
+function hasCompleteRequirement(source: string, requirement: string): boolean {
+  return sourceExcerpts(source, requirement).some(({ before, after }) =>
+    !precedingQualifier.test(before) && !followingQualifier.test(after)
+    // A label separator ("Area-5000 sqft") is not a negative sign. Numeric
+    // range prefixes and standalone signed quantities remain guarded.
+    && !/(?:^|[^\p{L}])-$/u.test(before) && !/[+−]$/.test(before)
+    && !/^\s*\+\s*(?:$|in\b|at\b|near\b|[,.])/i.test(after)
+    && !precedingRange.test(before) && !precedingBetween.test(before) && !followingRange.test(after));
 }
 
-/** Return actionable missing/invalid field names without echoing private input. */
+/** A brief can be captured without extracting any structured details. */
 export function rfqProblems(input: RfqInput): string[] {
-  const issues: string[] = [];
-  if (!input.raw_text.trim()) issues.push('raw_text');
-  if (nonSpecificLocation.test(input.location) || !/\p{L}/u.test(input.location)) issues.push('location');
-  if (!capacityValid(input.requirement)) issues.push('requirement (positive quantity and explicit unit)');
-  // Optional text may explicitly be "Anywhere", "TBD", etc. Require source
-  // evidence, without applying the mandatory location's specificity rule.
+  return input.raw_text.trim() ? [] : ['raw_text'];
+}
+
+/** Best-effort enrichment only. Unsupported details stay in the original description. */
+function rfqEnrichment(submitted: RfqInput): NormalizedRfqInput {
+  const input = normalizeRfqInput(submitted);
   for (const field of ['location', 'requirement', 'city', 'micro_market', 'company_name', 'poc_name', 'poc_phone'] as const) {
     const value = input[field];
-    if (value !== undefined && !input.raw_text.includes(value)) issues.push(`${field} (verbatim source required)`);
+    if (value !== undefined && !hasSourceExcerpt(input.raw_text, value)) delete input[field];
   }
-  if (input.budget !== undefined) {
-    const fragments = input.budget.split('; ');
-    const exact = input.raw_text.includes(input.budget);
-    const joined = fragments.length >= 2 && fragments.length <= 3
-      && fragments.every(fragment => fragment.length > 0 && fragment === fragment.trim()
-        && input.raw_text.includes(fragment));
-    if (!exact && !joined) issues.push('budget (verbatim source required)');
-  }
+  // Withhold a detected clipped exact amount; never refuse the whole brief.
+  if (input.requirement && parseCrmArea(input.requirement).kind === 'exact'
+    && !hasCompleteRequirement(input.raw_text, input.requirement)) delete input.requirement;
+  if (input.budget && !input.budget.split('; ').every(fragment => hasSourceExcerpt(input.raw_text, fragment))) delete input.budget;
   for (const field of ['lead_source', 'lease_duration', 'repeat_client'] as const) {
-    if (input[field] && !input.raw_text.includes(input[field].quote)) issues.push(`${field} (supporting source required)`);
+    const evidence = input[field]?.quote;
+    if (evidence && !hasSourceExcerpt(input.raw_text, evidence)) delete input[field];
   }
-  if (input.poc_phone && indianPhone(input.poc_phone) === null) issues.push('poc_phone (unambiguous Indian number)');
-  return [...new Set(issues)];
+  if (input.poc_phone && (indianPhone(input.poc_phone) === null || !sourceExcerpts(input.raw_text, input.poc_phone)
+    .some(({ before }) => !/(?:\+[\d ().-]*|\b00\d[\d ().-]*|\b91[ ().-]*)$/.test(before))))
+    delete input.poc_phone;
+  return input;
 }
 export function indianPhone(raw: string): string | null {
-  if (!/^[+\d ()-]+$/.test(raw)) return null;
-  const compact = raw.replace(/[ ()-]/g, '');
-  const national = compact.startsWith('+91') ? compact.slice(3) : compact;
+  if (!/^[+\d ().\s-]+$/.test(raw)) return null;
+  const compact = raw.replace(/[ ().\s-]/g, '');
+  const national = compact.startsWith('+91') ? compact.slice(3)
+    : compact.startsWith('0091') ? compact.slice(4)
+      : /^91\d{10}$/.test(compact) ? compact.slice(2) : compact;
   return /^[6-9]\d{9}$/.test(national) ? national : null;
 }
 
-export function rfqPayload(input: RfqInput, creator: CrmCreator): Record<string, unknown> {
+export function rfqPayload(submitted: RfqInput, creator: CrmCreator): Record<string, unknown> {
+  const input = rfqEnrichment(submitted);
   const payload: Record<string, unknown> = {
-    name: `${input.company_name ?? 'TBD'} - ${input.requirement} - ${input.location}`,
+    name: [input.company_name, input.requirement, input.location ?? input.city ?? input.micro_market].filter(Boolean).join(' - ') || 'New RFQ',
     description: input.raw_text,
     stage: 'RFQ_RECEIVED',
     createdBy: { source: 'MANUAL', workspaceMemberId: creator.id, name: creator.name },
@@ -98,7 +133,7 @@ export function rfqPayload(input: RfqInput, creator: CrmCreator): Record<string,
   // Twenty's field is an integer, NOT text. Ranges, approximations and other
   // capacity units remain losslessly in the title/description, never collapsed.
   const area = parseCrmArea(input.requirement);
-  if (area.kind === 'exact' && area.value !== null && new RegExp(`${CRM_SQFT_PATTERN}$`, 'i').test(input.requirement)) payload.requirementInSft = area.value;
+  if (input.requirement && area.kind === 'exact' && area.value !== null && new RegExp(`${CRM_SQFT_PATTERN}$`, 'i').test(input.requirement)) payload.requirementInSft = area.value;
   if (input.poc_name) {
     const [firstName, ...rest] = input.poc_name.split(/\s+/);
     payload.pocName = { firstName, lastName: rest.join(' ') };

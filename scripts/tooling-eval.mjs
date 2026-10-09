@@ -59,7 +59,7 @@ export const LEADS = Object.freeze([
   { id: uuid(4), name: 'Example Goods', company_name: 'Example Goods', city: 'Pune', stage: 'DEAL_CLOSED', source_created_at: '2026-09-05T04:00:00.000Z', next_follow_up_at: null, created_by_self: false, assigned_to_self: true, priority: 1 },
   { id: uuid(5), name: 'Another Logistics', company_name: 'Another Logistics', city: 'Bengaluru', stage: 'DEAL_ON_HOLD', source_created_at: '2026-09-04T04:00:00.000Z', next_follow_up_at: null, created_by_self: false, assigned_to_self: true, priority: null },
 ].map((lead, index) => { const record = { ...lead, source_updated_at: FIXTURE_NOW, last_polled_at: FIXTURE_NOW, last_meaningful_update_at: null, last_contacted: null, stage_entered_at: null,
-  close_date: null, ownership: { assigned_to: missingLabels(), supply_owners: missingLabels(), owner_workspace_member_id: null, created_by: { workspace_member_id: null, name: maskedText(null), source: maskedText(null) }, updated_by: { workspace_member_id: null, name: maskedText(null), source: maskedText(null) } },
+  close_date: null, ownership: { assigned_to: missingLabels(), supply_owners: missingLabels(), secondary_assignee: maskedText(null), owner_workspace_member_id: null, created_by: { workspace_member_id: null, name: maskedText(null), source: maskedText(null) }, updated_by: { workspace_member_id: null, name: maskedText(null), source: maskedText(null) } },
   last_note_at: null, last_task_at: null, recorded_follow_up_count: index === 4 ? null : index,
   requirement_sqft: [20000, 50000, 10000, 80000, null][index], micro_market: ['North, East', 'South', 'North', 'North', null][index],
   lead_source: ['WEBSITE_SEO', 'WEBSITE_SEO', 'BROKER', 'EXISTING_CLIENT', null][index],

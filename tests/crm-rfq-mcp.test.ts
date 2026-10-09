@@ -37,6 +37,7 @@ describe('RFQ-only scope and MCP contract', () => {
     expect(writes.map((t: { name: string }) => t.name)).toEqual(['create_crm_rfq']);
     expect(writes[0]._meta['wareongo/context-write-v1']).toEqual({ executionMode: 'direct_request', requiredScopes: ['crm.rfq:write'], sourceFamily: 'crm', effect: 'create', idempotencyArgument: 'operation_id', sourceTextArgument: 'raw_text' });
     expect(writes[0].inputSchema.additionalProperties).toBe(false);
+    expect(writes[0].inputSchema.required).toEqual(['operation_id', 'raw_text']);
     expect(writes[0].inputSchema.properties).not.toHaveProperty('stage');
   });
   it.each(['read scope', 'disabled', 'no key', 'hidden platform'])('hides creation for %s', async reason => {
@@ -62,9 +63,17 @@ describe('RFQ-only scope and MCP contract', () => {
     expect(crmRfq).toHaveBeenCalledOnce(); expect(read).not.toHaveBeenCalled();
     expect(response.result.structuredContent).toMatchObject({ outcome: 'outcome_unknown', meta: { toolName: 'create_crm_rfq', argumentsSha256: argumentsSha256(args), employeeId: 7 } });
   });
+  it('admits an authorized brief-only create without requiring location or quantified size', async () => {
+    const input = { operation_id: args.operation_id, raw_text: 'Need a warehouse with truck parking. Details to follow.\n#twenty' };
+    const crmRfq = vi.fn(async (_input: unknown) => ({ operation_id: input.operation_id, outcome: 'created' as const,
+      code: 'CRM_RFQ_CREATED', message: 'Full brief saved.', data: { id: input.operation_id, stage: 'RFQ_RECEIVED' as const, name: 'New RFQ' } }));
+    const response = await wire(await handleMcpRequest(rpc('tools/call', { name: 'create_crm_rfq', arguments: input }), { authenticate: async () => key(), crmRfq }));
+    expect(response.result.structuredContent).toMatchObject({ outcome: 'created', data: { name: 'New RFQ' }, meta: { argumentsSha256: argumentsSha256(input) } });
+    expect(crmRfq.mock.calls[0][0]).toEqual(input);
+  });
   it('rejects missing critical fields, arbitrary write arguments and hidden tool calls', async () => {
     const crmRfq = vi.fn();
-    for (const input of [{ ...args, operation_id: undefined }, { ...args, location: undefined }, { ...args, stage: 'DEAL_CLOSED' }, { ...args, employeeId: 8 }, { ...args, action: 'update' }]) {
+    for (const input of [{ ...args, operation_id: undefined }, { ...args, raw_text: undefined }, { ...args, stage: 'DEAL_CLOSED' }, { ...args, employeeId: 8 }, { ...args, action: 'update' }]) {
       const response = await wire(await handleMcpRequest(rpc('tools/call', { name: 'create_crm_rfq', arguments: input }), { authenticate: async () => key(), crmRfq }));
       expect(response.error || response.result?.isError).toBeTruthy();
     }
@@ -116,7 +125,8 @@ describe('owned RFQ edit and undo MCP integration', () => {
   });
   it('routes RFQ reads through the authorized REST boundary with argument binding', async () => {
     const id = randomUUID();
-    const read = vi.fn(async (_request: Request, path: string[]) => Response.json({ data: path[1] === 'rfqs' ? { id, editable: true } : { items: [] }, meta: { requestId: 'owned-rfq', generatedAt: new Date().toISOString() } }));
+    const description = { state: 'present', text: 'Original brief', redacted: false, truncated: false, representation: 'normalized_display' };
+    const read = vi.fn(async (_request: Request, path: string[]) => Response.json({ data: path[1] === 'rfqs' ? { id, editable: true, description } : { items: [] }, meta: { requestId: 'owned-rfq', generatedAt: new Date().toISOString() } }));
     for (const [name, input, expected] of [
       ['read_crm_rfq', { id }, ['crm', 'rfqs', id]],
       ['list_crm_rfq_changes', { limit: 3 }, ['crm', 'rfq-changes']],
@@ -124,18 +134,22 @@ describe('owned RFQ edit and undo MCP integration', () => {
       const { result } = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: input }), { authenticate: async () => key(), read }));
       expect(result.isError).not.toBe(true);
       expect(result.structuredContent.meta).toMatchObject({ toolName: name, argumentsSha256: argumentsSha256(input) });
+      if (name === 'read_crm_rfq') expect(result.structuredContent.data.description).toEqual(description);
       expect(read.mock.calls.at(-1)![1]).toEqual(expected);
     }
   });
   it.each(['update_crm_rfq', 'undo_crm_rfq'] as const)('binds %s success to exact arguments and employee', async name => {
+    const id = randomUUID();
     const input = name === 'update_crm_rfq'
       ? { operation_id: args.operation_id, id: randomUUID(), expected_updated_at: '2026-10-04T10:00:00.000Z', raw_text: 'Change the budget to 22 rupees per sqft per month', changes: { budget: 'INR22/sqft/month' } }
       : { operation_id: args.operation_id, original_operation_id: randomUUID(), raw_text: 'Undo that change' };
-    const mutate = vi.fn(async () => ({ operation_id: input.operation_id, outcome: name === 'update_crm_rfq' ? 'updated' as const : 'rolled_back' as const, code: 'OK', message: 'Completed.' }));
+    const mutate = vi.fn(async () => ({ operation_id: input.operation_id, outcome: name === 'update_crm_rfq' ? 'updated' as const : 'rolled_back' as const, code: 'OK', message: 'Completed.',
+      ...(name === 'update_crm_rfq' ? { data: { id, url: `https://crm.example.test/object/opportunity/${id}`, undo_available: true, description_unchanged: true } } : {}) }));
     const read = vi.fn();
     const { result } = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: input }), { authenticate: async () => key(), read, crmRfqUpdate: mutate, crmRfqUndo: mutate }));
     expect(result.isError).not.toBe(true);
     expect(result.structuredContent.meta).toEqual({ toolName: name, argumentsSha256: argumentsSha256(input), employeeId: 7 });
+    if (name === 'update_crm_rfq') expect(result.structuredContent.data.description_unchanged).toBe(true);
     expect(mutate).toHaveBeenCalledOnce(); expect(read).not.toHaveBeenCalled();
   });
   it('rejects unadvertised calls and arbitrary update fields before dispatch', async () => {
