@@ -129,6 +129,7 @@ describe('MCP read-only protocol', () => {
     expect(crm.inputSchema.properties.date_field.enum).toContain('created');
     expect(crm.inputSchema.properties.period.enum).toContain('this_month');
     expect(crm.inputSchema.properties).toHaveProperty('q');
+    expect(crm.inputSchema.properties.assignee).toMatchObject({ type: 'string', maxLength: 80 });
     expect(crm.inputSchema.properties.lead_source.enum).toEqual(CRM_LEAD_SOURCES);
     expect(crm.inputSchema.properties.lease_duration.enum).toEqual(CRM_LEASE_DURATIONS);
     expect(crm.inputSchema.properties.industry.enum).toEqual(CRM_INDUSTRIES);
@@ -147,6 +148,7 @@ describe('MCP read-only protocol', () => {
         .toEqual(expect.arrayContaining(['state', 'text', 'redacted', 'truncated']));
     }
     const summary = result.tools.find((tool: { name: string }) => tool.name === 'crm_summary');
+    expect(summary.inputSchema.properties.assignee).toEqual(crm.inputSchema.properties.assignee);
     expect(summary.inputSchema.properties).not.toHaveProperty('cursor');
     expect(summary.inputSchema.properties.group_by.enum).toEqual(expect.arrayContaining(['lead_source', 'lease_duration']));
     expect(summary.outputSchema.properties.data.required).toEqual(expect.arrayContaining(['total', 'groups', 'groups_truncated', 'other_count', 'query_context', 'access_scope', 'source_status', 'read_consistency', 'activity_status', 'field_semantics']));
@@ -318,11 +320,12 @@ describe('MCP read-only protocol', () => {
     const read = vi.fn(async (request: Request, path: string[]) => {
       expect(path).toEqual(['crm', 'filters']);
       expect(new URL(request.url).searchParams.get('view')).toBe('assigned');
-      return Response.json({ data: { cities: ['Sample City'], cities_truncated: true, stages: ['NEW_LEAD'], date_fields: ['created'], periods: ['this_month'], sorts: ['id_asc'], lead_sources: CRM_LEAD_SOURCES, lease_durations: CRM_LEASE_DURATIONS, industries: CRM_INDUSTRIES, filter_guidance: 'Unknown values do not match; recorded categories may be defaults.', ...crmAccess }, meta });
+      return Response.json({ data: { cities: ['Sample City'], cities_truncated: true, assignees: ['ALEX', 'SAM'], assignees_truncated: true, stages: ['NEW_LEAD'], date_fields: ['created'], periods: ['this_month'], sorts: ['id_asc'], lead_sources: CRM_LEAD_SOURCES, lease_durations: CRM_LEASE_DURATIONS, industries: CRM_INDUSTRIES, filter_guidance: 'Unknown values do not match; recorded categories may be defaults.', ...crmAccess }, meta });
     });
     const body = await wire(await handleMcpRequest(rpc('tools/call', { name: 'crm_filters', arguments: { view: 'assigned' } }), { authenticate: async () => key(), read }));
     expect(body.result.isError).not.toBe(true);
     expect(body.result.structuredContent.data.cities_truncated).toBe(true);
+    expect(body.result.structuredContent.data).toMatchObject({ assignees: ['ALEX', 'SAM'], assignees_truncated: true });
     expect(body.result.structuredContent.data.lead_sources).toEqual(CRM_LEAD_SOURCES);
     expect(body.result.structuredContent.data).not.toHaveProperty('micro_markets');
   });
@@ -332,7 +335,7 @@ describe('MCP read-only protocol', () => {
       ? { items: [richLead], nextCursor: null, query_context: queryContext, ...metadata }
       : name === 'read_crm_lead' ? { ...richLead, ...metadata, description: missingText, loss_reason: missingText }
         : { as_of: now.toISOString(), timezone: 'Asia/Kolkata', total_active: 1, counts_by_stage: { NEW_LEAD: 1 }, counts_by_sla: { unknown: 1 }, follow_up_overdue: 0, priorities: [richLead], ...metadata };
-    const filters = { requirement_sqft_min: 10000, requirement_sqft_max: 50000, micro_market: 'North, East', lead_source: 'WEBSITE_SEO', lease_duration: 'LONG_TERM', industry: 'FMCG', repeat_client: 'false' };
+    const filters = { assignee: 'ALEX', requirement_sqft_min: 10000, requirement_sqft_max: 50000, micro_market: 'North, East', lead_source: 'WEBSITE_SEO', lease_duration: 'LONG_TERM', industry: 'FMCG', repeat_client: 'false' };
     const args = name === 'read_crm_lead' ? { id: richLead.id } : name === 'search_crm_leads' ? filters : {};
     const read = vi.fn(async (request: Request) => {
       if (name === 'search_crm_leads') expect(Object.fromEntries(new URL(request.url).searchParams)).toEqual({ ...filters, requirement_sqft_min: '10000', requirement_sqft_max: '50000' });
@@ -381,6 +384,8 @@ describe('MCP read-only protocol', () => {
     expect(document.components.schemas.CrmOwnership.required).toContain('secondary_assignee');
     expect(document.components.schemas.CrmOwnership.properties.secondary_assignee.$ref).toBe('#/components/schemas/CrmText');
     const crm = document.paths['/crm/opportunities'].get.parameters;
+    expect(crm.find(parameter => parameter.name === 'assignee')).toMatchObject({ in: 'query', schema: { type: 'string', maxLength: 80 } });
+    expect(document.paths['/crm/summary'].get.parameters.some(parameter => parameter.name === 'assignee')).toBe(true);
     expect(crm.map(parameter => parameter.name)).toEqual(expect.arrayContaining(['q', 'date_field', 'period', 'date_from', 'date_to', 'sort', 'follow_up_status', 'requirement_sqft_min', 'requirement_sqft_max', 'micro_market', 'lead_source', 'lease_duration', 'industry', 'repeat_client']));
     expect(document.components.schemas.Opportunity.properties).toHaveProperty('source_created_at');
     expect(Object.keys(document.components.schemas.Opportunity.properties)).toEqual(expect.arrayContaining(['budget', 'recorded_value', 'lead_source', 'lease_duration', 'industry_verticals', 'occupancy_timelines', 'preferred_languages', 'repeat_client', 'last_note_at', 'last_task_at', 'recorded_follow_up_count']));

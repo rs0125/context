@@ -105,6 +105,19 @@ describe('natural-language business evaluation with current real MCP definitions
     const summary = fixtureResult('crm_summary', query, catalog.tools).data;
     expect(summary.total).toBe(2);
   });
+  it('discovers primary and secondary assignees and counts shared deals once within the selected view', () => {
+    const options = fixtureResult('crm_filters', {}, catalog.tools).data;
+    expect(options).toMatchObject({ assignees: ['ALEX', 'JORDAN', 'SAM', 'TAYLOR'], assignees_truncated: false });
+    const search = (args: Record<string, unknown>) => fixtureResult('search_crm_leads', args, catalog.tools).data.items.map((item: { id: string }) => item.id);
+    expect(search({ assignee: 'SAM' })).toEqual([LEADS[0].id, LEADS[1].id, LEADS[3].id]);
+    expect(search({ assignee: 'SAM', view: 'assigned' })).toEqual([LEADS[0].id, LEADS[3].id]);
+    expect(search({ assignee: 'SAM', view: 'created' })).toEqual([LEADS[1].id]);
+    expect(search({ assignee: 'JORDAN' })).toEqual([LEADS[2].id]);
+    const summary = fixtureResult('crm_summary', { assignee: 'SAM', group_by: 'stage' }, catalog.tools).data;
+    expect(summary.total).toBe(3);
+    expect(summary.groups.reduce((sum: number, group: { count: number }) => sum + group.count, 0)).toBe(3);
+  });
+
   it('matches whole CRM micromarket labels without splitting a comma-separated record', () => {
     const search = (micro_market: string) => fixtureResult('search_crm_leads', { micro_market }, catalog.tools).data.items.map((item: { id: string }) => item.id);
     expect(search(' north, EAST ')).toEqual([LEADS[0].id]);

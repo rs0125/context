@@ -151,6 +151,7 @@ const crmViewParameters = [
 ];
 const crmFilterParameters = [
   ...crmViewParameters,
+  textParameter("assignee", "One exact option from /crm/filters assignees. Matches a primary assignedTo multiselect member OR the complete secondaryAssignee text, case-sensitively after trimming spaces. Each lead counts once even if the person appears in both roles. Narrows the current permitted scope, combines with view and other filters, and does not grant access or match supply owners. Use view=assigned for your own leads."),
   textParameter("q", "Literal case-insensitive substring of permitted lead/company labels. Labels containing contacts or unsupported characters are excluded from text matching; no note-text search."),
   textParameter("city", "Requirement city matches any comma-separated member, ignoring case and spaces; Bangalore/Bengaluru and Gurgaon/Gurugram are aliases. Whole labels withheld by privacy checks are excluded."),
   ...["requirement_sqft_min", "requirement_sqft_max"].map(name => ({ name, in: "query", description: `${name.endsWith("min") ? "Minimum" : "Maximum"} requested requirement area in square feet, inclusive. Recorded ranges match on overlap and approximations are provisional candidates; inspect field_evidence.requirement_sqft and verification_required. Missing or unsupported areas do not match.`, schema: { type: "integer", minimum: 1, maximum: 1_000_000_000 } })),
@@ -180,6 +181,7 @@ const queryContextSchema = {
     date_field: { type: "string" }, period: { type: ["string", "null"], enum: [...DATE_PERIODS, null] },
     date_from: { type: ["string", "null"], format: "date" }, date_to: { type: ["string", "null"], format: "date" },
     start_at: nullableDate, end_before: nullableDate,
+    assignee: { type: ["string", "null"], maxLength: 80, description: "CRM primary-or-secondary assignee filter applied to this query; null means no named-assignee filter." },
     follow_up: { type: ["object", "null"], description: "Resolved follow_up_status window; missing has no date bounds. These bounds also bind dated cursors.", properties: { status: { type: "string", enum: CRM_FOLLOW_UP }, start_at: nullableDate, end_before: nullableDate, timezone: { type: "string", const: "Asia/Kolkata" } } },
     sort: { type: "string" }, returned_count: { type: "integer", minimum: 0 }, has_more: { type: "boolean" },
     date_semantics: { type: "string" }, semantics: { type: "object", additionalProperties: { type: "string" } }, coverage: { type: "string" },
@@ -435,7 +437,7 @@ export function getOpenApiDocument() {
       { name: "Context", description: "Discover the tools and knowledge available to the current employee." },
       { name: "Knowledge", description: "Reviewed Markdown knowledge. Requires knowledge:read." },
       { name: "Warehouses", description: "Permitted warehouse fields. Requires warehouses:read and active dashboard or administrator access in the employee roster." },
-      { name: "CRM", description: "Requires crm:read and an active linked CRM user verified against live Twenty. Employees can read leads they created OR are assigned to. Current members of Twenty's built-in Admin role can read all mirrored leads; WAG dashboard admin status alone grants no such access. Incomplete or failed checks deny access. Mirror facts require a successful opportunity sync within 30 minutes." },
+      { name: "CRM", description: "Requires crm:read and an active employee. Current roster Analysts (including administrators) can read all non-deleted mirrored leads without a linked Twenty identity. Other employees can read leads they created OR are assigned to, using a linked CRM user verified against live Twenty. Personal created/assigned views require that live identity for every role. Named-assignee filters only narrow these permissions. Incomplete or failed checks deny access. Mirror facts require a successful opportunity sync within 30 minutes." },
       { name: "Service", description: "Public service metadata without organisation records." },
       { name: "Analytics", description: "Read-only GA4 and Google Search Console aggregates. Requires analytics:read on the credential AND current Analyst access, inherited by roster administrators. Twenty administrator status alone does not grant analytics access. Sources are pinned by server configuration; clients cannot choose another property or supply Google credentials." },
     ],
@@ -700,13 +702,14 @@ export function getOpenApiDocument() {
       },
       "/crm/filters": {
         get: {
-          operationId: "getCrmFilters", tags: ["CRM"], summary: "Discover permitted CRM cities and query definitions",
-          description: "Returns at most 100 city labels within the requested live employee view, with supported source, duration and industry enums, stages, date fields, periods, sorts, summary dimensions and filter semantics. Category enums describe supported vocabulary, not observed counts or confirmed customer facts. No micromarket vocabulary is returned; micro_market matches a full recorded label from an available lead. A truncated city vocabulary is incomplete; absence of a city does not prove that no record exists. Contacts and note text are excluded.",
+          operationId: "getCrmFilters", tags: ["CRM"], summary: "Discover permitted CRM cities, assignees and query definitions",
+          description: "Returns at most 100 city labels and 100 assignee options within the requested live employee view, with supported source, duration and industry enums, stages, date fields, periods, sorts, summary dimensions and filter semantics. Assignee options are observed primary assignedTo multiselect members and complete secondaryAssignee text values from permitted nondeleted mirrored leads, not every configured Twenty dropdown option. Copy one exact assignee option into search or summary; either role matches and each lead counts once. Category enums describe supported vocabulary, not observed counts or confirmed customer facts. No micromarket vocabulary is returned; micro_market matches a full recorded label from an available lead. Truncated vocabularies are incomplete; an absent option does not prove that no record exists. Contacts and note text are excluded.",
           parameters: crmViewParameters,
           responses: jsonResponses("Scoped CRM options and interpretation guidance.", false, {
-            type: "object", required: ["cities", "cities_truncated", "stages", "views", "date_fields", "periods", "sorts", "follow_up_statuses", "summary_groups", "lead_sources", "lease_durations", "industries", "date_semantics", "search_guidance", "filter_guidance", ...crmAccessRequired],
+            type: "object", required: ["cities", "cities_truncated", "assignees", "assignees_truncated", "stages", "views", "date_fields", "periods", "sorts", "follow_up_statuses", "summary_groups", "lead_sources", "lease_durations", "industries", "date_semantics", "search_guidance", "filter_guidance", ...crmAccessRequired],
             properties: {
               cities: { type: "array", maxItems: 100, items: { type: "string" } }, cities_truncated: { type: "boolean" },
+              assignees: { type: "array", maxItems: 100, items: { type: "string", maxLength: 80 }, description: "Primary and secondary assignee options observed in the permitted mirrored leads. Each value is one primary multiselect member or a complete secondary text label." }, assignees_truncated: { type: "boolean" },
               ...Object.fromEntries(Object.entries({ stages: crmStages, views: ["accessible", "created", "assigned"], date_fields: CRM_DATE_FIELDS, periods: DATE_PERIODS, sorts: CRM_SORTS, follow_up_statuses: CRM_FOLLOW_UP, summary_groups: CRM_SUMMARY_GROUPS, lead_sources: CRM_LEAD_SOURCES, lease_durations: CRM_LEASE_DURATIONS, industries: CRM_INDUSTRIES }).map(([field, values]) => [field, { type: "array", items: { type: "string", enum: values } }])),
               date_semantics: { type: "string" }, search_guidance: { type: "string" }, filter_guidance: { type: "string" }, ...crmAccessProperties,
             },

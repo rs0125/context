@@ -99,6 +99,7 @@ describe('CRM task queries', () => {
     ['micro_market', 'North', 'South'], ['lead_source', 'OUTREACH', 'BROKER'],
     ['lease_duration', 'LONG_TERM', 'SHORT_TERM'], ['industry', 'FMCG', 'MANUFACTURING'],
     ['repeat_client', 'true', 'false'],
+    ['assignee', 'ALEX', 'SAM'],
   ])('binds %s to the search cursor rather than silently changing the candidate set', async (name, initial, changed) => {
     const db = database([{ opportunity_id: id }, { opportunity_id: id2 }]);
     const query = new URLSearchParams({ [name]: initial, limit: '1' });
@@ -221,5 +222,58 @@ describe('scoped CRM aggregates and discovery', () => {
     expect(db.query.mock.calls[0][0]).toContain('regexp_split_to_table(CASE WHEN btrim(o.city)');
     expect(db.query.mock.calls[0][0]).not.toContain("regexp_split_to_table(o.city, ',')");
     expect(db.query.mock.calls[0][1]).toEqual([[id, id2]]);
+  });
+});
+
+describe('named primary and secondary CRM assignees', () => {
+  it('combines a named assignee with the employee view and binds it for search and summary', async () => {
+    const assignee = "O'HARE_TEAM";
+    for (const mode of ['search', 'summary'] as const) {
+      const db = database(mode === 'search' ? [] : [{ total: 0, groups: [] }]);
+      const query = new URLSearchParams({ view: 'created', assignee: ` ${assignee} `, stage: 'NEW_LEAD' });
+      expect(validateCrmQuery(query, mode)).toMatchObject({ view: 'created', assignee });
+      const result = await (mode === 'search' ? searchOpportunities : summarizeOpportunities)(db.client, principal, query, access);
+      const [sql, values] = db.query.mock.calls[0];
+      expect(sql).toContain('o.opportunity_id = ANY($1::text[])');
+      expect(sql).toContain("btrim(assignment.value #>> '{}') = $2");
+      expect(sql).toContain("jsonb_typeof(o.data->'assignedTo') = 'array'");
+      expect(sql).toContain("jsonb_typeof(o.data->'secondaryAssignee') = 'string'");
+      expect(sql).toContain('NOT EXISTS');
+      expect(sql).not.toContain(assignee);
+      expect(values.slice(0, 3)).toEqual([[id, id2], assignee, 'NEW_LEAD']);
+      expect(result.query_context.assignee).toBe(assignee);
+    }
+    expect(validateCrmQuery(new URLSearchParams('assigned_to=me&assignee=SAM'))).toMatchObject({ view: 'assigned', assignee: 'SAM' });
+  });
+
+  it.each(['assignee=', 'assignee=%20', 'assignee=ALEX&assignee=SAM', 'assignee=alex%40example.test',
+    'assignee=9876543210', 'assignee=%7B%22name%22%3A%22ALEX%22%7D', `assignee=${'A'.repeat(81)}`])('rejects invalid or ambiguous assignee query %s', async input => {
+    for (const read of [searchOpportunities, summarizeOpportunities]) {
+      const db = database();
+      await expect(read(db.client, principal, new URLSearchParams(input), access)).rejects.toMatchObject({ status: 400 });
+      expect(db.query).not.toHaveBeenCalled();
+    }
+  });
+
+  it('discovers safe assignee options within the same live scope and reports truncation', async () => {
+    const db = database();
+    db.query.mockResolvedValueOnce({ rows: [{ city: 'Bengaluru' }] })
+      .mockResolvedValueOnce({ rows: [{ assignee: 'ALEX' }, { assignee: 'SAM' }, { assignee: 'private@example.test' }] });
+    const result = await getCrmFilterOptions(db.client, principal, new URLSearchParams('view=created'), access);
+    expect(result).toMatchObject({ cities: ['Bengaluru'], assignees: ['ALEX', 'SAM'], assignees_truncated: false });
+    expect(result.filter_guidance).toContain('permitted mirrored leads');
+    for (const [sql, values] of db.query.mock.calls) {
+      expect(sql).toContain('o.opportunity_id = ANY($1::text[])');
+      expect(sql).toContain('o.deleted_at IS NULL');
+      expect(values).toEqual([[id, id2]]);
+    }
+    expect(db.query.mock.calls[1][0]).toContain('ORDER BY assignee ASC LIMIT 101');
+    db.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: Array.from({ length: 101 }, (_, index) => ({ assignee: `TEAM_${index}` })) });
+    const truncated = await getCrmFilterOptions(db.client, principal, new URLSearchParams(), access);
+    expect(truncated.assignees).toHaveLength(100);
+    expect(truncated.assignees_truncated).toBe(true);
+    const denied = database();
+    await expect(getCrmFilterOptions(denied.client, principal, new URLSearchParams(), { mode: 'all', memberId: id })).rejects.toMatchObject({ status: 503 });
+    expect(denied.query).not.toHaveBeenCalled();
   });
 });

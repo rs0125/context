@@ -98,6 +98,31 @@ describe('REST access boundary', () => {
     expect((await handleApiRequest(request(route), route.split('/'), failed)).status).toBe(503);
     expect(failed.query.mock.calls.every(([sql]) => !sql.includes('FROM public.opportunities'))).toBe(true);
   });
+  it.each(['crm/opportunities', 'crm/summary'])('filters %s by assignee while authorizing the current employee view', async route => {
+    const deps = harness();
+    const result = await handleApiRequest(request(`${route}?view=created&assignee=SAM`), route.split('/'), deps);
+    expect(result.status).toBe(200);
+    expect(deps.liveCrmAccess).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ employeeId: 7 }), 'created');
+    expect((await result.json()).data).toMatchObject({ access_scope: 'created', query_context: { assignee: 'SAM' } });
+    const queries = deps.query.mock.calls.filter(([sql]) => sql.includes('FROM public.opportunities'));
+    expect(queries).toHaveLength(1);
+    expect(queries[0][0]).toContain('o.opportunity_id = ANY($1::text[])');
+    expect(queries[0][1]!.slice(0, 2)).toEqual([[], 'SAM']);
+  });
+
+  it('allows roster admins to filter all deals by assignee without impersonating a CRM employee', async () => {
+    const deps = harness({ roster: [{ ...active, adminAccess: true, twenty_user_id: null }] });
+    deps.liveCrmAccess.mockResolvedValue({ mode: 'all', memberId: null });
+    const result = await handleApiRequest(request('crm/summary?assignee=SAM'), ['crm', 'summary'], deps);
+    expect(result.status).toBe(200);
+    expect(deps.liveCrmAccess).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ employeeId: 7, isAnalyst: true, twentyUserId: null }), 'accessible');
+    expect((await result.json()).data).toMatchObject({ access_scope: 'all', query_context: { assignee: 'SAM' } });
+    const [sql, values] = deps.query.mock.calls.find(([text]) => text.includes('FROM public.opportunities'))!;
+    expect(sql).not.toContain('o.opportunity_id = ANY(');
+    expect(sql).toContain('o.deleted_at IS NULL');
+    expect(values![0]).toBe('SAM');
+  });
+
   it('routes warehouse summaries before ID lookup and protects them with warehouse scope', async () => {
     const result = await handleApiRequest(request('warehouses/summary?period=today'), ['warehouses', 'summary'], harness());
     expect(result.status).toBe(200);

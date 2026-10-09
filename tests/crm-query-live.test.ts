@@ -140,6 +140,103 @@ describe.skipIf(process.env.CONTEXT_LIVE_CRM_QUERY_TEST !== '1')('synthetic CRM 
     expect(city.items.map(item => item.id)).toEqual([id(7)]);
   }, 30000);
 
+  it('discovers scoped assignees and counts primary or secondary matches once without malformed primary matches', async () => {
+    const fixture = fixtureFor([
+      record(1, '2026-09-01T00:00:00Z', { data: { assignedTo: [' ALEX ', 'SAM', 'ALEX'], secondaryAssignee: 'ALEX' } }),
+      record(2, '2026-09-02T00:00:00Z', { data: { assignedTo: ['SAM'] } }),
+      record(3, null, { deleted_at: '2026-09-24T00:00:00Z', data: { assignedTo: ['ALEX', 'DELETED_ONLY'] } }),
+      record(4, null, { data: { assignedTo: ['TAYLOR'], secondaryAssignee: 'ALEX', supplyLead: ['SUPPLY_ONLY'] } }),
+      record(5, null, { data: { assignedTo: 'ALEX' } }),
+      record(6, null, { data: { assignedTo: { name: 'ALEX' } } }),
+      record(7, null, { data: { assignedTo: ['ALEX', 123] } }),
+      record(8, null, { data: { assignedTo: ['HIDDEN'] } }),
+      record(9, null, { data: { assignedTo: ['ALEX', 'private@example.test'] } }),
+      record(10, null, { data: { assignedTo: [] } }),
+      record(11, null, { data: { assignedTo: ['ALEXA'] } }),
+      record(12, null, { data: { assignedTo: Array(33).fill('ALEX') } }),
+    ]);
+    const options = await getCrmFilterOptions(fixture, principal, new URLSearchParams(), related);
+    expect(options).toMatchObject({ assignees: ['ALEX', 'ALEXA', 'SAM', 'TAYLOR'], assignees_truncated: false });
+    for (const [assignee, ids] of [['ALEX', [1, 4]], ['SAM', [1, 2]], ['ALEXA', [11]], ['HIDDEN', []], ['alex', []], ['DELETED_ONLY', []], ['SUPPLY_ONLY', []]] as const) {
+      const query = new URLSearchParams({ assignee, group_by: 'stage' });
+      const summary = await summarizeOpportunities(fixture, principal, query, related);
+      query.delete('group_by');
+      const search = await searchOpportunities(fixture, principal, query, related);
+      expect(search.items.map(item => item.id), assignee).toEqual(ids.map(id));
+      expect(summary.total, assignee).toBe(ids.length);
+      expect(summary.query_context.assignee).toBe(assignee);
+    }
+    const allOptions = await getCrmFilterOptions(fixture, principal, new URLSearchParams(), all);
+    expect(allOptions.assignees).toContain('HIDDEN');
+    const paged = new URLSearchParams({ assignee: 'SAM', limit: '1' });
+    const first = await searchOpportunities(fixture, principal, paged, related);
+    paged.set('cursor', first.nextCursor!);
+    const second = await searchOpportunities(fixture, principal, paged, related);
+    expect([...first.items, ...second.items].map(item => item.id)).toEqual([id(1), id(2)]);
+    expect(second.nextCursor).toBeNull();
+    const filtered = await searchOpportunities(fixture, principal, new URLSearchParams({ assignee: 'SAM', date_from: '2026-09-02', date_to: '2026-09-02' }), related);
+    expect(filtered.items.map(item => item.id)).toEqual([id(2)]);
+    const noAccess = await getCrmFilterOptions(fixture, principal, new URLSearchParams(), { ...related, ids: [] });
+    expect(noAccess.assignees).toEqual([]);
+  }, 30000);
+
+  it('includes complete secondary labels with independent validation, deduplication and unchanged employee access', async () => {
+    const fixture = fixtureFor([
+      record(101, null, { data: { secondaryAssignee: ' CASEY ' } }),
+      record(102, null, { data: { assignedTo: ['CASEY', 'CASEY'], secondaryAssignee: 'CASEY' } }),
+      record(103, null, { stage: 'FOLLOW_UP', data: { assignedTo: ['SAM'], secondaryAssignee: 'CASEY' } }),
+      record(104, null, { stage: 'SITE_VISIT', data: { assignedTo: { name: 'CASEY' }, secondaryAssignee: 'CASEY' } }),
+      record(105, null, { data: { assignedTo: ['CASEY'], secondaryAssignee: ['CASEY'] } }),
+      record(106, null, { data: { assignedTo: ['SAM'], secondaryAssignee: ['CASEY'] } }),
+      record(107, null, { data: { assignedTo: ['SAM'], secondaryAssignee: { name: 'CASEY' } } }),
+      record(108, null, { data: { assignedTo: ['SAM'], secondaryAssignee: 123 } }),
+      record(109, null, { data: { assignedTo: ['SAM'], secondaryAssignee: null } }),
+      record(110, null, { data: { assignedTo: ['SAM'], secondaryAssignee: 'CASEY 9876543210' } }),
+      record(111, null, { data: { assignedTo: ['SAM'], secondaryAssignee: 'CASEY, TAYLOR' } }),
+      record(112, null, { data: { assignedTo: [], secondaryAssignee: ' ', supplyLead: ['CASEY'] } }),
+      record(113, null, { deleted_at: '2026-09-24T00:00:00Z', data: { secondaryAssignee: 'CASEY' } }),
+      record(114, null, { data: { secondaryAssignee: 'CASEY' } }),
+      record(115, null, { data: { secondaryAssignee: 'SECONDARY_HIDDEN' } }),
+      record(116, null, { data: { secondaryAssignee: 'ONLY_SECONDARY' } }),
+    ]);
+    const employee = { ...principal, isAnalyst: false };
+    const scoped: CrmAccess = { ...related, ids: [...Array.from({ length: 13 }, (_, i) => id(101 + i)), id(116)] };
+    const options = await getCrmFilterOptions(fixture, employee, new URLSearchParams(), scoped);
+    expect(options.assignees).toEqual(['CASEY', 'CASEY, TAYLOR', 'ONLY_SECONDARY', 'SAM']);
+    const summary = await summarizeOpportunities(fixture, employee, new URLSearchParams('assignee=CASEY'), scoped);
+    expect(summary.total).toBe(5);
+    expect(summary.groups).toEqual([{ value: 'NEW_LEAD', count: 3 }, { value: 'FOLLOW_UP', count: 1 }, { value: 'SITE_VISIT', count: 1 }]);
+    const seen: string[] = [];
+    const query = new URLSearchParams('assignee=CASEY&limit=2');
+    for (let page = 0; page < 3; page++) {
+      const result = await searchOpportunities(fixture, employee, query, scoped);
+      seen.push(...result.items.map(item => item.id));
+      if (!result.nextCursor) break;
+      query.set('cursor', result.nextCursor);
+    }
+    expect(seen).toEqual([101, 102, 103, 104, 105].map(id));
+    for (const [assignee, expected] of [['ONLY_SECONDARY', [116]], ['CASEY, TAYLOR', [111]], ['SECONDARY_HIDDEN', []], ['TAYLOR', []]] as const) {
+      const result = await searchOpportunities(fixture, employee, new URLSearchParams({ assignee }), scoped);
+      expect(result.items.map(item => item.id), assignee).toEqual(expected.map(id));
+    }
+    const admin = await summarizeOpportunities(fixture, principal, new URLSearchParams('assignee=CASEY'), all);
+    expect(admin.total).toBe(6);
+    const adminOptions = await getCrmFilterOptions(fixture, principal, new URLSearchParams(), all);
+    expect(adminOptions.assignees).toContain('SECONDARY_HIDDEN');
+    await expect(summarizeOpportunities(fixture, employee, new URLSearchParams('assignee=CASEY'), all)).rejects.toMatchObject({ status: 503, code: 'CRM_AUTHORIZATION_UNAVAILABLE' });
+  }, 30000);
+
+  it('caps dynamically discovered assignee options independently of city options', async () => {
+    const fixture = fixtureFor(Array.from({ length: 102 }, (_, index) => record(index + 1, null,
+      { data: index % 2 === 0 ? { assignedTo: [`TEAM_${String(index).padStart(3, '0')}`] } : { secondaryAssignee: `TEAM_${String(index).padStart(3, '0')}` } })));
+    const options = await getCrmFilterOptions(fixture, principal, new URLSearchParams(), all);
+    expect(options.assignees).toHaveLength(100);
+    expect(options.assignees[0]).toBe('TEAM_000');
+    expect(options.assignees[99]).toBe('TEAM_099');
+    expect(options.assignees_truncated).toBe(true);
+    expect(options.cities_truncated).toBe(false);
+  }, 10000);
+
   it.each(CRM_DATE_FIELDS)('uses native %s instants with inclusive India dates, excluding missing and denied rows', async field => {
     const query = { date_field: field, date_from: '2026-09-01', date_to: '2026-09-30' };
     const response = await searchOpportunities(fixtureClient, principal, new URLSearchParams({ ...query, limit: '25' }), related);

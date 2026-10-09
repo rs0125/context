@@ -159,7 +159,7 @@ export const CRM_SORTS = ['id_asc', 'created_desc', 'created_asc', 'updated_desc
 export const CRM_FOLLOW_UP = ['overdue', 'today', 'upcoming', 'missing'] as const;
 export const CRM_SUMMARY_GROUPS = ['stage', 'city', 'priority', 'lead_source', 'lease_duration'] as const;
 const CRM_DATES: Record<string, string> = { created: 'o.twenty_created_at', updated: 'o.twenty_updated_at', meaningful_update: 'o.last_meaningful_update_at', follow_up: 'o.next_follow_up', last_contacted: 'o.last_contacted', stage_entered: 'o.stage_entered_at' };
-const CRM_FILTERS = ['city', 'stage', 'view', 'assigned_to', 'q', 'active_only', 'priority_min', 'follow_up_status',
+const CRM_FILTERS = ['city', 'stage', 'view', 'assigned_to', 'assignee', 'q', 'active_only', 'priority_min', 'follow_up_status',
   'requirement_sqft_min', 'requirement_sqft_max', 'micro_market', 'lead_source', 'lease_duration', 'industry', 'repeat_client', ...TEMPORAL_PARAMETER_NAMES];
 const CRM_DATE_GUIDANCE = 'created uses Twenty creation time, not mirror insertion time. updated is the Twenty row update clock and may include automation writes. meaningful_update is the tracked activity clock, not a full history. stage_entered is the recorded current-stage start time for TAT. view=created means created by you. Missing dates are excluded by date filters. Calendar dates use Asia/Kolkata; date_to is inclusive; SQL end_before is exclusive.';
 
@@ -171,7 +171,7 @@ function sqlText(value: string) { return `'${value.replaceAll("'", "''")}'`; }
  * grammar accepts ordinary company/location labels and rejects contacts before
  * matching or aggregation; sanitizeLabel remains the final output boundary.
  */
-function safeCrmLabelSql(column: 'o.name' | 'o.company_name' | 'o.city' | "o.data->>'microMarket'", maximum = 100) {
+function safeCrmLabelSql(column: 'o.name' | 'o.company_name' | 'o.city' | "o.data->>'microMarket'" | "o.data->>'secondaryAssignee'" | "assignment.value #>> '{}'", maximum = 100) {
   const raw = `btrim(${column})`;
   const allowed = sqlText(`^[A-Za-z0-9 .,'()&/_–—-]{1,${maximum}}$`);
   const contacts = sqlText('https?:|www[.]|mailto:|tel:|wa[.]me|whatsapp|contact[[:space:]]*(me|us|number)|call[[:space:]]*(me|us|on)');
@@ -184,6 +184,21 @@ const SAFE_NAME = safeCrmLabelSql('o.name');
 const SAFE_COMPANY = safeCrmLabelSql('o.company_name');
 const SAFE_CITY = safeCrmLabelSql('o.city', 80);
 const SAFE_MICRO_MARKET = safeCrmLabelSql("o.data->>'microMarket'");
+const SAFE_ASSIGNEE_LABEL = safeCrmLabelSql("assignment.value #>> '{}'", 80);
+// Keep malformed multiselects out of both discovery and filtering. The nested
+// CASE prevents array operations on scalars; names never establish access.
+const SAFE_PRIMARY_ASSIGNEES = `CASE WHEN jsonb_typeof(o.data->'assignedTo') = 'array' THEN CASE
+  WHEN jsonb_array_length(o.data->'assignedTo') BETWEEN 1 AND ${CRM_ENUM_ARRAY_LIMIT}
+    AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(o.data->'assignedTo') AS assignment(value)
+      WHERE jsonb_typeof(assignment.value) <> 'string' OR (${SAFE_ASSIGNEE_LABEL}) IS NULL)
+  THEN o.data->'assignedTo' ELSE '[]'::jsonb END ELSE '[]'::jsonb END`;
+const SAFE_SECONDARY_ASSIGNEE = safeCrmLabelSql("o.data->>'secondaryAssignee'", 80);
+// Secondary assignment is a single recorded text value, not another multiselect.
+// Validate each field independently so a malformed primary does not hide a valid
+// secondary (or vice versa). EXISTS below counts shared/duplicate roles once.
+const SAFE_ASSIGNEES = `(${SAFE_PRIMARY_ASSIGNEES}) || CASE
+  WHEN jsonb_typeof(o.data->'secondaryAssignee') = 'string' AND (${SAFE_SECONDARY_ASSIGNEE}) IS NOT NULL
+  THEN jsonb_build_array(${SAFE_SECONDARY_ASSIGNEE}) ELSE '[]'::jsonb END`;
 const enumSql = (expression: string, allowed: readonly string[]) =>
   `CASE WHEN ${expression} IN (${allowed.map(sqlText).join(', ')}) THEN ${expression} END`;
 const SAFE_LEAD_SOURCE = enumSql("o.data->>'leadSource'", CRM_LEAD_SOURCES);
@@ -224,6 +239,10 @@ export function validateCrmQuery(query: URLSearchParams, mode: 'search' | 'summa
   if (query.has('assigned_to') && query.get('assigned_to') !== 'me') invalid('assigned_to only supports me');
   const view = query.has('assigned_to') ? 'assigned' : query.get('view') ?? 'accessible';
   if (!['accessible', 'created', 'assigned'].includes(view)) invalid('view must be accessible, created, or assigned');
+  const assignee = query.get('assignee')?.trim() ?? null;
+  if (assignee !== null && (!/^[A-Za-z0-9 .,'()&/_–—-]{1,80}$/.test(assignee) || sanitizeLabel(assignee, 80) !== assignee)) {
+    invalid('assignee must be one complete option from CRM filter discovery, without contacts.');
+  }
   const city = textParameter(query, 'city');
   if (city && sanitizeLabel(city, 80) !== city) invalid('city must be a location label, without contacts.');
   const stage = query.get('stage');
@@ -259,16 +278,18 @@ export function validateCrmQuery(query: URLSearchParams, mode: 'search' | 'summa
   const leaseDuration = category('lease_duration', CRM_LEASE_DURATIONS);
   const industry = category('industry', CRM_INDUSTRIES);
   const repeatClient = category('repeat_client', ['true', 'false']);
-  return { view: view as CrmView, city, stage, cursor, limit, sort, q, active: active === 'true', priority, followUp, dates, groupBy, groupLimit,
+  return { view: view as CrmView, assignee, city, stage, cursor, limit, sort, q, active: active === 'true', priority, followUp, dates, groupBy, groupLimit,
     areaMin, areaMax, microMarket, leadSource, leaseDuration, industry, repeatClient };
 }
 
 function crmQuery(principal: Principal, query: URLSearchParams, access: CrmAccess, mode: 'search' | 'summary' | 'filters' = 'search') {
   const parsed = validateCrmQuery(query, mode);
-  const { city, stage, q, active, priority, followUp, dates, areaMin, areaMax, microMarket, leadSource, leaseDuration, industry, repeatClient } = parsed;
+  const { assignee, city, stage, q, active, priority, followUp, dates, areaMin, areaMax, microMarket, leadSource, leaseDuration, industry, repeatClient } = parsed;
   const values: unknown[] = [];
   const bind = (value: unknown) => { values.push(value); return `$${values.length}`; };
   const where = [crmScope(principal, access, bind)];
+  if (assignee !== null) where.push(`EXISTS (SELECT 1 FROM jsonb_array_elements(${SAFE_ASSIGNEES}) AS assignment(value)
+    WHERE btrim(assignment.value #>> '{}') = ${bind(assignee)})`);
   if (city) {
     const param = bind(city);
     where.push(`EXISTS (SELECT 1 FROM regexp_split_to_table(${SAFE_CITY}, ',') AS location(value) WHERE lower(btrim(location.value)) = lower(${param}) OR (lower(btrim(location.value)) IN ('bangalore','bengaluru') AND lower(${param}) IN ('bangalore','bengaluru')) OR (lower(btrim(location.value)) IN ('gurgaon','gurugram') AND lower(${param}) IN ('gurgaon','gurugram')))`);
@@ -303,7 +324,7 @@ function crmQuery(principal: Principal, query: URLSearchParams, access: CrmAcces
 }
 
 export async function searchOpportunities(client: PoolClient, principal: Principal, query: URLSearchParams, access: CrmAccess) {
-  const { values, bind, where, dates, limit, followUpWindow } = crmQuery(principal, query, access);
+  const { values, bind, where, dates, limit, followUpWindow, assignee } = crmQuery(principal, query, access);
   const pagination = buildPagination(query, { idColumn: 'o.opportunity_id', idType: 'uuid', sortColumns: Object.fromEntries(Object.entries({ created_desc: CRM_DATES.created, created_asc: CRM_DATES.created, updated_desc: CRM_DATES.updated, follow_up_asc: CRM_DATES.follow_up }).map(([name, column]) => [name, `date_trunc('milliseconds', ${column})`])), filterContext: { start_at: dates.start_at, end_before: dates.end_before, follow_up: followUpWindow } }, bind);
   where.push(...pagination.where);
   const result = await client.query<Row>(`SELECT ${OPPORTUNITY_COLUMNS}${pagination.sortColumn ? `, ${pagination.sortColumn} AS sort_value` : ''}
@@ -315,7 +336,7 @@ export async function searchOpportunities(client: PoolClient, principal: Princip
   return {
     items: selected.map(opportunity),
     nextCursor: hasMore && last ? pagination.cursorFor({ id: String(last.opportunity_id), sort_value: last.sort_value }) : null,
-    query_context: { ...dates, follow_up: followUpWindow, sort: pagination.sort, returned_count: selected.length, has_more: hasMore, date_semantics: CRM_DATE_GUIDANCE, field_semantics: CRM_FIELD_GUIDANCE },
+    query_context: { ...dates, assignee, follow_up: followUpWindow, sort: pagination.sort, returned_count: selected.length, has_more: hasMore, date_semantics: CRM_DATE_GUIDANCE, field_semantics: CRM_FIELD_GUIDANCE },
   };
 }
 
@@ -323,7 +344,7 @@ const SAFE_CITY_GROUP = `CASE WHEN lower(${SAFE_CITY}) IN ('bangalore','bengalur
   WHEN lower(${SAFE_CITY}) IN ('gurgaon','gurugram') THEN 'Gurugram' ELSE lower(${SAFE_CITY}) END`;
 
 export async function summarizeOpportunities(client: PoolClient, principal: Principal, query: URLSearchParams, access: CrmAccess) {
-  const { values, bind, where, dates, groupBy, groupLimit, followUpWindow } = crmQuery(principal, query, access, 'summary');
+  const { values, bind, where, dates, groupBy, groupLimit, followUpWindow, assignee } = crmQuery(principal, query, access, 'summary');
   const expressions: Record<string, string> = { stage: groupBy === 'stage' ? `CASE WHEN o.stage = ANY(${bind(ALL_STAGES)}::text[]) THEN o.stage END` : 'NULL', city: SAFE_CITY_GROUP, priority: "CASE WHEN o.priority ~ '^RATING_[1-5]$' THEN o.priority END",
     lead_source: SAFE_LEAD_SOURCE, lease_duration: SAFE_LEASE_DURATION };
   const result = await client.query<Row>(`WITH grouped AS (
@@ -349,16 +370,20 @@ export async function summarizeOpportunities(client: PoolClient, principal: Prin
   const other = total - groups.reduce((sum, group) => sum + group.count, 0);
   if (other < 0) throw new HttpError(503, 'CRM_DATA_UNAVAILABLE', 'The CRM summary could not be verified.');
   return { total, group_by: groupBy, groups, groups_truncated: allGroups.length > groupLimit, other_count: other,
-    query_context: { ...dates, follow_up: followUpWindow, date_semantics: CRM_DATE_GUIDANCE, field_semantics: CRM_FIELD_GUIDANCE, coverage: 'All currently permitted, nondeleted mirrored leads matching the filters. Null groups combine missing or withheld labels. Counts are not limited to a search page. City summaries keep multi-city labels together so each lead counts once; city search matches any comma-separated city.' } };
+    query_context: { ...dates, assignee, follow_up: followUpWindow, date_semantics: CRM_DATE_GUIDANCE, field_semantics: CRM_FIELD_GUIDANCE, coverage: 'All currently permitted, nondeleted mirrored leads matching the filters. Null groups combine missing or withheld labels. Counts are not limited to a search page. Each matching lead counts once, including leads with multiple assignees. City summaries keep multi-city labels together so each lead counts once; city search matches any comma-separated city.' } };
 }
 
 export async function getCrmFilterOptions(client: PoolClient, principal: Principal, query: URLSearchParams, access: CrmAccess) {
   const { values, where } = crmQuery(principal, query, access, 'filters');
   const result = await client.query<Row>(`SELECT DISTINCT ${SAFE_CITY_GROUP.replaceAll('o.city', 'location.value')} AS city FROM public.opportunities o CROSS JOIN LATERAL regexp_split_to_table(${SAFE_CITY}, ',') AS location(value) WHERE ${where.join(' AND ')} ORDER BY city ASC NULLS LAST LIMIT 101`, values);
+  const assignments = await client.query<Row>(`SELECT DISTINCT btrim(assignment.value #>> '{}') AS assignee
+    FROM public.opportunities o CROSS JOIN LATERAL jsonb_array_elements(${SAFE_ASSIGNEES}) AS assignment(value)
+    WHERE ${where.join(' AND ')} ORDER BY assignee ASC LIMIT 101`, values);
   return { cities: result.rows.slice(0, 100).map(row => sanitizeLabel(row.city, 80)).filter((value): value is string => value !== null), cities_truncated: result.rows.length > 100,
+    assignees: assignments.rows.slice(0, 100).map(row => sanitizeLabel(row.assignee, 80)).filter((value): value is string => value !== null), assignees_truncated: assignments.rows.length > 100,
     stages: ALL_STAGES, views: ['accessible', 'created', 'assigned'], date_fields: CRM_DATE_FIELDS, periods: DATE_PERIODS, sorts: CRM_SORTS, follow_up_statuses: CRM_FOLLOW_UP,
     summary_groups: CRM_SUMMARY_GROUPS, lead_sources: CRM_LEAD_SOURCES, lease_durations: CRM_LEASE_DURATIONS, industries: CRM_INDUSTRIES,
-    filter_guidance: 'requirement_sqft_min/max match parsed square-foot requirements, including shorthand and ranges by overlap. Approximate/range candidates need verification; requirement_sqft is populated only for an exact interpretation. Missing or unsupported areas do not match. micro_market matches the complete recorded label, case-insensitively, without splitting commas. industry matches one valid recorded category. repeat_client matches an unambiguous recorded flag. Enum options describe supported values, not populated inventory. No budget/value filters because units and provenance need verification.',
+    filter_guidance: 'assignees lists primary assignedTo multiselect members and complete secondaryAssignee text values observed on permitted mirrored leads in this view, not every configured Twenty dropdown option. Copy one exact value into assignee for search or summary; matching is case-sensitive after trimming spaces and checks either assignment field. Secondary text is one complete label, never split into inferred names. Each matching lead counts once, even when the person appears in both roles. assignee narrows the current access scope and can combine with view; it does not select another employee identity or match supply owners. Missing or malformed fields do not match; a valid value in the other assignment field can still match. A truncated list is incomplete. requirement_sqft_min/max match parsed square-foot requirements, including shorthand and ranges by overlap. Approximate/range candidates need verification; requirement_sqft is populated only for an exact interpretation. Missing or unsupported areas do not match. micro_market matches the complete recorded label, case-insensitively, without splitting commas. industry matches one valid recorded category. repeat_client matches an unambiguous recorded flag. Enum options describe supported values, not populated inventory. No budget/value filters because units and provenance need verification.',
     field_semantics: CRM_FIELD_GUIDANCE, date_semantics: CRM_DATE_GUIDANCE, search_guidance: 'q searches permitted lead and company labels only; labels containing contacts or unsupported characters do not participate in text search. City matches a comma-separated member, with Bangalore/Bengaluru and Gurgaon/Gurugram aliases. All filters combine with AND. active_only=true excludes closed, lost, on-hold and irrelevant stages. Follow-ups become overdue on the next India calendar day. No contacts or note-text search.' };
 }
 

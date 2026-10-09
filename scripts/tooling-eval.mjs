@@ -70,6 +70,8 @@ export const LEADS = Object.freeze([
   budget: index === 0 ? { kind: 'exact', value: 25, min: null, max: null, currency: null, period: null, area_basis: null, verification_required: true } : null,
   recorded_value: index === 0 ? { amount_micros: '0', amount: '0', currency_code: null, verification_required: true } : null,
 };
+  record.ownership.assigned_to = { state: 'present', values: [['ALEX', 'SAM'], ['SAM'], ['ALEX', 'TAYLOR'], ['ALEX'], ['ALEX']][index], redacted: false };
+  record.ownership.secondary_assignee = maskedText(['SAM', null, 'JORDAN', 'SAM', null][index]);
   record.field_evidence = Object.fromEntries(['lead_source', 'lease_duration', 'industry_verticals', 'occupancy_timelines', 'preferred_languages', 'repeat_client', 'budget', 'recorded_value'].map(field => [field, { state: record[field] === null ? 'missing' : 'parsed', source: null }]));
   record.field_evidence.requirement_sqft = { state: record.requirement_sqft === null ? 'missing' : 'parsed', source: null, kind: record.requirement_sqft === null ? 'unknown' : 'exact', value: record.requirement_sqft, min: null, max: null, verification_required: true };
   record.verification_required = record.field_evidence.requirement_sqft.state !== 'missing' || record.budget !== null || record.recorded_value !== null || Object.values(record.field_evidence).some(field => field.state === 'unsupported');
@@ -185,6 +187,7 @@ function filterRecords(name, args) {
     if (args.requirement_sqft_min !== undefined && args.requirement_sqft_max !== undefined && args.requirement_sqft_min > args.requirement_sqft_max) fail('INVALID_AREA_FILTER');
     if (args.view === 'created') items = items.filter(item => item.created_by_self);
     if (args.view === 'assigned') items = items.filter(item => item.assigned_to_self);
+    if (args.assignee !== undefined) items = items.filter(item => item.ownership.assigned_to.values?.includes(args.assignee.trim()) || item.ownership.secondary_assignee.text === args.assignee.trim());
     if (args.q) items = items.filter(item => `${item.name} ${item.company_name}`.toLowerCase().includes(args.q.trim().toLowerCase()));
     if (args.stage) items = items.filter(item => item.stage === args.stage);
     if (args.active_only === 'true') items = items.filter(item => !['DEAL_CLOSED', 'DEAL_LOST', 'DEAL_ON_HOLD', 'RFQ_NOT_RELEVANT'].includes(item.stage));
@@ -247,7 +250,7 @@ export function fixtureResult(name, args = {}, catalog = [], options = {}) {
   if (catalog.length && (!tool || !matchesSchema(args, tool.inputSchema))) fail('INVALID_TOOL_ARGUMENTS');
   // Fail explicitly rather than pretending this small fixture understands every
   // production filter. These failures are evaluated, never silently ignored.
-  const supported = new Set(['city', 'state', 'q', 'stage', 'view', 'active_only', 'priority_min', 'follow_up_status', 'date_field', 'period', 'date_from', 'date_to', 'sort', 'limit', 'cursor', 'group_by', 'group_limit', 'docks_min', 'docks_max', 'clear_height_min_ft', 'clear_height_max_ft', 'include_unknown', 'match_mode', 'id', 'response_format', 'requirement_sqft_min', 'requirement_sqft_max', 'micro_market', 'lead_source', 'lease_duration', 'industry', 'repeat_client', 'section']);
+  const supported = new Set(['city', 'state', 'q', 'stage', 'view', 'assignee', 'active_only', 'priority_min', 'follow_up_status', 'date_field', 'period', 'date_from', 'date_to', 'sort', 'limit', 'cursor', 'group_by', 'group_limit', 'docks_min', 'docks_max', 'clear_height_min_ft', 'clear_height_max_ft', 'include_unknown', 'match_mode', 'id', 'response_format', 'requirement_sqft_min', 'requirement_sqft_max', 'micro_market', 'lead_source', 'lease_duration', 'industry', 'repeat_client', 'section']);
   if (Object.keys(args).some(key => !supported.has(key))) fail('FIXTURE_UNSUPPORTED_FILTER');
   if (options.failure === 'revoked_access' || (options.failure === 'crm_outage' && /^(?:crm_|search_crm_|read_crm_)/.test(name))) {
     return { source_path: resultPath(name, args), status: options.failure === 'revoked_access' ? 401 : 503,
@@ -262,7 +265,8 @@ export function fixtureResult(name, args = {}, catalog = [], options = {}) {
     const searchSchema = catalog.find(entry => entry.name === 'search_crm_leads')?.inputSchema?.properties;
     const vocabulary = (field, fallback) => clone(searchSchema?.[field]?.enum ?? fallback);
     const visible = LEADS.filter(lead => args.view === 'created' ? lead.created_by_self : args.view === 'assigned' ? lead.assigned_to_self : true);
-    data = { cities: [...new Set(visible.map(lead => lead.city))].sort(), cities_truncated: false, stages,
+    data = { cities: [...new Set(visible.map(lead => lead.city))].sort(), cities_truncated: false,
+      assignees: [...new Set(visible.flatMap(lead => [...(lead.ownership.assigned_to.values ?? []), ...(lead.ownership.secondary_assignee.text ? [lead.ownership.secondary_assignee.text] : [])]))].sort(), assignees_truncated: false, stages,
       date_fields: ['created', 'updated', 'meaningful_update', 'follow_up', 'last_contacted', 'stage_entered'], periods: ['today', 'yesterday', 'tomorrow', 'this_month', 'last_month'], sorts: ['id_asc', 'created_desc', 'created_asc', 'follow_up_asc'],
       lead_sources: vocabulary('lead_source', ['WEBSITE_SEO', 'BROKER', 'EXISTING_CLIENT']), lease_durations: vocabulary('lease_duration', ['LONG_TERM', 'SHORT_TERM']), industries: vocabulary('industry', ['OPT3PL_LOGISTICS', 'FMCG', 'D2C_E_COMMERCE', 'MANUFACTURING']),
       summary_groups: ['stage', 'city', 'priority', 'lead_source', 'lease_duration'], filter_guidance: 'All supplied filters combine with AND. Requirement bounds are inclusive; unknown values do not match. Micromarket matches the full recorded label, without splitting commas. Source, duration and industry enums describe supported vocabulary, not observed counts.', ...crmAccess(args, options) };
