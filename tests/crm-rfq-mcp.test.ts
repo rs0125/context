@@ -23,6 +23,13 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllEnvs());
 describe('RFQ-only scope and MCP contract', () => {
+  it.each(['界', '\u0001'])('passes a full JSON-encoded 32K %j brief through MCP without altering its hash', async character => {
+    const input = { ...args, raw_text: 'Save this requirement.\n'.padEnd(32_000, character) };
+    const crmRfq = vi.fn(async (_input: unknown) => ({ operation_id: input.operation_id, outcome: 'created' as const, code: 'CRM_RFQ_CREATED', message: 'Saved.' }));
+    const response = await wire(await handleMcpRequest(rpc('tools/call', { name: 'create_crm_rfq', arguments: input }), { authenticate: async () => key(), crmRfq }));
+    expect(crmRfq.mock.calls[0][0]).toEqual(input);
+    expect(response.result.structuredContent.meta.argumentsSha256).toBe(argumentsSha256(input));
+  });
   it('adds supported syntax without granting reads, general CRM writes, or default writes', () => {
     expect(SCOPES).toContain('crm.rfq:write'); expect(SCOPES).not.toContain('crm:write'); expect(READ_SCOPES).not.toContain('crm.rfq:write');
     const row = { dashboardAccess: true, adminAccess: true, analystAccess: true, twenty_user_id: null };

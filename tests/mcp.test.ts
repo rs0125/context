@@ -463,7 +463,7 @@ describe('MCP read-only protocol', () => {
   });
   it('bounds JSON payloads, rejects writes outside the protocol and avoids idle streams', async () => {
     const deps = { authenticate: async () => key(), read: vi.fn() };
-    expect((await handleMcpRequest(rpc('tools/call', { large: 'a'.repeat(33000) }), deps)).status).toBe(413);
+    expect((await handleMcpRequest(rpc('tools/call', { large: 'a'.repeat(256 * 1024 + 1) }), deps)).status).toBe(413);
     expect((await handleMcpRequest(new Request(`${origin}/mcp`, { method: 'DELETE' }), deps)).status).toBe(405);
     expect((await handleMcpRequest(new Request(`${origin}/mcp`), deps)).status).toBe(405);
     const cors = await handleMcpRequest(new Request(`${origin}/mcp`, { method: 'OPTIONS', headers: { Origin: 'https://claude.ai' } }), deps);

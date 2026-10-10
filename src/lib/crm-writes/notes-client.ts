@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Principal } from '../auth';
 import { HttpError } from '../errors';
-import { crmWriteConnectionConfiguration, verifyCrmCreator } from './client';
+import { crmWriteConnectionConfiguration, verifyCrmCreator, MAX_RFQ_RESPONSE_BYTES } from './client';
 import type { CrmCreator } from './rfq';
 import { rfqVersionSchema } from './changes';
 import { noteContentSchema, noteLiveSchema, type NoteContent, type NoteLive } from './notes';
@@ -73,17 +73,17 @@ export function verifiedPlainNote(record: z.infer<typeof noteLiveSchema>): NoteC
   return content.data;
 }
 
-async function json(response: Response): Promise<unknown> {
+async function json(response: Response, limit = 128_000): Promise<unknown> {
   if (response.redirected || !response.body) unavailable();
   const length = response.headers.get('content-length');
-  if (length !== null && (!/^\d+$/.test(length) || Number(length) > 128_000)) { await response.body.cancel(); unavailable(); }
+  if (length !== null && (!/^\d+$/.test(length) || Number(length) > limit)) { await response.body.cancel(); unavailable(); }
   const reader = response.body.getReader(), chunks: Uint8Array[] = [];
   let size = 0;
   try {
     while (true) {
       const part = await reader.read(); if (part.done) break;
       size += part.value.byteLength;
-      if (size > 128_000) { await reader.cancel(); unavailable(); }
+      if (size > limit) { await reader.cancel(); unavailable(); }
       chunks.push(part.value);
     }
     return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
@@ -127,7 +127,7 @@ export class CrmNoteClient {
       const response = await this.request(`/rest/opportunities/${parsed}?depth=0`, 'GET', signal);
       if (!response.ok) { await response.body?.cancel(); unavailable(); }
       const data = z.object({ data: z.object({ opportunity: z.object({ id: uuid, name: z.string().min(1).max(500),
-        updatedAt: rfqVersionSchema, deletedAt: z.null() }) }) }).parse(await json(response));
+        updatedAt: rfqVersionSchema, deletedAt: z.null() }) }) }).parse(await json(response, MAX_RFQ_RESPONSE_BYTES));
       if (!sameId(data.data.opportunity.id, parsed)) unavailable();
       return data.data.opportunity;
     } catch { unavailable(); }

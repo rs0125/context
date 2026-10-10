@@ -43,6 +43,16 @@ function fixture() {
   return { deps, actor, crm, stored: () => stored, call: (input: unknown = args, signal = new AbortController().signal, revalidate = async () => {}) => executeCrmRfq(input, key, signal, revalidate, deps) };
 }
 describe('RFQ dispatch and recovery boundary', () => {
+  it('creates a 32K verbatim description and replays the same operation without another write', async () => {
+    const f = fixture();
+    const input = { ...args, raw_text: 'Save this requirement.\n'.padEnd(32_000, '界') };
+    expect(await f.call(input)).toMatchObject({ outcome: 'created' });
+    expect(f.crm.create.mock.calls[0][0].description).toBe(input.raw_text);
+    expect(await f.call(input)).toMatchObject({ outcome: 'replayed' });
+    expect(f.crm.create).toHaveBeenCalledOnce();
+    expect(await f.call({ ...input, raw_text: input.raw_text + 'x' })).toMatchObject({ outcome: 'not_dispatched' });
+    expect(f.crm.create).toHaveBeenCalledOnce();
+  });
   afterEach(() => { vi.unstubAllGlobals(); });
   it('commits a receipt and preserves raw description; retries only replay the receipt', async () => {
     const f = fixture();

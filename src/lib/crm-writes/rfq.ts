@@ -13,7 +13,7 @@ const optionalText = () => z.string().trim().nullable().optional();
 const quote = optionalText().describe('Optional supporting excerpt from raw_text. Do not spend extra turns collecting evidence for an optional classification.');
 export const rfqInputSchema = z.object({
   operation_id: z.string().uuid().describe('Stable operation UUID. Persist before dispatch and reuse unchanged on recovery. Never replace an uncertain operation.'),
-  raw_text: z.string().min(1).max(3000).regex(/^[^\x00]+$/).describe('Entire original user RFQ message, verbatim, including whitespace and #twenty tags. This becomes the CRM description; never summarize or rewrite it. For multiple selected messages join their complete texts with two newlines in source order.'),
+  raw_text: z.string().min(1).max(32_000).regex(/^[^\x00]+$/).describe('Entire original user RFQ message, verbatim, including whitespace and #twenty tags. This becomes the CRM description; never summarize or rewrite it. For multiple selected messages join their complete texts with two newlines in source order.'),
   location: optionalText().describe('Optional location wording from the brief: city, locality, corridor or alternatives. Omit if unknown; never require it before saving the original brief.'),
   requirement: optionalText().describe('Optional space/capacity wording from the brief, including any range, bound or approximation. Informal or incomplete wording is fine; omit if unclear. No quantified size or unit is required to save the brief.'),
   city: optionalText().describe('City explicitly supplied in raw_text; omit if only a locality/corridor is known.'),

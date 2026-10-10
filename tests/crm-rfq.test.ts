@@ -8,6 +8,13 @@ export const rfq: RfqInput = { operation_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbb
   location: 'Hoskote', requirement: '5,000 sqft', company_name: 'Acme', budget: 'Rs 20/sqft/month' };
 
 describe('RFQ intake SOP and Twenty schema', () => {
+  it.each(['x', '界', '\u0001'])('preserves a full 32K source including %j and rejects overflow without truncating', character => {
+    const raw_text = 'Save this brief.\n'.padEnd(31_999, character) + '\n';
+    const input = rfqInputSchema.parse({ operation_id: rfq.operation_id, raw_text });
+    expect(rfqPayload(input, creator).description).toBe(raw_text);
+    expect(rfqInputSchema.safeParse({ ...input, raw_text: raw_text + 'x' }).success).toBe(false);
+    expect(rfqInputSchema.safeParse({ ...input, raw_text: raw_text.slice(1) + '\0' }).success).toBe(false);
+  });
   it.each([
     '  Save this lead: needs a small godown, area and location still being discussed.\nParking for two trucks.\n#twenty\n',
     'Client ko office aur godown chahiye. Size baad mein confirm karenge.\nSupply POC: Meera',

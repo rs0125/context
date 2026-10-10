@@ -16,6 +16,30 @@ const current: RfqLiveRecord = { id, updatedAt: '2026-10-04T10:00:00.000Z', dele
   createdBy: { workspaceMemberId: member.id }, budget: '20 rs/sqft per month' };
 const updated = { ...current, updatedAt: '2026-10-04T10:01:00.000Z', budget: '22 rs/sqft per month' };
 describe('fixed-purpose CRM HTTP adapter', () => {
+  it.each(['界', '\u0001'])('verifies create, read and edit responses containing a full 32K %j description', async character => {
+    const description = 'Full source.\n'.padEnd(32_000, character);
+    const fullPayload = { ...payload, description };
+    const record = { ...current, ...fullPayload };
+    const fetcher = vi.fn<typeof fetch>(async (_url, init) => {
+      if (init?.method === 'POST') return Response.json({ data: { createOpportunity: record } }, { status: 201 });
+      if (init?.method === 'PATCH') return Response.json({ data: { updateOpportunities: [{ ...record, updatedAt: updated.updatedAt, budget: updated.budget }] } });
+      return Response.json({ data: { opportunity: record } });
+    });
+    const crm = new CrmRfqClient(env, fetcher);
+    expect(await crm.create(fullPayload, signal())).toMatchObject({ outcome: 'created', id });
+    expect((await crm.read(id, signal())).description).toBe(description);
+    expect(await crm.update(record, { budget: updated.budget }, signal())).toMatchObject({ outcome: 'updated', record: { description } });
+    expect(JSON.parse(fetcher.mock.calls[0][1]!.body as string).description).toBe(description);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+  it.each(['declared', 'streamed'])('retains uncertainty for a genuinely oversized %s CRM response', async mode => {
+    const fullPayload = { ...payload, description: '界'.repeat(32_000) };
+    const content = JSON.stringify({ data: { createOpportunity: { id, deletedAt: null, ...fullPayload, extra: 'x'.repeat(256 * 1024) } } });
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(content, { status: 201,
+      ...(mode === 'declared' ? { headers: { 'content-length': String(Buffer.byteLength(content)) } } : {}) }));
+    expect(await new CrmRfqClient(env, fetcher).create(fullPayload, signal())).toEqual({ outcome: 'outcome_unknown' });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
   it('uses only the exact POST path without upsert and verifies all requested fields', async () => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json(created(), { status: 201 }));
     expect(await new CrmRfqClient(env, fetcher).create(payload, signal())).toEqual({ outcome: 'created', id });

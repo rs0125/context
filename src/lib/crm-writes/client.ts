@@ -5,6 +5,10 @@ import { HttpError } from '../errors';
 import type { CrmCreator } from './rfq';
 import { RFQ_DETAIL_FIELDS, rfqLiveRecordSchema, type RfqLiveRecord } from './changes';
 
+// Complete RFQ records include the verbatim source, even when only editing a
+// small field. Allow its worst-case JSON encoding without losing write certainty.
+export const MAX_RFQ_RESPONSE_BYTES = 256 * 1024;
+
 export function crmWriteConfiguration(env: Partial<NodeJS.ProcessEnv> = process.env) {
   if (env.CONTEXT_CRM_RFQ_WRITES_ENABLED !== 'true') throw new HttpError(503, 'CRM_WRITES_DISABLED', 'RFQ creation is not enabled.');
   return crmWriteConnectionConfiguration(env);
@@ -94,7 +98,7 @@ export class CrmRfqClient {
         // Only explicit validation/access rejections establish that creation failed.
         return { outcome: [400, 401, 403, 404, 422].includes(response.status) && !response.redirected ? 'rejected' : 'outcome_unknown' };
       }
-      const result = z.object({ data: z.object({ createOpportunity: z.object({ id: z.string().uuid(), deletedAt: z.null() }).passthrough() }) }).parse(await json(response, 64_000));
+      const result = z.object({ data: z.object({ createOpportunity: z.object({ id: z.string().uuid(), deletedAt: z.null() }).passthrough() }) }).parse(await json(response, MAX_RFQ_RESPONSE_BYTES));
       const record = result.data.createOpportunity;
       if (response.status !== 201 || !contains(record, payload)) return { outcome: 'outcome_unknown' };
       const snapshot = rfqLiveRecordSchema.safeParse(record);
@@ -113,7 +117,7 @@ export class CrmRfqClient {
           throw new HttpError(404, 'CRM_RFQ_NOT_FOUND', 'The requested RFQ is no longer available.');
         throw new Error();
       }
-      const result = z.object({ data: z.object({ opportunity: rfqLiveRecordSchema }) }).parse(await json(response, 64_000));
+      const result = z.object({ data: z.object({ opportunity: rfqLiveRecordSchema }) }).parse(await json(response, MAX_RFQ_RESPONSE_BYTES));
       if (result.data.opportunity.id.toLowerCase() !== parsedId.data.toLowerCase()) throw new Error();
       return result.data.opportunity;
     } catch (error) {
@@ -133,7 +137,7 @@ export class CrmRfqClient {
         await response.body?.cancel();
         return rejectedResponse(response);
       }
-      const result = z.object({ data: z.object({ updateOpportunities: z.array(rfqLiveRecordSchema).max(1) }) }).parse(await json(response, 64_000));
+      const result = z.object({ data: z.object({ updateOpportunities: z.array(rfqLiveRecordSchema).max(1) }) }).parse(await json(response, MAX_RFQ_RESPONSE_BYTES));
       if (response.status !== 200) return { outcome: 'outcome_unknown' };
       const record = result.data.updateOpportunities[0];
       if (!record) return { outcome: 'rejected', code: 'CRM_RFQ_VERSION_CONFLICT' };

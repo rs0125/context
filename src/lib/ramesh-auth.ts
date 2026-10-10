@@ -8,6 +8,7 @@ import { consoleOrigin } from './console-auth';
 import { withReadOnlyTransaction } from './db';
 import { HttpError } from './errors';
 import { consumeRameshNonce } from './ramesh-replay';
+import { MAX_MCP_BODY_BYTES } from './mcp-limits';
 
 export const RAMESH_ISSUER = 'wareongo:ramesh';
 export const RAMESH_TYPE = 'ramesh-request+jwt';
@@ -69,7 +70,7 @@ async function employee(client: PoolClient, identity: Claims) {
 
 async function bodyDigest(request: Request) {
   const size = request.headers.get('content-length');
-  if (size !== null && (!/^\d+$/.test(size) || Number(size) > 32768)) throw new HttpError(413, 'BODY_TOO_LARGE', 'MCP request is too large.');
+  if (size !== null && (!/^\d+$/.test(size) || Number(size) > MAX_MCP_BODY_BYTES)) throw new HttpError(413, 'BODY_TOO_LARGE', 'MCP request is too large.');
   const reader = request.body?.getReader();
   if (!reader) throw denied();
   const hash = createHash('sha256'); let bytes = 0;
@@ -84,7 +85,7 @@ async function bodyDigest(request: Request) {
       if (signal.aborted) throw denied();
       if (done) break;
       bytes += value.length;
-      if (bytes > 32768) { void reader.cancel().catch(() => {}); throw new HttpError(413, 'BODY_TOO_LARGE', 'MCP request is too large.'); }
+      if (bytes > MAX_MCP_BODY_BYTES) { void reader.cancel().catch(() => {}); throw new HttpError(413, 'BODY_TOO_LARGE', 'MCP request is too large.'); }
       hash.update(value);
     }
     return hash.digest('base64url');

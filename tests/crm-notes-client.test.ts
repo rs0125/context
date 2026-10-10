@@ -66,6 +66,13 @@ function fixture() {
 }
 
 describe('CRM notes fixed adapter and note editor compatibility', () => {
+  it.each(['界', '\u0001'])('can verify a note’s parent deal with a full 32K %j RFQ description', async character => {
+    const record = { id: dealId, name: 'Test Logistics - Hoskote', updatedAt: version, deletedAt: null,
+      description: 'Save this full brief.\n'.padEnd(32_000, character) };
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ data: { opportunity: record } }));
+    expect(await new CrmNoteClient(env, fetcher).deal(dealId, signal())).toEqual({ id: dealId, name: record.name, updatedAt: version, deletedAt: null });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
   it('uses a separate notes gate and dedicated credential without relying on RFQ activation', async () => {
     expect(crmNotesAvailability(env)).toEqual({ available: true });
     expect(crmNotesAvailability({ ...env, CONTEXT_CRM_NOTES_ENABLED: 'false', CONTEXT_CRM_RFQ_WRITES_ENABLED: 'true' })).toEqual({ available: false });

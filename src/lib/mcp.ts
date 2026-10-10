@@ -1,3 +1,4 @@
+import { MAX_MCP_BODY_BYTES } from './mcp-limits';
 import { toolRegistrar } from './tools/registry';
 import { callCms, cmsAvailability, cmsInputs, cmsEnvelope, cmsWriteOutput, type CmsTool } from './cms-tools';
 import { createMcpHandler } from 'mcp-handler';
@@ -492,7 +493,7 @@ function responseHeaders(request: Request) {
 }
 
 async function boundedBody(request: Request) {
-  const max = 32_768;
+  const max = MAX_MCP_BODY_BYTES;
   const length = request.headers.get('content-length');
   if (length !== null && (!/^\d+$/.test(length) || Number(length) > max)) throw new HttpError(413, 'BODY_TOO_LARGE', 'MCP request is too large.');
   if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') throw new HttpError(415, 'INVALID_CONTENT_TYPE', 'Send an application/json MCP request.');

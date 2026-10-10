@@ -47,6 +47,18 @@ async function signed(options: { claims?: Record<string, unknown>; header?: Reco
 }
 
 describe('Ramesh signed request authentication', () => {
+  it.each(['界', '\u0001'])('authenticates the complete 32K %j source and still rejects a changed digest', async character => {
+    const content = JSON.stringify({ raw_text: 'Save this brief.\n'.padEnd(32_000, character) });
+    expect((await authenticateRameshRequest(await signed({ content }), deps)).employeeId).toBe(23);
+    await expect(authenticateRameshRequest(await signed({ content, claims: { body_sha256: createHash('sha256').update('different').digest('base64url') } }), deps)).rejects.toMatchObject({ code: 'RAMESH_UNAUTHORIZED' });
+  });
+  it.each(['declared', 'streamed'])('rejects an oversized %s body before consuming the signed nonce', async mode => {
+    const content = JSON.stringify({ raw_text: 'x'.repeat(256 * 1024) });
+    const request = await signed({ content });
+    if (mode === 'declared') request.headers.set('content-length', String(Buffer.byteLength(content)));
+    await expect(authenticateRameshRequest(request, deps)).rejects.toMatchObject({ code: 'BODY_TOO_LARGE' });
+    expect(nonces.size).toBe(0);
+  });
   it.each(['crm.rfq:write', 'crm.notes:write'])('requires an explicit %s issuer grant and current linked CRM identity', async scope => {
     registration.scopes = [scope];
     vi.stubEnv('CONTEXT_RAMESH_PUBLIC_KEYS_JSON', JSON.stringify([registration]));
@@ -124,7 +136,7 @@ describe('Ramesh signed request authentication', () => {
     const hmac = await new SignJWT(payload).setProtectedHeader({ alg: 'HS256', typ: 'ramesh-request+jwt', kid: registration.kid })
       .sign(new TextEncoder().encode(JSON.stringify(registration.publicKey)));
     await expect(authenticateRameshRequest(await signed({ token: hmac }), deps)).rejects.toMatchObject({ status: 401 });
-    await expect(authenticateRameshRequest(await signed({ content: 'a'.repeat(32769) }), deps)).rejects.toMatchObject({ status: 413 });
+    await expect(authenticateRameshRequest(await signed({ content: 'a'.repeat(256 * 1024 + 1) }), deps)).rejects.toMatchObject({ status: 413 });
     expect(db.query).not.toHaveBeenCalled(); expect(nonces.size).toBe(0);
   });
   it('supports key overlap and enforces removal, expiry, and the kill switch on in-flight reads', async () => {
