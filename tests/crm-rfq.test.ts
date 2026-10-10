@@ -149,6 +149,29 @@ describe('RFQ intake SOP and Twenty schema', () => {
     expect(rfqProblems(input)).toEqual([]);
     expect(normalizeRfqInput(input)).not.toHaveProperty(field);
   });
+  it.each([['location', 160], ['requirement', 120], ['city', 120], ['micro_market', 160], ['company_name', 120], ['poc_name', 120], ['poc_phone', 40], ['budget', 120]] as const)('accepts an overlong grounded optional %s and omits it instead of truncating', (field, max) => {
+    const value = 'Warehouse '.repeat(max / 10 + 1).trim(), raw_text = `Save this brief.\n${field}: ${value}`;
+    expect(value.length).toBeGreaterThan(max);
+    const input = rfqInputSchema.parse({ operation_id: rfq.operation_id, raw_text, [field]: value });
+    expect(rfqProblems(input)).toEqual([]);
+    expect(rfqPayload(input, creator)).toEqual({ name: 'New RFQ', description: raw_text, stage: 'RFQ_RECEIVED',
+      ownerId: creator.id, createdBy: { source: 'MANUAL', workspaceMemberId: creator.id, name: creator.name } });
+  });
+  it.each([[120, true], [121, false]] as const)('maps a grounded %i-character budget only within its previous limit', (length, kept) => {
+    const budget = 'Rs 20/sqft/month '.padEnd(length, 'x');
+    const input = rfqInputSchema.parse({ operation_id: rfq.operation_id, raw_text: `Budget: ${budget}`, budget });
+    if (kept) expect(rfqPayload(input, creator).budget).toBe(budget);
+    else expect(rfqPayload(input, creator)).not.toHaveProperty('budget');
+  });
+  it('normalizes classification quotes and withholds only a classification whose quote is overlong', () => {
+    const referral = 'Broker referral '.repeat(11).trim(), raw_text = `Repeat client.\nLong\tterm lease. ${referral}`;
+    expect(referral.length).toBeGreaterThan(160);
+    const input = rfqInputSchema.parse({ operation_id: rfq.operation_id, raw_text, lead_source: { value: 'BROKER', quote: referral },
+      lease_duration: { value: 'LONG_TERM', quote: 'Long\u0000term lease' }, repeat_client: { value: true, quote: '\u0007' } });
+    const payload = rfqPayload(input, creator);
+    expect(payload).toMatchObject({ duration: 'LONG_TERM', repeatClient: ['OPTION1'], description: raw_text });
+    expect(payload).not.toHaveProperty('leadSource');
+  });
   it.each(['raw_text', 'operation_id'] as const)('does not allow blank or null required %s', field => {
     for (const value of ['', null]) expect(rfqInputSchema.safeParse({ ...rfq, [field]: value }).success).toBe(false);
   });

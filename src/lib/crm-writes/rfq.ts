@@ -7,19 +7,21 @@ export const RFQ_SCOPE = 'crm.rfq:write' as const;
 export const RFQ_ACTION = 'create_crm_rfq' as const;
 // Creation has no existing value to clear. Empty optional text and null mean
 // omitted, while meaningful placeholders such as "TBD" remain source data.
-const optionalText = (max: number) => z.string().trim().max(max).regex(/^[^\x00-\x1f\x7f]*$/).nullable().optional();
-const quote = optionalText(160).describe('Optional supporting excerpt from raw_text. Do not spend extra turns collecting evidence for an optional classification.');
+// Optional text never rejects a create: rfqEnrichment cleans it and drops
+// values over OPTIONAL_TEXT_LIMITS. Edits keep their own strict schema.
+const optionalText = () => z.string().trim().nullable().optional();
+const quote = optionalText().describe('Optional supporting excerpt from raw_text. Do not spend extra turns collecting evidence for an optional classification.');
 export const rfqInputSchema = z.object({
   operation_id: z.string().uuid().describe('Stable operation UUID. Persist before dispatch and reuse unchanged on recovery. Never replace an uncertain operation.'),
   raw_text: z.string().min(1).max(3000).regex(/^[^\x00]+$/).describe('Entire original user RFQ message, verbatim, including whitespace and #twenty tags. This becomes the CRM description; never summarize or rewrite it. For multiple selected messages join their complete texts with two newlines in source order.'),
-  location: optionalText(160).describe('Optional location wording from the brief: city, locality, corridor or alternatives. Omit if unknown; never require it before saving the original brief.'),
-  requirement: optionalText(120).describe('Optional space/capacity wording from the brief, including any range, bound or approximation. Informal or incomplete wording is fine; omit if unclear. No quantified size or unit is required to save the brief.'),
-  city: optionalText(120).describe('City explicitly supplied in raw_text; omit if only a locality/corridor is known.'),
-  micro_market: optionalText(160).describe('Optional locality/corridor from raw_text, including supplied wording such as Anywhere or TBD.'),
-  company_name: optionalText(120),
-  poc_name: optionalText(120),
-  poc_phone: optionalText(40).describe('Original Indian mobile number excerpt, only when supplied for this RFQ. Common separators and explicit 91/+91/0091 prefixes are accepted. International numbers remain in raw_text; no guessed country code or extensions.'),
-  budget: optionalText(120).describe('Optional budget wording preserving currency, area basis, period and range. Source fragments may be joined with "; ". Omit if unclear; the full terms remain in the description. Never calculate a total deal value.'),
+  location: optionalText().describe('Optional location wording from the brief: city, locality, corridor or alternatives. Omit if unknown; never require it before saving the original brief.'),
+  requirement: optionalText().describe('Optional space/capacity wording from the brief, including any range, bound or approximation. Informal or incomplete wording is fine; omit if unclear. No quantified size or unit is required to save the brief.'),
+  city: optionalText().describe('City explicitly supplied in raw_text; omit if only a locality/corridor is known.'),
+  micro_market: optionalText().describe('Optional locality/corridor from raw_text, including supplied wording such as Anywhere or TBD.'),
+  company_name: optionalText(),
+  poc_name: optionalText(),
+  poc_phone: optionalText().describe('Original Indian mobile number excerpt, only when supplied for this RFQ. Common separators and explicit 91/+91/0091 prefixes are accepted. International numbers remain in raw_text; no guessed country code or extensions.'),
+  budget: optionalText().describe('Optional budget wording preserving currency, area basis, period and range. Source fragments may be joined with "; ". Omit if unclear; the full terms remain in the description. Never calculate a total deal value.'),
   lead_source: z.object({ value: z.enum(CRM_LEAD_SOURCES), quote }).strict().nullable().optional(),
   lease_duration: z.object({ value: z.enum(CRM_LEASE_DURATIONS), quote }).strict().nullable().optional(),
   repeat_client: z.object({ value: z.boolean(), quote }).strict().nullable().optional(),
@@ -35,7 +37,17 @@ export function normalizeRfqInput(input: RfqInput): NormalizedRfqInput {
   return normalized as NormalizedRfqInput;
 }
 
-const layout = (value: string) => value.replace(/\s+/gu, ' ').trim();
+/** Previous input limits for optional text. Longer values are dropped, never truncated; raw_text keeps them. */
+const OPTIONAL_TEXT_LIMITS = { location: 160, requirement: 120, city: 120, micro_market: 160, company_name: 120, poc_name: 120, poc_phone: 40, budget: 120 } as const;
+const QUOTE_LIMIT = 160;
+/** Single-line text: control characters become spaces. Undefined when empty or over max. */
+function cleanText(value: string | undefined, max: number): string | undefined {
+  const clean = value?.replace(/\p{Cc}/gu, ' ').replace(/\s+/gu, ' ').trim();
+  return clean && clean.length <= max ? clean : undefined;
+}
+
+// Same rule as the bot's containsUserText; keep tests/fixtures/source-text-vectors.json identical in both repos.
+const layout = (value: string) => value.normalize('NFC').replace(/[‘’]/gu, "'").replace(/[“”]/gu, '"').toLowerCase().replace(/\s+/gu, ' ').trim();
 /** Whole excerpts, never a suffix of a name, number or decimal. */
 function sourceExcerpts(source: string, excerpt: string) {
   const full = layout(source), part = layout(excerpt), matches: Array<{ before: string; after: string }> = [];
@@ -50,7 +62,7 @@ function sourceExcerpts(source: string, excerpt: string) {
   }
   return matches;
 }
-/** Layout differences are harmless; spelling, punctuation, numbers and units still must match. */
+/** Layout, letter case, Unicode composition and curly quotes are harmless; spelling, punctuation, numbers and units still must match. */
 export function hasSourceExcerpt(source: string, excerpt: string): boolean {
   return sourceExcerpts(source, excerpt).length > 0;
 }
@@ -92,6 +104,11 @@ export function rfqProblems(input: RfqInput): string[] {
 /** Best-effort enrichment only. Unsupported details stay in the original description. */
 function rfqEnrichment(submitted: RfqInput): NormalizedRfqInput {
   const input = normalizeRfqInput(submitted);
+  // After the receipt hash, so historical replays keep their original arguments.
+  for (const field of Object.keys(OPTIONAL_TEXT_LIMITS) as (keyof typeof OPTIONAL_TEXT_LIMITS)[]) {
+    const value = cleanText(input[field], OPTIONAL_TEXT_LIMITS[field]);
+    if (value) input[field] = value; else delete input[field];
+  }
   for (const field of ['location', 'requirement', 'city', 'micro_market', 'company_name', 'poc_name', 'poc_phone'] as const) {
     const value = input[field];
     if (value !== undefined && !hasSourceExcerpt(input.raw_text, value)) delete input[field];
@@ -101,8 +118,9 @@ function rfqEnrichment(submitted: RfqInput): NormalizedRfqInput {
     && !hasCompleteRequirement(input.raw_text, input.requirement)) delete input.requirement;
   if (input.budget && !input.budget.split('; ').every(fragment => hasSourceExcerpt(input.raw_text, fragment))) delete input.budget;
   for (const field of ['lead_source', 'lease_duration', 'repeat_client'] as const) {
-    const evidence = input[field]?.quote;
-    if (evidence && !hasSourceExcerpt(input.raw_text, evidence)) delete input[field];
+    // A blank quote is absent; an overlong or unsupported one withholds only that classification.
+    const evidence = cleanText(input[field]?.quote ?? undefined, Infinity);
+    if (evidence && !(evidence.length <= QUOTE_LIMIT && hasSourceExcerpt(input.raw_text, evidence))) delete input[field];
   }
   if (input.poc_phone && (indianPhone(input.poc_phone) === null || !sourceExcerpts(input.raw_text, input.poc_phone)
     .some(({ before }) => !/(?:\+[\d ().-]*|\b00\d[\d ().-]*|\b91[ ().-]*)$/.test(before))))

@@ -1,0 +1,84 @@
+{
+  "description": "Shared authorship/excerpt matching vectors. Keep identical copies in baileys-ramesh and Context_Engine; both implementations must agree.",
+  "vectors": [
+    {
+      "name": "case difference",
+      "source": "Call Ravi tomorrow at 5pm",
+      "excerpt": "call ravi tomorrow",
+      "expected": true
+    },
+    {
+      "name": "whitespace and line breaks",
+      "source": "Need  25,000 sqft\nin Bhiwandi",
+      "excerpt": "25,000 sqft in Bhiwandi",
+      "expected": true
+    },
+    {
+      "name": "currency and slash",
+      "source": "Budget ₹22/sqft per month",
+      "excerpt": "₹22/sqft",
+      "expected": true
+    },
+    {
+      "name": "curly double quotes",
+      "source": "He said “urgent” twice",
+      "excerpt": "He said \"urgent\"",
+      "expected": true
+    },
+    {
+      "name": "curly apostrophe",
+      "source": "Ravi’s warehouse in Pune",
+      "excerpt": "Ravi's warehouse",
+      "expected": true
+    },
+    {
+      "name": "time with meridiem case",
+      "source": "Meeting at 10:30 AM sharp",
+      "excerpt": "10:30 am",
+      "expected": true
+    },
+    {
+      "name": "devanagari phrase",
+      "source": "कल सुबह रवि को फोन करना",
+      "excerpt": "रवि को फोन",
+      "expected": true
+    },
+    {
+      "name": "possessive boundary",
+      "source": "Ravi's warehouse",
+      "excerpt": "Ravi",
+      "expected": true
+    },
+    {
+      "name": "partial number",
+      "source": "Need 25,000 sqft",
+      "excerpt": "5,000 sqft",
+      "expected": false
+    },
+    {
+      "name": "decimal suffix",
+      "source": "Area 12.5 acres",
+      "excerpt": "5 acres",
+      "expected": false
+    },
+    { "name": "word prefix", "source": "Raviraj called", "excerpt": "Ravi", "expected": false },
+    {
+      "name": "excerpt not present",
+      "source": "Bhiwandi",
+      "excerpt": "Bhiwandi West",
+      "expected": false
+    },
+    {
+      "name": "empty excerpt",
+      "source": "remind me to call Ravi",
+      "excerpt": "",
+      "expected": false
+    },
+    {
+      "name": "whitespace-only excerpt",
+      "source": "remind me to call Ravi",
+      "excerpt": "   ",
+      "expected": false
+    }
+  ]
+}

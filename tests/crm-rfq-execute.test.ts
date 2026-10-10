@@ -185,6 +185,30 @@ describe('RFQ dispatch and recovery boundary', () => {
     expect(await f.call({ ...input, raw_text: input.raw_text + 'Changed brief' })).toMatchObject({ code: 'CRM_OPERATION_CONFLICT' });
     expect(f.crm.create).toHaveBeenCalledOnce();
   });
+  it('creates with a line break inside budget and stores the budget on one line', async () => {
+    const f = fixture();
+    const raw_text = 'Need 5000 sqft in Hoskote\nBudget: Rs 20/sqft\nper month', input = { ...args, raw_text, budget: 'Rs 20/sqft\nper month' };
+    expect(await f.call(input)).toMatchObject({ outcome: 'created', data: { id } });
+    expect(f.crm.create.mock.calls[0][0]).toMatchObject({ budget: 'Rs 20/sqft per month', description: raw_text });
+    expect(await f.call(input)).toMatchObject({ outcome: 'replayed' });
+    expect(f.crm.create).toHaveBeenCalledOnce();
+  });
+  it('creates with a 300-character requirement, omitting it while keeping the complete brief', async () => {
+    const f = fixture();
+    const requirement = '5000 sqft with dock access'.padEnd(300, '.'), raw_text = `Need ${requirement}\n#twenty`;
+    expect(requirement).toHaveLength(300);
+    expect(await f.call({ operation_id: args.operation_id, raw_text, requirement })).toMatchObject({ outcome: 'created', data: { name: 'New RFQ' } });
+    const payload = f.crm.create.mock.calls[0][0];
+    expect(payload).toMatchObject({ name: 'New RFQ', description: raw_text });
+    expect(payload).not.toHaveProperty('requirementInSft');
+  });
+  it('creates with control characters in company_name using the normalized value', async () => {
+    const f = fixture();
+    const raw_text = 'Acme Logistics needs 5000 sqft in Hoskote';
+    expect(await f.call({ ...args, raw_text, company_name: 'Acme\u0000\u0007Logistics' }))
+      .toMatchObject({ outcome: 'created', data: { name: 'Acme Logistics - 5000 sqft - Hoskote' } });
+    expect(f.crm.create.mock.calls[0][0]).toMatchObject({ companyName: 'Acme Logistics', description: raw_text });
+  });
   it('returns the title actually saved when optional extraction could not be used', async () => {
     const f = fixture();
     const input = { operation_id: args.operation_id, raw_text: 'Save this lead. Needs a small godown. Contact +44 (0) 9876543210',
