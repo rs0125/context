@@ -68,7 +68,7 @@ describe('warehouse candidate evidence', () => {
 
   it('never forwards raw JSON, source notes, contacts or unsafe array labels', async () => {
     const { client } = database([{
-      ...row({ dock_count: 'ask contact@example.com', clear_height_ft: 'call the owner named Private Person', asking_rate_per_sqft: '22 negotiable call 9876543210' }),
+      ...row({ dock_count: 'ask contact@example.com', clear_height_ft: 'call the broker named Private Person', asking_rate_per_sqft: '22 negotiable call 9876543210' }),
       address: 'Private Street', contactPerson: 'Private Person', contactNumber: '9876543210',
       micromarkets: ['Nelamangala', 'contact@example.com', 'call 9876543210'], suitable_for: ['FMCG', 'https://private.example'],
       fire_noc_available: null, lift_access: false,
@@ -120,7 +120,8 @@ describe('warehouse query boundary', () => {
     expect(where).toContain('ORDER BY w.id ASC');
     expect(sql).not.toContain("King's Road");
     expect(values).toEqual(['Bangalore', "King's Road", 4, 6, 12, 11]);
-    expect(sql).not.toMatch(/contactPerson|contactNumber|address|googleLocation|uploadedBy|scoutNotes/);
+    expect(sql).toContain('w."contactPerson" END AS owner_name');
+    expect(sql).not.toMatch(/contactNumber|address|googleLocation|uploadedBy|scoutNotes/);
   });
 
   it('keeps strict and unknown controls independent for each numeric constraint', async () => {

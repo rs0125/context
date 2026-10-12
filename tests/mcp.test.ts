@@ -229,6 +229,7 @@ describe('MCP read-only protocol', () => {
   });
   it('keeps concise candidates small without hiding requested unknowns or uncertain measurements', async () => {
     const item = { id: 12, city: 'Bengaluru', image_count: 3, video_count: 0, has_valid_google_maps_id: false, created_at: now.toISOString(), updated_at: now.toISOString(),
+      owner_name: 'Ramesh Mehta', owner_company_name: 'Example Estates',
       dock_count: null, clear_height_ft: 30, power_kva: null, washroom_count: 8, land_type: 'Industrial',
       verification_required: true, field_evidence: {
         dock_count: { kind: 'range', lower: 2, upper: 6 }, clear_height_ft: { kind: 'exact', value: 30 },
@@ -247,9 +248,24 @@ describe('MCP read-only protocol', () => {
     expect(data.items[0]).toMatchObject({ id: 12, image_count: 3, video_count: 0, has_valid_google_maps_id: false, created_at: now.toISOString(), verification_required: true, power_kva: null,
       field_evidence: { dock_count: { kind: 'range', lower: 2, upper: 6 }, power_kva: { kind: 'unknown' }, gate_size_ft: { kind: 'approximate', value: 20 } } });
     expect(data.items[0].land_type).toBe('Industrial');
+    expect(data.items[0]).toMatchObject({ owner_name: 'Ramesh Mehta', owner_company_name: 'Example Estates' });
     expect(data.items[0].field_evidence).not.toHaveProperty('washroom_count');
     const detailed = await wire(await handleMcpRequest(rpc('tools/call', { name: 'search_warehouses', arguments: { ...args, response_format: 'detailed' } }), { authenticate: async () => key(), read }));
     expect(detailed.result.structuredContent.data).toMatchObject({ response_format: 'detailed', items: [item] });
+  });
+  it.each(['search_warehouses', 'warehouse_summary'])('forwards owner-name matching through %s', async name => {
+    const read = vi.fn(async (request: Request) => {
+      expect(new URL(request.url).searchParams.get('owner_name')).toBe('Ramseh');
+      expect(new URL(request.url).searchParams.get('owner_match_mode')).toBe('fuzzy');
+      const data = name === 'search_warehouses' ? { items: [], nextCursor: null }
+        : { total: 0, group_by: 'city', groups: [], groups_truncated: false, other_count: 0 };
+      return Response.json({ data: { ...data, matching_policy: { ...matchingPolicy, owner_name: { query: 'Ramseh', mode: 'fuzzy' } }, query_context: queryContext }, meta });
+    });
+    const body = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: { owner_name: 'Ramseh', owner_match_mode: 'fuzzy' } }),
+      { authenticate: async () => key(), read }));
+    expect(body.result.isError).not.toBe(true);
+    expect(body.result.structuredContent.data.matching_policy.owner_name).toMatchObject({ query: 'Ramseh', mode: 'fuzzy' });
+    expect(read).toHaveBeenCalledOnce();
   });
   it('browses knowledge without a mandatory query and preserves pagination', async () => {
     const read = vi.fn(async (request: Request, path: string[]) => {
@@ -381,6 +397,13 @@ describe('MCP read-only protocol', () => {
   });
   it('documents matching temporal and summary contracts in the REST specification', () => {
     const document = getOpenApiDocument();
+    for (const route of ['/warehouses', '/warehouses/summary'] as const) {
+      const parameters = document.paths[route].get.parameters;
+      expect(parameters.find(parameter => parameter.name === 'owner_name')).toMatchObject({ schema: { type: 'string', maxLength: 80 } });
+      expect(parameters.find(parameter => parameter.name === 'owner_match_mode')).toMatchObject({ schema: { enum: ['auto', 'fuzzy', 'contains', 'exact'], default: 'auto' } });
+    }
+    expect(document.components.schemas.Warehouse.properties).toHaveProperty('owner_name');
+    expect(document.components.schemas.Warehouse.properties).toHaveProperty('owner_company_name');
     expect(document.components.schemas.CrmOwnership.required).toContain('secondary_assignee');
     expect(document.components.schemas.CrmOwnership.properties.secondary_assignee.$ref).toBe('#/components/schemas/CrmText');
     const crm = document.paths['/crm/opportunities'].get.parameters;

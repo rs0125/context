@@ -24,12 +24,13 @@ describe('warehouse unknown measurement provenance', () => {
     },
   );
 
-  it('masks source contacts and names without returning the legacy raw source string', () => {
+  it('retains source owner names while masking contacts without returning the legacy raw source string', () => {
     const evidence = parseWarehouseMeasurement('4 plus 2 docks; owner named Private Person; sales@example.test; 9876543210', 'dock_count');
     expect(evidence).toMatchObject({ kind: 'unknown', recorded_source: { state: 'redacted', redacted: true } });
     expect(evidence.recorded_source?.text).toContain('4 plus 2 docks');
     expect(evidence).not.toHaveProperty('source');
-    expect(JSON.stringify(evidence)).not.toMatch(/Private Person|sales@example|9876543210/);
+    expect(evidence.recorded_source?.text).toContain('owner named Private Person');
+    expect(JSON.stringify(evidence)).not.toMatch(/sales@example|9876543210/);
   });
 
   it('retains exact, approximate and range semantics and their bounded measurement-only source', () => {

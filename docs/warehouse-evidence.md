@@ -26,8 +26,11 @@ no longer collapsed. Exact scalar properties remain null for non-exact values.
 
 Contact masking occurs before truncation. SQL source columns are allowlisted and
 values above 100,000 characters become an unsupported marker. The views exclude
-contact columns, owner identities, private notes, negotiated rent and raw media.
-Recognizable identifying/contact clauses are masked in copied property text;
+phone/email columns, private notes, negotiated rent and raw media. Recorded
+owner/contact-person and owner-company names are returned in `owner_name` and
+`owner_company_name`, including concise results. Owner/landlord names in copied
+property text are retained; detected phones, emails and links remain masked.
+Other recognizable identifying/contact clauses are masked in copied property text;
 this is not a claim of perfect detection of arbitrary personal information.
 
 ## Overview and selective detail
@@ -65,6 +68,44 @@ explicit `include_unknown` overrides that default in either mode. Known numeric
 conflicts still fail the requested numeric filter. Both area bounds must match
 one offered-area option, never the sum of separate options.
 
+`owner_name` searches the recorded contact-person and owner-company columns.
+The default `owner_match_mode=auto` first finds literal and normalized-spacing
+matches within the other supplied filters. It applies typo tolerance only when
+those matches are absent, so a correctly spelled name does not silently expand
+to different, similarly named people. Explicit `fuzzy` includes those approximate
+alternatives; `contains` uses literal partial names and `exact` compares the full
+stored name ignoring case and surrounding spaces.
+
+Fuzzy comparison uses contiguous word windows, joins split names/initials and
+ignores common leading titles (`Mr`, `Mrs`, `Ms`, `Dr`). Similarity is
+`1 - edit_distance / max(query_length, window_length)`, with a **0.75 minimum**,
+**two-edit maximum**, and **five-character minimum** for both query and window.
+An insertion, deletion, substitution or adjacent transposition costs one edit.
+This score measures spelling similarity, not the probability of shared identity.
+No owner names or spelling aliases are hardcoded.
+
+The response's `matching_policy.owner_name` reports the version, thresholds,
+strategy (`literal_first`, `fuzzy_fallback`, or the explicitly requested mode),
+matched-name count and approximate-name count. Up to 20 `candidate_names` include
+the matched spelling, similarity and warehouse count; `candidates_truncated`
+marks a longer list. Case variants share a bucket. These counts can overlap
+between contact and company labels and must not be summed.
+
+When `disambiguation_recommended` is true, show the competing names or ask for a
+fuller name before attributing the total to one owner. This avoids hiding a rare
+intended match behind pages belonging to a prolific similarly named contact.
+Counts cover matched warehouses, not unique or verified legal owners.
+
+The lookup reads only the permitted name columns from all visible rows matching
+the other filters, sanitizes labels, resolves matches, and binds the resulting
+IDs into the ordinary search or summary SQL. Lookup and results share the API's
+repeatable-read transaction. Lookup excludes pagination so subsequent pages do
+not switch strategies as earlier literal hits disappear from the remaining page.
+The bound is 20,000 candidate warehouses; exceeding it returns an explicit request
+to narrow other filters, never a truncated match set. Both matching name columns
+still count one warehouse once. No database extension, migration or name cache
+is needed.
+
 Category and boolean filters remain exact. Do not stack these filters merely
 because a vague request says "fully compliant". Start with reliable geography
 and area, inspect the evidence, and broaden category/locality searches when
@@ -74,6 +115,17 @@ unknown/provisional candidates; they are not confirmed-compliance counts.
 
 Continuation fingerprints now bind the effective matching policy. Pre-change
 cursors require restarting the search rather than changing its population silently.
+
+## Tool matching audit
+
+| Lookup | Current behavior | Appropriate use of fuzzy matching |
+| --- | --- | --- |
+| Warehouse owner/contact or company | Literal/spacing matches first; calibrated fuzzy fallback, with explicit fuzzy/contains/exact modes | Candidate discovery, with names and matching strategy returned for review |
+| Warehouse city and micromarket | Exact category/tag matching, with explicit city aliases | Suggest stored options for misspellings, then filter by selected exact values; the Dashboard already has fuzzy micromarket discovery, but this connector does not |
+| CRM lead/company `q` | Case-insensitive literal substring | Useful future typo-tolerant fallback, preserving visible record IDs and access scope |
+| CRM primary/secondary assignee | Exact discovered option | Suggest similar options first; never combine employees or change access based on name similarity |
+| Knowledge search | Weighted literal substring matches in titles, summaries and bodies | Optional spelling fallback when literal search finds nothing |
+| IDs, permissions, categories, flags, dates and numeric bounds | Explicit comparisons and recorded numeric-evidence policy | Keep exact; numeric permissiveness is not text fuzziness |
 
 ## CRM brief and client orchestration
 
@@ -95,6 +147,39 @@ resolve a specific external gap. Do not export private CRM notes or budgets.
 Public research cannot establish unrecorded site documents or current stock.
 
 ## Validation and rollout
+
+Owner-name calibration on 12 October 2026 (India time) used 2,298 visible
+warehouses and 1,566 distinct permitted contact/company labels. The previous
+one-edit rule retrieved 33 of 66 manually reviewed spelling/spacing comparisons;
+the tuned rule retrieved 58. These were plausible lexical variants within
+anonymous shared-contact groups, not verified owner identities. They exercise
+explicit `fuzzy` mode; `auto` deliberately keeps literal matches when available.
+An 80% threshold retrieved 54 comparisons; allowing three edits at 75% retrieved
+60 but also admitted more competing names. The chosen 75%/two-edit policy keeps
+that tradeoff bounded without storing owner-specific aliases.
+
+Across 1,116 generated single-edit queries based on real labels, 1,109 recovered
+the source name. Three mutations became another existing spelling, so `auto`
+preferred that literal spelling; four exercised the deliberate protection for
+names shorter than five characters. All 1,566 existing labels were checked and
+none caused approximate expansion in `auto`. Generated typos are not user search
+logs, and these results do not measure identity accuracy or real-query precision.
+
+The opt-in `npm run test:warehouse-owner:real` verifies current inventory using a
+read-only repeatable-read snapshot. The final run covered 14 searches and all 92
+result pages: displayed names, complete totals, pagination, company matches,
+candidate-name counts and ambiguity flags agreed with the source. Search-page
+latency was 239 ms median and 387 ms at the 95th percentile in that run. One typo
+matched four labels across 116 warehouses; the response now surfaces that
+ambiguity before attributing the combined count to a single owner. This test
+exercises the database query functions, not a deployed endpoint or model behavior.
+The run used the configured database credential in read-only transactions; it
+does not independently validate the deployed runtime role's grants.
+
+`npm run test:warehouse-owner:live` separately checks synthetic cases in
+PostgreSQL, including visibility, other filters, deduplication and continuation
+stability. Calibration vocabulary and private diagnostics remain in ignored
+`.local/`; they must not be added as production data or committed fixtures.
 
 Focused deterministic tests cover masked evidence, missing versus unparsed text,
 contradictions, unknown matching controls, same-option area bounds, whole-record

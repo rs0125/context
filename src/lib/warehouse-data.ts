@@ -4,6 +4,7 @@ import { sanitizeLabel } from './privacy';
 import { addDateConditions, resolveDateQuery } from './query-time';
 import { buildPagination } from './query-pagination';
 import { warehouseMediaCounts } from './warehouse-qa';
+import { normalizeOwnerName, resolveOwnerNames, OWNER_MATCH_MODES, OWNER_MATCH_POLICY, OWNER_LOOKUP_LIMIT, type OwnerMatchMode, type OwnerNameMatch } from './warehouse-owner';
 import { warehouseRecordedContext, WAREHOUSE_RECORDED_CONTEXT_SELECT, type WarehouseRecordedFieldName } from './warehouse-recorded-context';
 import {
   WAREHOUSE_BOOLEAN_FIELDS, WAREHOUSE_CATEGORY_FIELDS, WAREHOUSE_FILTER_CATALOG,
@@ -17,7 +18,7 @@ type Bind = (value: unknown) => string;
 const MAX_ID = 2147483647;
 const OPTION_LIMIT = 100;
 const DECIMAL = /^(?:0|[1-9][0-9]*)(?:[.][0-9]{1,6})?$/;
-const LABEL = /^[\p{L}\p{N} .,'()&/_–—-]+$/u;
+const LABEL = /^[\p{L}\p{M}\p{N} .,'’()&/_–—-]+$/u;
 
 function invalid(message: string): never { throw new HttpError(400, 'INVALID_QUERY', message); }
 
@@ -34,7 +35,7 @@ function textParameter(query: URLSearchParams, name: string) {
   const raw = query.get(name);
   if (raw === null) return undefined;
   const text = raw.trim();
-  if (!text || text.length > 80 || !LABEL.test(text) || !sanitizeLabel(text, 80)) invalid(`${name} must be a location or category of at most 80 characters`);
+  if (!text || text.length > 80 || !LABEL.test(text) || !sanitizeLabel(text, 80)) invalid(`${name} must be a ${name === 'owner_name' ? 'name' : 'location or category'} of at most 80 characters`);
   return text;
 }
 
@@ -92,6 +93,8 @@ const EVIDENCE_SELECT = `jsonb_build_object(${WAREHOUSE_NUMERIC_FIELDS.map((fiel
   `'${field.field}', jsonb_build_object('kind', n${index}.kind, 'value', n${index}.value, 'lower', n${index}.lower, 'upper', n${index}.upper, 'source', n${index}.source)`
 ).join(', ')}) AS field_evidence`;
 const COLUMNS = `w.id, w.city, w.state, w.zone, w."warehouseType" AS warehouse_type,
+  CASE WHEN length(w."contactPerson") <= 100 THEN w."contactPerson" END AS owner_name,
+  CASE WHEN length(w."ownerCompanyName") <= 100 THEN w."ownerCompanyName" END AS owner_company_name,
   w."totalSpaceSqft" AS total_space_sqft, w.micromarket AS micromarkets, w."suitableFor" AS suitable_for,
   w.availability, w.status, w."wogVerified" AS verified, w."flooringType" AS flooring_type,
   w.listing_type, w."waterSupply"::text AS water_supply, w."liftAccess" AS lift_access,
@@ -141,6 +144,7 @@ function warehouse(row: Row, constrainedFields: readonly string[] = [], contextF
     ...warehouseMediaCounts(row.qa_media, row.qa_photos),
     has_valid_google_maps_id: row.has_valid_google_maps_id === true,
     city: sanitizeLabel(row.city), state: sanitizeLabel(row.state), zone: sanitizeLabel(row.zone),
+    owner_name: sanitizeLabel(row.owner_name), owner_company_name: sanitizeLabel(row.owner_company_name),
     warehouse_type: sanitizeLabel(row.warehouse_type), total_space_sqft: areas,
     dock_count: exact('dock_count'),
     clear_height_ft: exact('clear_height_ft'), asking_rate_per_sqft: exact('asking_rate_per_sqft'),
@@ -172,6 +176,10 @@ function warehouseFilters(query: URLSearchParams, catalog = WAREHOUSE_FILTER_CAT
   const values: unknown[] = [];
   const bind: Bind = value => { values.push(value); return `$${values.length}`; };
   const where = ['w.visibility IS TRUE', ...locationConditions(query, bind)];
+  const ownerName = textParameter(query, 'owner_name');
+  const ownerMode = enumParameter(query, 'owner_match_mode', OWNER_MATCH_MODES, 'auto') as OwnerMatchMode;
+  if (!ownerName && query.has('owner_match_mode')) invalid('owner_match_mode requires owner_name');
+  if (ownerName && (!/\p{L}/u.test(ownerName) || !normalizeOwnerName(ownerName))) invalid('owner_name must contain a name');
   for (const field of WAREHOUSE_CATEGORY_FIELDS) {
     if (field.name === 'city' || field.name === 'state') continue;
     const value = textParameter(query, field.name);
@@ -221,19 +229,77 @@ function warehouseFilters(query: URLSearchParams, catalog = WAREHOUSE_FILTER_CAT
   return { values, bind, where, constrainedFields, candidateNormalizers, numbers, time,
     matching_policy: {
       mode, include_unknown: includeUnknown, range_matching: 'overlap' as const,
+      ...(ownerName ? { owner_name: {
+        query: ownerName, mode: ownerMode, fields: ['owner_name', 'owner_company_name'],
+        ...OWNER_MATCH_POLICY, strategy: 'none' as string, matched_name_count: 0, approximate_name_count: 0,
+        candidate_names: [] as (OwnerNameMatch & { warehouse_count: number })[], candidates_truncated: false, disambiguation_recommended: false,
+        guidance: 'Recorded owner/contact and company names, not verified legal ownership. auto prefers literal/spacing matches within the other filters, falling back to typos only when none exist. Explicit fuzzy also includes approximate alternatives. Similarity is 1 - edit distance / longer name-window length, at least 0.75 with at most 2 edits; names shorter than 5 characters are not typo-expanded. When disambiguation_recommended, present candidate_names or request a fuller name before attributing the total to one owner. Counts include every selected name; exact narrows to a complete recorded name. Per-name warehouse counts can overlap when both person and company names match; never sum them.',
+      } } : {}),
       guidance: 'Discovery defaults to permissive numeric matching, including missing or uninterpretable constrained measurements. Approximate values, overlapping ranges and unknowns are candidates to investigate, not confirmed matches. Read recorded source text and property context before ranking. Explicit include_unknown=false excludes unknown numeric values; strict defaults to excluding them. Category and boolean filters still match exactly: use them only when intended, and broaden searches when patchy tags would hide candidates. Exact numeric properties are null for non-exact evidence.',
     },
   };
+}
+
+async function applyOwnerNameFilter(client: PoolClient, filters: ReturnType<typeof warehouseFilters>) {
+  const policy = filters.matching_policy.owner_name;
+  if (!policy) return;
+  // Resolve against all rows satisfying the other filters, not a returned page.
+  // API readers keep this lookup and the final search/count in one repeatable-
+  // read transaction. No cached names or inferred ownership/phone relationships.
+  const result = await client.query<Row>(`SELECT w.id,
+    CASE WHEN length(w."contactPerson") <= 100 THEN w."contactPerson" END AS owner_name,
+    CASE WHEN length(w."ownerCompanyName") <= 100 THEN w."ownerCompanyName" END AS owner_company_name
+    ${BASE_FROM} ${filters.candidateNormalizers}
+    WHERE ${filters.where.join(' AND ')} ORDER BY w.id LIMIT ${OWNER_LOOKUP_LIMIT + 1}`, [...filters.values]);
+  if (result.rows.length > OWNER_LOOKUP_LIMIT) {
+    throw new HttpError(422, 'OWNER_SEARCH_TOO_BROAD', 'Add a city or other warehouse filter before searching owner names in more than 20000 candidates.');
+  }
+  const candidates = result.rows.map(row => ({ id: row.id,
+    names: [sanitizeLabel(row.owner_name), sanitizeLabel(row.owner_company_name)].filter((name): name is string => name !== null) }));
+  const resolved = resolveOwnerNames(policy.query, policy.mode, candidates.flatMap(row => row.names));
+  const ids = candidates.filter(row => row.names.some(name => resolved.matches.has(name))).map(row => row.id);
+  filters.where.push(`w.id = ANY(${filters.bind(ids)}::int[])`);
+  // Surface competing names before page truncation can hide the intended owner
+  // behind a more prolific similarly named contact. Case variants share a
+  // bucket, and a warehouse with identical person/company labels counts once.
+  const labels = new Map<string, OwnerNameMatch & { warehouse_count: number }>();
+  for (const row of candidates) {
+    const counted = new Set<string>();
+    for (const name of row.names) {
+      const match = resolved.matches.get(name);
+      const key = name.toLowerCase();
+      if (!match || counted.has(key)) continue;
+      counted.add(key);
+      const item = labels.get(key) ?? { ...match, similarity: Number(match.similarity.toFixed(4)), warehouse_count: 0 };
+      item.warehouse_count++;
+      labels.set(key, item);
+    }
+  }
+  const rankedNames = [...labels.values()].sort((left, right) => right.similarity - left.similarity || left.name.localeCompare(right.name));
+  policy.strategy = resolved.strategy;
+  policy.matched_name_count = rankedNames.length;
+  policy.approximate_name_count = rankedNames.filter(name => name.kind === 'fuzzy').length;
+  policy.candidate_names = rankedNames.slice(0, 20);
+  policy.candidates_truncated = rankedNames.length > 20;
+  policy.disambiguation_recommended = policy.approximate_name_count > 0 && rankedNames.length > 1;
 }
 
 export async function searchWarehouses(client: PoolClient, query: URLSearchParams) {
   const filters = warehouseFilters(query);
   const { values, bind, where, constrainedFields, candidateNormalizers, time } = filters;
   const limit = filters.numbers.limit ?? 10;
-  const pagination = buildPagination(query, { idColumn: 'w.id', idType: 'integer', sortColumns: SORT_COLUMNS,
+  const paginationOptions = { idColumn: 'w.id', idType: 'integer' as const, sortColumns: SORT_COLUMNS,
     filterContext: { start_at: time.start_at, end_before: time.end_before,
-      matching_policy_version: 2, mode: filters.matching_policy.mode, include_unknown: filters.matching_policy.include_unknown },
-  }, bind);
+      matching_policy_version: 2, mode: filters.matching_policy.mode, include_unknown: filters.matching_policy.include_unknown,
+      ...(filters.matching_policy.owner_name ? { owner_matching_policy_version: OWNER_MATCH_POLICY.version } : {}) },
+  };
+  if (filters.matching_policy.owner_name) {
+    // Reject stale/changed cursors before doing the vocabulary read. Pagination
+    // must not narrow that read, or later pages could switch to fuzzy fallback.
+    buildPagination(query, paginationOptions, () => '$unused');
+    await applyOwnerNameFilter(client, filters);
+  }
+  const pagination = buildPagination(query, paginationOptions, bind);
   where.push(...pagination.where);
   const result = await client.query<Row>(`WITH candidate_page AS MATERIALIZED (
     SELECT w.id ${BASE_FROM} ${candidateNormalizers}
@@ -302,6 +368,7 @@ export async function summarizeWarehouses(client: PoolClient, query: URLSearchPa
   const groupBy = enumParameter(query, 'group_by', WAREHOUSE_SUMMARY_GROUPS, 'city') as typeof WAREHOUSE_SUMMARY_GROUPS[number];
   const groupLimit = filters.numbers.group_limit ?? 10;
   const { values, bind, where, candidateNormalizers, time } = filters;
+  await applyOwnerNameFilter(client, filters);
   const limitParameter = bind(groupLimit);
   // All matched rows contribute to total and groups in one statement/snapshot.
   // Only group_limit groups cross the API boundary; no page is extrapolated.

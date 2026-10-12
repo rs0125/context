@@ -45,26 +45,35 @@ describe('bounded recorded warehouse property context', () => {
     expect(JSON.stringify(context)).not.toMatch(/secret|sales@example/);
   });
 
-  it('masks contact and identifying clauses while preserving property work attributed to an owner', () => {
+  it('retains owner names and property work while masking contact and private commercial details', () => {
     const output = redactWarehouseRecordedSource('Owner to install an additional dock; owner named Mr. Private Person; Call 98.76.54.32.10; negotiated rent: INR 18; Fire hydrants installed');
     expect(output.state).toBe('redacted');
     expect(output.text).toContain('Owner to install an additional dock');
     expect(output.text).toContain('Fire hydrants installed');
-    expect(JSON.stringify(output)).not.toMatch(/Private Person|98\.76|INR 18/);
+    expect(output.text).toContain('owner named Mr. Private Person');
+    expect(JSON.stringify(output)).not.toMatch(/98\.76|INR 18/);
   });
 
   it.each([
     'Negotiated rent INR 18; four docks',
     'Negotiated rate is INR 18; four docks',
-    'Owner Mr Synthetic Person; four docks',
-    'Owner is Ms. Synthetic Person; four docks',
-    'Owner is Synthetic Person; four docks',
+    'Broker Mr Synthetic Person; four docks',
+    'Broker is Ms. Synthetic Person; four docks',
+    'Broker is Synthetic Person; four docks',
     'Call Synthetic Person; four docks',
     'Contact Mr. Synthetic Person; four docks',
+    'Owner at example dot test; four docks',
   ])('masks an explicitly identifying or private-commercial clause without requiring a colon (%s)', value => {
     const output = redactWarehouseRecordedSource(value);
     expect(output).toMatchObject({ state: 'redacted', text: '[content omitted]; four docks', redacted: true, truncated: false });
     expect(JSON.stringify(output)).not.toMatch(/INR 18|Synthetic Person/);
+  });
+
+  it('retains a named owner while masking adjacent phones, email and links', () => {
+    const output = redactWarehouseRecordedSource('Call the owner named Synthetic Person on 9876543210 or sales@example.test; https://private.example.test');
+    expect(output.text).toContain('owner named Synthetic Person');
+    expect(output.redacted).toBe(true);
+    expect(JSON.stringify(output)).not.toMatch(/9876543210|sales@example|private\.example/);
   });
 
   it.each([
@@ -76,6 +85,11 @@ describe('bounded recorded warehouse property context', () => {
     'Owner to install an additional dock; four docks',
     'Owner is installing an additional dock; four docks',
     'Owner is Installing an additional dock; four docks',
+    'Owner Mr Synthetic Person; four docks',
+    'Owner is Ms. Synthetic Person; four docks',
+    'Owner is Synthetic Person; four docks',
+    'Landlord named Synthetic Person; four docks',
+    'Call the owner named Synthetic Person; four docks',
   ])('preserves equipment and operational prose containing contact-like words (%s)', value => {
     expect(redactWarehouseRecordedSource(value)).toEqual({ state: 'present', text: value, redacted: false, truncated: false });
   });

@@ -119,6 +119,8 @@ const evidence = z.discriminatedUnion('kind', [
 ]);
 const warehouse = z.object({
   id: z.number().int().positive(), verification_required: z.boolean(), field_evidence: z.record(z.string(), evidence),
+  owner_name: z.string().nullable().optional().describe('Recorded Dashboard contact-person name. May be an owner or representative; not verified legal ownership.'),
+  owner_company_name: z.string().nullable().optional().describe('Recorded owner-company name, separate from the contact person.'),
   image_count: count.describe('Number of distinct stored warehouse image URLs.'),
   video_count: count.describe('Number of distinct stored warehouse video URLs.'),
   has_valid_google_maps_id: z.boolean().describe('Supply QA flag: true when both latitude and longitude are populated; false otherwise.'),

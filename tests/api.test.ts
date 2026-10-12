@@ -31,6 +31,19 @@ function harness(options: { scopes?: KeyRegistration['scopes']; roster?: unknown
 const request = (path: string, init?: RequestInit) => new Request(`https://context.example.com/api/v1/${path}`, init);
 
 describe('REST access boundary', () => {
+  it('allows owner-name discovery with warehouse scope and rechecks access before a search', async () => {
+    const deps = harness();
+    const original = deps.query.getMockImplementation()!;
+    deps.query.mockImplementation(async sql => sql.includes('"Warehouse"') ? { rows: [{ id: 12,
+      owner_name: 'Ramesh Mehta', owner_company_name: 'Example Estates', contactNumber: '9876543210',
+    }] } : original(sql));
+    const result = await handleApiRequest(request('warehouses?owner_name=Ramseh'), ['warehouses'], deps);
+    expect(result.status).toBe(200);
+    expect((await result.json()).data.items[0]).toMatchObject({ owner_name: 'Ramesh Mehta', owner_company_name: 'Example Estates' });
+    const denied = harness({ scopes: ['crm:read'] });
+    expect((await handleApiRequest(request('warehouses?owner_name=Ramseh'), ['warehouses'], denied)).status).toBe(403);
+    expect(denied.query.mock.calls.some(([sql]) => sql.includes('"Warehouse"'))).toBe(false);
+  });
   it('reads selected recorded property factors without granting private-field access', async () => {
     const deps = harness();
     const original = deps.query.getMockImplementation()!;

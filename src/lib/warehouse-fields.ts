@@ -1,5 +1,6 @@
 import { sanitizeLabel } from './privacy';
 import { DATE_PERIODS } from './query-time';
+import { OWNER_MATCH_MODES } from './warehouse-owner';
 import type { RedactedCrmText } from './crm-redaction';
 import { redactWarehouseRecordedSource, warehouseRecordedValueSql, WAREHOUSE_NUMERIC_SOURCE_MAX_BYTES } from './warehouse-recorded-context';
 
@@ -53,7 +54,7 @@ export const WAREHOUSE_BOOLEAN_FIELDS = [
 
 export type WarehouseFilterDefinition = {
   name: string; type: 'string' | 'number' | 'integer'; description: string;
-  enum?: readonly string[]; minimum?: number; exclusiveMinimum?: number; maximum?: number; default?: number | string;
+  enum?: readonly string[]; minimum?: number; exclusiveMinimum?: number; maximum?: number; maxLength?: number; default?: number | string;
 };
 
 export const WAREHOUSE_SORTS = ['id_asc', 'created_desc', 'created_asc', 'updated_desc'] as const;
@@ -61,6 +62,8 @@ export const WAREHOUSE_SUMMARY_GROUPS = ['city', 'state', 'zone', 'type', 'statu
 
 export const WAREHOUSE_FILTER_CATALOG: readonly WarehouseFilterDefinition[] = [
   ...WAREHOUSE_CATEGORY_FIELDS.map(({ name, description }) => ({ name, type: 'string' as const, description })),
+  { name: 'owner_name', type: 'string', maxLength: 80, description: 'Find warehouses by the recorded owner/contact-person or owner-company name (up to 80 characters). Returns the recorded names for review. This identifies listing contacts, not verified legal ownership. Combines with all other filters and summary counts.' },
+  { name: 'owner_match_mode', type: 'string', enum: OWNER_MATCH_MODES, default: 'auto', description: 'Requires owner_name. auto prefers literal/spacing matches within the other filters, with fuzzy fallback only if none exist. fuzzy explicitly includes similar alternatives. Fuzzy similarity is at least 0.75 (1 - edit distance / longer name-window length), at most 2 insertions/deletions/substitutions/transpositions, and at least 5 characters. Common leading titles and joined/split spaces are normalized. contains accepts literal partial names; exact compares the full stored name ignoring case/spaces at the edges. Results retain ID/date order, not similarity rank. Inspect matching_policy.owner_name and returned names. Narrow other filters if more than 20000 warehouse candidates need name lookup.' },
   ...WAREHOUSE_BOOLEAN_FIELDS.map(({ name }) => ({ name, type: 'string' as const, enum: ['true', 'false', 'unknown'], description: `${name}: true, false, or missing (unknown); false never includes missing values.` })),
   ...(['area_min_sqft', 'area_max_sqft', 'offered_area_min_sqft', 'offered_area_max_sqft'] as const).map(name => ({ name, type: 'number' as const, exclusiveMinimum: 0, maximum: 1e9, description: 'Bound on one of the first 100 offered-area options from totalSpaceSqft, not the sum of the array. offered_area_min_sqft/max_sqft are aliases for area_min_sqft/max_sqft; combined bounds apply to the same option. Results use total_space_sqft.' })),
   ...WAREHOUSE_NUMERIC_FIELDS.flatMap(field => [field.minParam, field.maxParam].map(name => ({

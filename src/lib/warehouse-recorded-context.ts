@@ -6,7 +6,8 @@ export const WAREHOUSE_SELECTED_FIELD_TEXT_MAX_BYTES = 4000;
 export const WAREHOUSE_RECORDED_CONTEXT_MAX_BYTES = 6000;
 export const WAREHOUSE_NUMERIC_SOURCE_MAX_BYTES = 240;
 
-/** Deliberately excludes identities, private commercial terms, notes and media.
+/** Deliberately excludes contact columns, private commercial terms, notes and media.
+ * Owner names have separate allowlisted fields and may also occur in this prose.
  * These are recorded property facts, not verified specifications or instructions.
  */
 export const WAREHOUSE_RECORDED_FIELDS = [
@@ -76,7 +77,7 @@ function boundText(value: RedactedCrmText, maxTextBytes: number): RedactedCrmTex
 
 /** Uses the CRM contact/markup redactor plus narrow identifying clauses found
  * in copied property fields. This is a bounded view, not a general PII proof.
- * A specification such as "owner to install an additional dock" is retained.
+ * Recorded owner/landlord names and their property commitments are retained.
  */
 export function redactWarehouseRecordedSource(value: unknown, maxTextBytes = MAX_FIELD_TEXT_BYTES): RedactedCrmText {
   const input = typeof value === 'number' && Number.isFinite(value) ? String(value) : value;
@@ -89,12 +90,14 @@ export function redactWarehouseRecordedSource(value: unknown, maxTextBytes = MAX
   const namedTarget = (text: string) => /^\p{Lu}[\p{L}'’-]*(?:\s+\p{Lu}[\p{L}'’-]*){0,4}(?:\s|$)/u.test(text);
   const text = source.text
     .replace(/\b(?:negotiated\s+(?:rent|rental|rate)\b\s*[:=]?|(?:private|internal|scout)\s+notes?\b\s*[:=]?|(?:negotiated|private)\s*[:=])[^;\n]*/giu, omit)
-    .replace(/\b(?:owner|landlord|broker|contact(?: person)?|poc)\s*(?:(?:name(?:d)?|at)\b\s*[:=-]?\s*|[:=]\s*|(?:is\s+)?(?:mr|mrs|ms|dr|shri|smt)\b[.]?\s*)[^;\n]*/giu, omit)
-    .replace(/\b(?:owner|landlord|broker|poc)\s+is\s+([^;\n]*)/giu, (whole, target: string) => {
+    .replace(/\b(?:owner|landlord)\s+at\b[^;\n]*/giu, omit)
+    .replace(/\b(?:broker|contact(?: person)?|poc)\s*(?:(?:name(?:d)?|at)\b\s*[:=-]?\s*|[:=]\s*|(?:is\s+)?(?:mr|mrs|ms|dr|shri|smt)\b[.]?\s*)[^;\n]*/giu, omit)
+    .replace(/\b(?:broker|poc)\s+is\s+([^;\n]*)/giu, (whole, target: string) => {
       if (/^(?:installing|providing|adding|arranging|responsible|ready|willing|going|to)\b/iu.test(target)) return whole;
       return namedTarget(target) ? omit() : whole;
     })
     .replace(/\b(?:call|contact|reach(?: out to)?)\s+([^;\n]*)/giu, (whole, target: string) => {
+      if (/^(?:the\s+)?(?:owner|landlord)\b/iu.test(target)) return whole;
       // These words also name equipment and operating procedures. Require a
       // contact target before masking, rather than removing every action verb.
       if (/^(?:bell|bells|button|buttons|point|points|alarm|alarms|system|systems|resistance|area|surface|surfaces|truck|trucks|stacker|stackers|height|distance|before|after|ahead)\b/iu.test(target)) return whole;

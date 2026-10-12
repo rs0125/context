@@ -2,6 +2,7 @@ import { WAREHOUSE_NUMERIC_FIELDS } from './warehouse-fields';
 import type { RedactedCrmText } from './crm-redaction';
 
 const SUMMARY_FIELDS = ['id', 'city', 'state', 'micromarkets', 'warehouse_type', 'total_space_sqft',
+  'owner_name', 'owner_company_name',
   'asking_rate_per_sqft', 'dock_count', 'clear_height_ft', 'availability', 'verified',
   'fire_noc_available', 'flooring_type', 'land_type', 'pollution_zone', 'suitable_for',
   'status', 'zone', 'listing_type', 'water_supply', 'lift_access',

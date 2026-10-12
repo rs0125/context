@@ -343,7 +343,7 @@ export const TOOL_CATALOG = {
     title: 'Search warehouses',
     group: 'Warehouses',
     description:
-      'Find candidates, for example "Bengaluru, at least 4 docks and 25 ft clear height" or "warehouses added this month". Every result includes image_count, video_count and has_valid_google_maps_id for supply QA. The maps flag is true when both latitude and longitude are populated. Defaults to concise records with recorded_context previews and relevant specification flags; use response_format=detailed or read_warehouse for longer recorded evidence. Unknown numeric values stay eligible by default in permissive mode; include_unknown=false or match_mode=strict opts into exclusion. Start with reliable location/area and inspect messy evidence before ranking. Avoid exact category/fire/verified filters for inferred preferences; those filters remain exact and can hide poorly tagged candidates. Combine specifications and calendar filters; follow nextCursor unchanged with the same filters and sort. Permissive matching includes estimates and overlapping ranges: preserve material field_evidence and a verification caveat covering the identified candidates. Shared gaps need one caveat, not an exhaustive checklist per option. Results are ID/date ordered, not ranked by cheapest price or suitability; use warehouse_summary for counts.',
+      'Find candidates, for example "Bengaluru, at least 4 docks and 25 ft clear height" or "warehouses added this month". Search owner/contact-person or owner-company names with owner_name; owner_match_mode defaults to auto (literal/spacing matches first, then fuzzy fallback). Explicit fuzzy includes similar alternatives; contains and exact disable typo expansion. Fuzzy matching requires 75% similarity, at most two edits and at least five characters. Returned owner_name and owner_company_name let you review possible matches. Every result includes image_count, video_count and has_valid_google_maps_id for supply QA. The maps flag is true when both latitude and longitude are populated. Defaults to concise records with recorded_context previews and relevant specification flags; use response_format=detailed or read_warehouse for longer recorded evidence. Unknown numeric values stay eligible by default in permissive mode; include_unknown=false or match_mode=strict opts into exclusion. Start with reliable location/area and inspect messy evidence before ranking. Avoid exact category/fire/verified filters for inferred preferences; those filters remain exact and can hide poorly tagged candidates. Combine specifications and calendar filters; follow nextCursor unchanged with the same filters and sort. Permissive matching includes estimates and overlapping ranges: preserve material field_evidence and a verification caveat covering the identified candidates. Shared gaps need one caveat, not an exhaustive checklist per option. Results are ID/date ordered, not ranked by cheapest price or suitability; use warehouse_summary for counts.',
     capability: 'warehouses',
     platforms: ['claude', 'whatsapp'],
     loading: 'deferred',
@@ -353,7 +353,7 @@ export const TOOL_CATALOG = {
     title: 'Count matching warehouses',
     group: 'Warehouses',
     description:
-      'Count every visible warehouse matching the supplied filters, for example "How many warehouses were added this month by city?". Returns total plus bounded groups and other_count; counts are not limited to a search page. The same permissive/unknown matching policy applies, so candidate counts do not confirm availability or specifications. It does not calculate rent or area sums.',
+      'Count every visible warehouse matching the supplied filters, for example "How many warehouses were added this month by city?". Supports the same owner_name and owner_match_mode filters as search; fuzzy owner totals include possible name matches. Returns total plus bounded groups and other_count; counts are not limited to a search page. The same permissive/unknown matching policy applies, so candidate counts do not confirm availability or specifications. It does not calculate rent or area sums.',
     capability: 'warehouses',
     platforms: ['claude', 'whatsapp'],
     loading: 'deferred',
@@ -363,7 +363,7 @@ export const TOOL_CATALOG = {
     title: 'Read a warehouse',
     group: 'Warehouses',
     description:
-      'Read permitted details for an exact warehouse ID returned by search, including image_count, video_count and has_valid_google_maps_id for supply QA. The maps flag is true when both latitude and longitude are populated. Inspect field_evidence and verification_required and preserve source timestamps. Exact parsing, recorded availability and a verified flag do not guarantee present suitability.',
+      'Read permitted details for an exact warehouse ID returned by search, including recorded owner_name, owner_company_name, image_count, video_count and has_valid_google_maps_id for supply QA. The maps flag is true when both latitude and longitude are populated. Inspect field_evidence and verification_required and preserve source timestamps. Exact parsing, recorded availability and a verified flag do not guarantee present suitability.',
     capability: 'warehouses',
     platforms: ['claude', 'whatsapp'],
     loading: 'deferred',

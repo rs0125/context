@@ -112,6 +112,7 @@ async function dispatch(client: PoolClient, principal: Principal, path: string[]
       warehouse_guidance: 'Warehouse results are candidates. Provisional recommendations may use available evidence with material conflicts and uncertainty stated. Read field_evidence and verification_required; retain a verification caveat covering the named candidates, using one shared caveat for common gaps. Optional unknown fields do not block a useful recommendation. Approximate values and ranges are not confirmed specifications. Permissive numeric filters include unknowns by default; explicit category/boolean filters remain exact. Do not silently relax a requested strict filter.',
       ...(!crmContactsRedacted() ? { crm_text_guidance: crmTextGuidance() } : {}),
       constraints: { contacts: crmContactsRedacted() ? 'masked_or_excluded' : 'crm_text_unredacted',
+        warehouse_owner_names: 'recorded_names_available_and_searchable',
         narrative_context: crmContactsRedacted() ? 'redacted_lead_context' : 'unredacted_lead_context',
         media: 'excluded', crm_scope: 'created or assigned; Analysts (including administrators) see all', max_page_size: 25 } } };
   }

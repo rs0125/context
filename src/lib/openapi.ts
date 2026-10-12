@@ -127,6 +127,23 @@ const warehouseMatchingPolicySchema = {
     mode: { type: "string", enum: ["permissive", "strict"] },
     include_unknown: { type: "boolean" },
     range_matching: { type: "string", const: "overlap" },
+    owner_name: { type: "object", description: "Present when an owner-name filter is applied. Counts and pages use this name policy.",
+      required: ["query", "mode", "fields", "guidance"], properties: {
+        version: { type: "integer" }, minimum_similarity: { type: "number", const: 0.75 },
+        max_edits: { type: "integer", const: 2 }, minimum_fuzzy_characters: { type: "integer", const: 5 },
+        strategy: { type: "string", enum: ["none", "exact", "contains", "literal_first", "fuzzy_fallback", "fuzzy"] },
+        matched_name_count: { type: "integer", minimum: 0 }, approximate_name_count: { type: "integer", minimum: 0 },
+        disambiguation_recommended: { type: "boolean", description: "Multiple names match approximately. Show candidate names or clarify the intended owner before attributing the full total to one person." },
+        candidates_truncated: { type: "boolean" },
+        candidate_names: { type: "array", maxItems: 20, items: { type: "object", properties: {
+          name: { type: "string" }, kind: { type: "string", enum: ["exact", "literal", "normalized", "fuzzy"] },
+          similarity: { type: "number", minimum: 0, maximum: 1 }, edits: { type: "integer", minimum: 0, maximum: 2 },
+          warehouse_count: { type: "integer", minimum: 1, description: "Warehouses with this matched recorded label under the current filters. Person/company buckets can overlap; do not sum them." },
+        } } },
+        query: { type: "string", maxLength: 80 }, mode: { type: "string", enum: ["auto", "fuzzy", "contains", "exact"] },
+        fields: { type: "array", items: { type: "string", enum: ["owner_name", "owner_company_name"] } },
+        guidance: { type: "string" },
+      } },
     guidance: { type: "string", description: "Instructions for interpreting candidates and communicating verification requirements." },
   },
 };
@@ -141,6 +158,7 @@ const warehouseFilterDefinitionSchema = {
     minimum: { type: "number" },
     exclusiveMinimum: { type: "number" },
     maximum: { type: "number" },
+    maxLength: { type: "integer" },
     default: { type: ["string", "number", "boolean"] },
   },
 };
@@ -205,6 +223,8 @@ const warehouseSchema = {
   description: "Allowlisted recorded warehouse facts and measurement evidence. Numeric scalars contain only exact parsed values; approximate/range values remain null with their interpretation in field_evidence. A candidate flagged verification_required must explicitly be presented as needing verification. Even exact parsing and the separate verified flag do not establish physical accuracy or current availability.",
   properties: {
     id: { type: "integer" },
+    owner_name: { ...nullableLabel, description: "Recorded Dashboard contact-person name (contactPerson). May be an owner or representative; not verified legal ownership." },
+    owner_company_name: { ...nullableLabel, description: "Recorded owner-company name (ownerCompanyName), separate from the contact person." },
     image_count: { type: "integer", minimum: 0, description: "Number of distinct stored warehouse image URLs. Uses media.images, with photos as the legacy fallback; an explicit empty array means zero." },
     video_count: { type: "integer", minimum: 0, description: "Number of distinct stored warehouse video URLs. Uses media.videos, with photos as the legacy fallback; an explicit empty array means zero." },
     has_valid_google_maps_id: { type: "boolean", description: "Supply QA flag: true when both WarehouseData latitude and longitude are populated, including zero; false otherwise." },
@@ -521,6 +541,7 @@ export function getOpenApiDocument() {
                 type: "object",
                 properties: {
                   contacts: { type: "string", const: "masked_or_excluded" },
+                  warehouse_owner_names: { type: "string", const: "recorded_names_available_and_searchable" },
                   narrative_context: { type: "string", const: "redacted_lead_context" },
                   media: { type: "string", const: "excluded" },
                   crm_scope: { type: "string", const: "created or assigned; Analysts (including administrators) see all" },
