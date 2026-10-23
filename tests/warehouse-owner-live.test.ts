@@ -37,10 +37,12 @@ describe.skipIf(process.env.CONTEXT_LIVE_WAREHOUSE_TEST !== '1')('synthetic ware
     client = await pool.connect();
     fixture = { query: async (sql: string, values: unknown[] = []) => {
       if (!/^(?:SELECT|WITH)\b/.test(sql) || !sql.includes('public."Warehouse"')) throw new Error('Unexpected fixture query');
-      const replaced = sql.replaceAll('public."WarehouseData"', 'fixture_details').replaceAll('public."Warehouse"', 'fixture_warehouses');
+      const replaced = sql.replaceAll('public."WarehouseData"', 'fixture_details').replaceAll('public."Warehouse"', 'fixture_warehouses')
+        .replaceAll('public."VerifiedNumber"', 'fixture_roster');
       if (/\bpublic\s*\./i.test(replaced)) throw new Error('Source table access refused');
       const ctes = `fixture_warehouses AS (SELECT * FROM jsonb_populate_recordset(NULL::public."Warehouse", $${values.length + 1}::jsonb)),
-        fixture_details AS (SELECT * FROM jsonb_populate_recordset(NULL::public."WarehouseData", '[]'::jsonb))`;
+        fixture_details AS (SELECT * FROM jsonb_populate_recordset(NULL::public."WarehouseData", '[]'::jsonb)),
+        fixture_roster AS (SELECT NULL::text AS email, NULL::text AS name WHERE false)`;
       return client.query(replaced.startsWith('WITH ') ? `WITH ${ctes}, ${replaced.slice(5)}` : `WITH ${ctes} ${replaced}`,
         [...values, JSON.stringify(rows)]);
     } } as unknown as PoolClient;

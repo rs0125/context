@@ -40,7 +40,7 @@ describe('warehouse owner-name discovery', () => {
       query: "O'Neill", mode: 'auto', fields: ['owner_name', 'owner_company_name'], strategy: 'literal_first',
       minimum_similarity: 0.75, max_edits: 2, minimum_fuzzy_characters: 5,
     } });
-    expect(sql).not.toMatch(/contactNumber|alt_phone_number|uploadedBy|scoutNotes/);
+    expect(sql).not.toMatch(/contactNumber|alt_phone_number|scoutNotes/);
   });
 
   it.each(['contains', 'exact'])('disables typo expansion explicitly with %s', async mode => {

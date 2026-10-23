@@ -121,6 +121,7 @@ const warehouse = z.object({
   id: z.number().int().positive(), verification_required: z.boolean(), field_evidence: z.record(z.string(), evidence),
   owner_name: z.string().nullable().optional().describe('Recorded Dashboard contact-person name. May be an owner or representative; not verified legal ownership.'),
   owner_company_name: z.string().nullable().optional().describe('Recorded owner-company name, separate from the contact person.'),
+  uploaded_by: z.string().max(80).nullable().optional().describe('Recorded uploader name resolved from the roster or a safe legacy name. Null when attribution is unavailable; not current staff assignment.'),
   image_count: count.describe('Number of distinct stored warehouse image URLs.'),
   video_count: count.describe('Number of distinct stored warehouse video URLs.'),
   has_valid_google_maps_id: z.boolean().describe('Supply QA flag: true when both latitude and longitude are populated; false otherwise.'),
@@ -226,6 +227,11 @@ function registerTools(server: McpServer, key: KeyRegistration, request: Request
     if (path[0] === 'crm' && path[3] === 'assessment') citation.search = '';
     // Precise locations and user-supplied Maps links must not enter citations.
     if (path[0] === 'locations') citation.search = '';
+    if (path[0] === 'warehouses' && !response.ok && body.error && typeof body.error === 'object'
+      && (body.error as { code?: string }).code === 'UPLOADER_NAME_AMBIGUOUS') {
+      body.error = { ...body.error, recovery: { retryable: false, action: 'correct_query',
+        guidance: 'This name identifies multiple uploaders. City/date filters cannot resolve the person. Choose an unambiguous name from warehouse_filters; do not combine staff or interpret rejection as zero warehouses.' } };
+    }
     if (path[0] === 'analytics') {
       // Cite only bounded enums and dates. Arbitrary labels, exact queries and
       // URLs may be sensitive even when validation rejects the report.
@@ -459,7 +465,7 @@ function registerTools(server: McpServer, key: KeyRegistration, request: Request
     registerTool('read_knowledge', name => register(name, { title: 'Read a knowledge page', description: promptText('tool.read_knowledge', prompts), inputSchema: z.object({ id: z.string().max(100).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).describe('Exact page ID returned by knowledge discovery or search.') }).strict(), outputSchema: output(knowledge.extend({ body: z.string() })), annotations }, ({ id }) => call(name, ['wiki', 'pages', id])));
   }
   if (allowed('warehouses:read')) {
-    registerTool('warehouse_filters', name => register(name, { title: 'Discover warehouse filters', description: promptText('tool.warehouse_filters', prompts), inputSchema: z.object({ city: label.optional(), state: label.optional() }).strict(), outputSchema: output(z.object({ options: z.record(z.string(), z.array(z.string()).max(100)), truncated: z.boolean() }).passthrough()), annotations }, args => call(name, ['warehouses', 'filters'], args, compactWarehouseFilters)));
+    registerTool('warehouse_filters', name => register(name, { title: 'Discover warehouse filters', description: promptText('tool.warehouse_filters', prompts), inputSchema: z.object({ city: label.optional(), state: label.optional() }).strict(), outputSchema: output(z.object({ options: z.record(z.string(), z.array(z.string()).max(100)), truncated: z.boolean(), uploaded_by_truncated: z.boolean(), uploader_guidance: z.string() }).passthrough()), annotations }, args => call(name, ['warehouses', 'filters'], args, compactWarehouseFilters)));
     registerTool('search_warehouses', name => register(name, { title: 'Search warehouses', description: promptText('tool.search_warehouses', prompts), inputSchema: warehouseSchema().extend({ response_format: z.enum(['concise', 'detailed']).describe('Default concise: location, key flags, requested measurements, uncertainty evidence and recorded_context previews. detailed returns every permitted field and longer masked source text. Rich pages can be shorter than limit; follow nextCursor.').optional() }), outputSchema: output(z.object({ items: z.array(warehouse).max(25), nextCursor: z.string().nullable(), matching_policy: matchingPolicy, query_context: queryContext.extend({ sort: z.string(), returned_count: count, has_more: z.boolean() }) }).passthrough()), annotations }, ({ response_format = 'concise', ...args }) => call(name, ['warehouses'], args, response_format === 'concise' ? data => compactWarehouseResults(data, args) : data => ({ ...data, response_format: 'detailed' }))));
     registerTool('warehouse_summary', name => register(name, { title: 'Count matching warehouses', description: promptText('tool.warehouse_summary', prompts), inputSchema: warehouseSchema(WAREHOUSE_SUMMARY_CATALOG), outputSchema: output(summary.extend({ matching_policy: matchingPolicy })), annotations }, args => call(name, ['warehouses', 'summary'], args)));
     registerTool('read_warehouse', name => register(name, { title: 'Read a warehouse', description: promptText('tool.read_warehouse', prompts), inputSchema: z.object({ id: z.number().int().min(1).max(2147483647), context_fields: z.array(z.enum(WAREHOUSE_RECORDED_FIELD_NAMES)).min(1).max(8).refine(fields => new Set(fields).size === fields.length).describe('Optional one to eight recorded_context fields for longer excerpts. Use when a material factor is truncated; other context fields are omitted, not missing.').optional() }).strict(), outputSchema: output(warehouse), annotations }, ({ id, ...args }) => call(name, ['warehouses', String(id)], args)));

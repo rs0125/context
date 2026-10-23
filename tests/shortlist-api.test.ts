@@ -44,7 +44,7 @@ function harness(options: {
   const query = vi.fn(async (sql: string, values?: unknown[]) => {
     expect(state.insideTransaction).toBe(true);
     state.reads.push({ transaction: state.transactionNumber, sql, values });
-    if (sql.includes('"VerifiedNumber"')) return { rows: [{ ...active, ...options.initialRoster,
+    if (sql.includes('"VerifiedNumber"') && !sql.includes('"Warehouse"')) return { rows: [{ ...active, ...options.initialRoster,
       ...(state.liveComplete ? options.finalRoster : {}) }] };
     if (sql.includes('sync_checkpoints')) {
       const stale = options.stale === (state.liveComplete ? 'final' : 'initial');

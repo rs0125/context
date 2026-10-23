@@ -37,7 +37,7 @@ const maskedText = text => ({ state: text === null ? 'missing' : text.includes('
 const missingLabels = () => ({ state: 'missing', values: null, redacted: false });
 const uuid = n => `${String(n).repeat(8)}-${String(n).repeat(4)}-4${String(n).repeat(3)}-8${String(n).repeat(3)}-${String(n).repeat(12)}`;
 const warehouse = (id, city, created_at, docks, height) => ({
-  id, city, state: city === 'Pune' ? 'Maharashtra' : 'Karnataka', created_at, updated_at: FIXTURE_NOW,
+  id, city, uploaded_by: id % 2 ? 'Alex Rao' : 'Sam Shah', state: city === 'Pune' ? 'Maharashtra' : 'Karnataka', created_at, updated_at: FIXTURE_NOW,
   total_space_sqft: [50_000], asking_rate_per_sqft: 25, warehouse_type: 'RCC', verified: false,
   image_count: 3, video_count: 1, has_valid_google_maps_id: true,
   dock_count: docks.kind === 'exact' ? docks.value : null, clear_height_ft: height.kind === 'exact' ? height.value : null,
@@ -181,6 +181,7 @@ function filterRecords(name, args) {
   if (args.city) items = items.filter(item => normalizeCity(item.city) === normalizeCity(args.city));
   if (args.state) items = items.filter(item => item.state?.toLowerCase() === args.state.trim().toLowerCase());
   if (isWarehouse) {
+    if (args.uploaded_by) items = items.filter(item => item.uploaded_by.normalize('NFKC').trim().toLowerCase() === args.uploaded_by.normalize('NFKC').trim().toLowerCase());
     items = items.filter(item => metricMatches(item.field_evidence.dock_count, args.docks_min, args.docks_max, args)
       && metricMatches(item.field_evidence.clear_height_ft, args.clear_height_min_ft, args.clear_height_max_ft, args));
   } else {
@@ -260,7 +261,10 @@ export function fixtureResult(name, args = {}, catalog = [], options = {}) {
   let data;
   if (name === 'get_context') data = { constraints: { contacts: 'masked_or_excluded', narrative_context: 'redacted_lead_context', media: 'excluded', crm_scope: 'created or assigned; Analysts (including administrators) see all', max_page_size: 25 }, employee_id: 999001, scopes: ['knowledge:read', 'warehouses:read', 'crm:read'], read_only: true, server_clock: clock,
     knowledge_discovery: { permitted: true, status: 'not_checked', index_path: '/api/v1/wiki/pages', search_path: '/api/v1/wiki/search' }, query_guidance: 'Calendar periods use Asia/Kolkata. This fixture is not business data.' };
-  else if (name === 'warehouse_filters') data = { options: { city: ['Bangalore', 'Bengaluru', 'Pune'], type: ['RCC'] }, truncated: false };
+  else if (name === 'warehouse_filters') {
+    const scoped = filterRecords('search_warehouses', args).items;
+    data = { options: { city: [...new Set(scoped.map(item => item.city))], type: ['RCC'], uploaded_by: [...new Set(scoped.map(item => item.uploaded_by))] }, truncated: false, uploaded_by_truncated: false, uploader_guidance: 'Copy a complete uploaded_by name into warehouse search or summary. Recorded attribution, not current assignment.' };
+  }
   else if (name === 'crm_filters') {
     const searchSchema = catalog.find(entry => entry.name === 'search_crm_leads')?.inputSchema?.properties;
     const vocabulary = (field, fallback) => clone(searchSchema?.[field]?.enum ?? fallback);

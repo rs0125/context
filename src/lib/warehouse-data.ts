@@ -4,6 +4,7 @@ import { sanitizeLabel } from './privacy';
 import { addDateConditions, resolveDateQuery } from './query-time';
 import { buildPagination } from './query-pagination';
 import { warehouseMediaCounts } from './warehouse-qa';
+import { AMBIGUOUS_UPLOADER_NAMES_SQL, UPLOADER_GUIDANCE, UPLOADER_NAME_SQL, warehouseUploaderName } from './warehouse-uploader';
 import { normalizeOwnerName, resolveOwnerNames, OWNER_MATCH_MODES, OWNER_MATCH_POLICY, OWNER_LOOKUP_LIMIT, type OwnerMatchMode, type OwnerNameMatch } from './warehouse-owner';
 import { warehouseRecordedContext, WAREHOUSE_RECORDED_CONTEXT_SELECT, type WarehouseRecordedFieldName } from './warehouse-recorded-context';
 import {
@@ -34,6 +35,11 @@ function validateKeys(query: URLSearchParams, allowed: readonly string[]) {
 function textParameter(query: URLSearchParams, name: string) {
   const raw = query.get(name);
   if (raw === null) return undefined;
+  if (name === 'uploaded_by') {
+    const uploader = warehouseUploaderName(raw);
+    if (!uploader) invalid('uploaded_by must be one complete name from warehouse filter discovery');
+    return uploader;
+  }
   const text = raw.trim();
   if (!text || text.length > 80 || !LABEL.test(text) || !sanitizeLabel(text, 80)) invalid(`${name} must be a ${name === 'owner_name' ? 'name' : 'location or category'} of at most 80 characters`);
   return text;
@@ -93,6 +99,7 @@ const EVIDENCE_SELECT = `jsonb_build_object(${WAREHOUSE_NUMERIC_FIELDS.map((fiel
   `'${field.field}', jsonb_build_object('kind', n${index}.kind, 'value', n${index}.value, 'lower', n${index}.lower, 'upper', n${index}.upper, 'source', n${index}.source)`
 ).join(', ')}) AS field_evidence`;
 const COLUMNS = `w.id, w.city, w.state, w.zone, w."warehouseType" AS warehouse_type,
+  ${UPLOADER_NAME_SQL} AS uploaded_by,
   CASE WHEN length(w."contactPerson") <= 100 THEN w."contactPerson" END AS owner_name,
   CASE WHEN length(w."ownerCompanyName") <= 100 THEN w."ownerCompanyName" END AS owner_company_name,
   w."totalSpaceSqft" AS total_space_sqft, w.micromarket AS micromarkets, w."suitableFor" AS suitable_for,
@@ -141,6 +148,7 @@ function warehouse(row: Row, constrainedFields: readonly string[] = [], contextF
   const areas = validAreas(row.total_space_sqft);
   return {
     id: row.id as number,
+    uploaded_by: warehouseUploaderName(row.uploaded_by),
     ...warehouseMediaCounts(row.qa_media, row.qa_photos),
     has_valid_google_maps_id: row.has_valid_google_maps_id === true,
     city: sanitizeLabel(row.city), state: sanitizeLabel(row.state), zone: sanitizeLabel(row.zone),
@@ -240,6 +248,20 @@ function warehouseFilters(query: URLSearchParams, catalog = WAREHOUSE_FILTER_CAT
   };
 }
 
+async function checkUploaderName(client: PoolClient, query: URLSearchParams) {
+  const name = textParameter(query, 'uploaded_by');
+  if (!name) return;
+  const result = await client.query<{ ambiguous: boolean }>(`SELECT EXISTS (
+    SELECT 1 FROM (${AMBIGUOUS_UPLOADER_NAMES_SQL}) names WHERE name = lower($1)
+  ) AS ambiguous`, [name]);
+  if (typeof result.rows[0]?.ambiguous !== 'boolean') {
+    throw new HttpError(503, 'WAREHOUSE_DATA_UNAVAILABLE', 'Warehouse uploader attribution could not be verified.');
+  }
+  if (result.rows[0].ambiguous) {
+    throw new HttpError(422, 'UPLOADER_NAME_AMBIGUOUS', 'This recorded name belongs to multiple uploaders. A name filter cannot distinguish them. Choose an unambiguous name from warehouse_filters.options.uploaded_by.');
+  }
+}
+
 async function applyOwnerNameFilter(client: PoolClient, filters: ReturnType<typeof warehouseFilters>) {
   const policy = filters.matching_policy.owner_name;
   if (!policy) return;
@@ -293,10 +315,11 @@ export async function searchWarehouses(client: PoolClient, query: URLSearchParam
       matching_policy_version: 2, mode: filters.matching_policy.mode, include_unknown: filters.matching_policy.include_unknown,
       ...(filters.matching_policy.owner_name ? { owner_matching_policy_version: OWNER_MATCH_POLICY.version } : {}) },
   };
-  if (filters.matching_policy.owner_name) {
+  if (filters.matching_policy.owner_name || query.has('uploaded_by')) {
     // Reject stale/changed cursors before doing the vocabulary read. Pagination
     // must not narrow that read, or later pages could switch to fuzzy fallback.
     buildPagination(query, paginationOptions, () => '$unused');
+    await checkUploaderName(client, query);
     await applyOwnerNameFilter(client, filters);
   }
   const pagination = buildPagination(query, paginationOptions, bind);
@@ -326,7 +349,7 @@ export async function searchWarehouses(client: PoolClient, query: URLSearchParam
     nextCursor: hasMore ? pagination.cursorFor(selected[selected.length - 1] as { id: number; sort_value?: unknown }) : null,
     matching_policy: filters.matching_policy,
     query_context: {
-      ...time, sort: pagination.sort, returned_count: selected.length, has_more: hasMore,
+      ...time, uploaded_by: textParameter(query, 'uploaded_by') ?? null, sort: pagination.sort, returned_count: selected.length, has_more: hasMore,
       semantics: { ...DATE_SEMANTICS, pagination: 'One bounded page, not a total. Rich records may shorten a page below the requested limit; follow nextCursor unchanged for every remaining record. Concurrent source edits may change later pages; this is not a frozen snapshot.' },
     },
   };
@@ -368,6 +391,7 @@ export async function summarizeWarehouses(client: PoolClient, query: URLSearchPa
   const groupBy = enumParameter(query, 'group_by', WAREHOUSE_SUMMARY_GROUPS, 'city') as typeof WAREHOUSE_SUMMARY_GROUPS[number];
   const groupLimit = filters.numbers.group_limit ?? 10;
   const { values, bind, where, candidateNormalizers, time } = filters;
+  await checkUploaderName(client, query);
   await applyOwnerNameFilter(client, filters);
   const limitParameter = bind(groupLimit);
   // All matched rows contribute to total and groups in one statement/snapshot.
@@ -412,7 +436,7 @@ export async function summarizeWarehouses(client: PoolClient, query: URLSearchPa
     total, group_by: groupBy, groups, groups_truncated: row.groups_truncated,
     other_count: total - returnedTotal, matching_policy: filters.matching_policy,
     query_context: {
-      ...time, returned_count: groups.length, has_more: false,
+      ...time, uploaded_by: textParameter(query, 'uploaded_by') ?? null, returned_count: groups.length, has_more: false,
       semantics: { ...DATE_SEMANTICS,
         aggregation: 'total counts every matched visible warehouse, including provisional numeric matches allowed by matching_policy. Groups count that full set, not a search page; no area or price sums are inferred.',
         groups: 'Groups ignore case and surrounding spaces. City aliases are combined. A null value includes missing or safely withheld labels. other_count counts records in groups not returned; raise group_limit up to 25 for more groups.',
@@ -450,13 +474,15 @@ export async function getWarehouseFilterOptions(client: PoolClient, query: URLSe
     ...WAREHOUSE_CATEGORY_FIELDS.map(field => ({ name: field.name, expression: 'array' in field ? field.column : `ARRAY[${field.column}]` })),
     ...WAREHOUSE_BOOLEAN_FIELDS.map(field => ({ name: field.name, expression: `ARRAY[CASE WHEN ${field.column} IS TRUE THEN 'true' WHEN ${field.column} IS FALSE THEN 'false' ELSE 'unknown' END]` })),
   ];
-  const result = await client.query<Row>(`WITH visible AS MATERIALIZED (
+  const result = await client.query<Row>(`WITH ambiguous_uploaders AS (${AMBIGUOUS_UPLOADER_NAMES_SQL}), visible AS MATERIALIZED (
     SELECT ${sources.map(field => `${field.expression} AS "${field.name}"`).join(', ')}
     FROM public."Warehouse" w LEFT JOIN public."WarehouseData" wd ON wd."warehouseId" = w.id WHERE ${where.join(' AND ')}
   ), option_values AS (
     ${sources.map(field => `SELECT '${field.name}' AS field, btrim(value) AS value FROM visible CROSS JOIN LATERAL unnest("${field.name}") AS option(value) WHERE value IS NOT NULL AND length(btrim(value)) BETWEEN 1 AND 80`).join(' UNION ALL ')}
   ), distinct_values AS (
-    SELECT field, min(value COLLATE "C") AS value FROM option_values GROUP BY field, lower(value)
+    SELECT field, min(value COLLATE "C") AS value FROM option_values
+    WHERE field <> 'uploaded_by' OR NOT EXISTS (SELECT 1 FROM ambiguous_uploaders WHERE name = lower(option_values.value))
+    GROUP BY field, lower(value)
   ), ranked AS (
     SELECT field, value, row_number() OVER (PARTITION BY field ORDER BY lower(value) COLLATE "C", value COLLATE "C") AS rank FROM distinct_values
   ) SELECT field, value FROM ranked WHERE rank <= ${OPTION_LIMIT + 1} ORDER BY field, rank`, values);
@@ -467,8 +493,9 @@ export async function getWarehouseFilterOptions(client: PoolClient, query: URLSe
     if (typeof row.field !== 'string' || !Object.hasOwn(options, row.field)) continue;
     counts[row.field] = (counts[row.field] ?? 0) + 1;
     if (counts[row.field] > OPTION_LIMIT) { truncated = true; continue; }
-    const value = sanitizeLabel(row.value, 80);
+    const value = row.field === 'uploaded_by' ? warehouseUploaderName(row.value) : sanitizeLabel(row.value, 80);
     if (value && LABEL.test(value) && !options[row.field].some(existing => existing.toLowerCase() === value.toLowerCase())) options[row.field].push(value);
   }
-  return { catalog: WAREHOUSE_FILTER_CATALOG, options, truncated };
+  return { catalog: WAREHOUSE_FILTER_CATALOG, options, truncated,
+    uploaded_by_truncated: (counts.uploaded_by ?? 0) > OPTION_LIMIT, uploader_guidance: UPLOADER_GUIDANCE };
 }

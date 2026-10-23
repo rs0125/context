@@ -12,7 +12,7 @@ function harness(options: { scopes?: KeyRegistration['scopes']; roster?: unknown
   const key: KeyRegistration = { employeeId: 7, id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: 'alex@example.test',
     scopes: options.scopes ?? ['knowledge:read', 'warehouses:read', 'crm:read'], expiresAt: '2099-01-01T00:00:00.000Z' };
   const query = vi.fn(async (text: string, _values?: unknown[]) => {
-    if (text.includes('"VerifiedNumber"')) return { rows: options.roster ?? [active] };
+    if (text.includes('"VerifiedNumber"') && !text.includes('"Warehouse"')) return { rows: options.roster ?? [active] };
     if (text.includes('sync_checkpoints')) return { rows: [{ object: 'opportunities', last_run_at: options.stale ? '2000-01-01T00:00:00Z' : new Date(), last_run_status: 'ok' }] };
     if (text.includes('context_engine_private.knowledge_pages')) return { rows: [{ page_count: 1, pages: [{
       id: 'test-guide', title: 'Synthetic guide', summary: 'Synthetic test summary', updatedAt: '2026-09-25',

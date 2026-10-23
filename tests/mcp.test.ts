@@ -267,6 +267,23 @@ describe('MCP read-only protocol', () => {
     expect(body.result.structuredContent.data.matching_policy.owner_name).toMatchObject({ query: 'Ramseh', mode: 'fuzzy' });
     expect(read).toHaveBeenCalledOnce();
   });
+  it.each(['claude', 'whatsapp'] as const)('exposes uploader discovery and filters on %s', async platform => {
+    const listed = await wire(await handleMcpRequest(rpc('tools/list'), { authenticate: async () => key(), platform }));
+    for (const name of ['search_warehouses', 'warehouse_summary']) {
+      const tool = listed.result.tools.find((tool: { name: string }) => tool.name === name);
+      expect(tool.inputSchema.properties.uploaded_by).toMatchObject({ type: 'string', maxLength: 80 });
+      const read = vi.fn(async (request: Request) => {
+        expect(new URL(request.url).searchParams.get('uploaded_by')).toBe('Alex Rao');
+        const data = name === 'search_warehouses' ? { items: [], nextCursor: null }
+          : { total: 0, group_by: 'city', groups: [], groups_truncated: false, other_count: 0 };
+        return Response.json({ data: { ...data, matching_policy: matchingPolicy, query_context: queryContext }, meta });
+      });
+      const result = await wire(await handleMcpRequest(rpc('tools/call', { name, arguments: { uploaded_by: 'Alex Rao' } }),
+        { authenticate: async () => key(), platform, read }));
+      expect(result.result.isError).not.toBe(true);
+      expect(read).toHaveBeenCalledOnce();
+    }
+  });
   it('browses knowledge without a mandatory query and preserves pagination', async () => {
     const read = vi.fn(async (request: Request, path: string[]) => {
       expect(path).toEqual(['wiki', 'pages']);
@@ -280,9 +297,18 @@ describe('MCP read-only protocol', () => {
     expect(result.result.structuredContent.meta.requestId).toBe(meta.requestId);
   });
   it('returns recorded filter options without repeating the input schema catalog', async () => {
-    const read = vi.fn(async () => Response.json({ data: { catalog: WAREHOUSE_FILTER_CATALOG, options: { city: ['Bengaluru'] }, truncated: false }, meta }));
+    const read = vi.fn(async () => Response.json({ data: { catalog: WAREHOUSE_FILTER_CATALOG, options: { city: ['Bengaluru'], uploaded_by: ['Alex Rao'] }, truncated: true, uploaded_by_truncated: false, uploader_guidance: 'Copy a complete uploader name.' }, meta }));
     const result = await wire(await handleMcpRequest(rpc('tools/call', { name: 'warehouse_filters', arguments: {} }), { authenticate: async () => key(), read }));
-    expect(result.result.structuredContent.data).toEqual({ options: { city: ['Bengaluru'] }, truncated: false });
+    expect(result.result.structuredContent.data).toEqual({ options: { city: ['Bengaluru'], uploaded_by: ['Alex Rao'] }, truncated: true, uploaded_by_truncated: false, uploader_guidance: 'Copy a complete uploader name.' });
+  });
+  it.each(['claude', 'whatsapp'] as const)('preserves actionable uploader ambiguity for %s without a fabricated count', async platform => {
+    const read = vi.fn(async () => Response.json({ error: { code: 'UPLOADER_NAME_AMBIGUOUS', message: 'This name belongs to multiple uploaders.' }, meta }, { status: 422 }));
+    const result = await wire(await handleMcpRequest(rpc('tools/call', { name: 'warehouse_summary', arguments: { uploaded_by: 'Alex Rao' } }), { authenticate: async () => key(), platform, read }));
+    expect(result.result.isError).toBe(true);
+    expect(result.result.structuredContent).toMatchObject({ status: 422, error: {
+      code: 'UPLOADER_NAME_AMBIGUOUS', recovery: { retryable: false, action: 'correct_query' },
+    } });
+    expect(result.result.structuredContent).not.toHaveProperty('data');
   });
   it.each([{ phone: '9876543210' }, { limit: 1000 }, { docks_min: -1 }])('rejects unsupported filters before business reads: %j', async args => {
     const read = vi.fn();
@@ -409,6 +435,10 @@ describe('MCP read-only protocol', () => {
     const crm = document.paths['/crm/opportunities'].get.parameters;
     expect(crm.find(parameter => parameter.name === 'assignee')).toMatchObject({ in: 'query', schema: { type: 'string', maxLength: 80 } });
     expect(document.paths['/crm/summary'].get.parameters.some(parameter => parameter.name === 'assignee')).toBe(true);
+    for (const route of ['/warehouses', '/warehouses/summary'] as const) {
+      expect(document.paths[route].get.parameters.find(parameter => parameter.name === 'uploaded_by')).toMatchObject({ in: 'query', schema: { type: 'string' } });
+    }
+    expect(document.components.schemas.Warehouse.properties.uploaded_by).toMatchObject({ type: ['string', 'null'], maxLength: 80 });
     expect(crm.map(parameter => parameter.name)).toEqual(expect.arrayContaining(['q', 'date_field', 'period', 'date_from', 'date_to', 'sort', 'follow_up_status', 'requirement_sqft_min', 'requirement_sqft_max', 'micro_market', 'lead_source', 'lease_duration', 'industry', 'repeat_client']));
     expect(document.components.schemas.Opportunity.properties).toHaveProperty('source_created_at');
     expect(Object.keys(document.components.schemas.Opportunity.properties)).toEqual(expect.arrayContaining(['budget', 'recorded_value', 'lead_source', 'lease_duration', 'industry_verticals', 'occupancy_timelines', 'preferred_languages', 'repeat_client', 'last_note_at', 'last_task_at', 'recorded_follow_up_count']));
@@ -436,14 +466,14 @@ describe('MCP read-only protocol', () => {
     expect(document.paths['/crm/filters'].get.parameters.map(parameter => parameter.name)).toEqual(['view', 'assigned_to']);
   });
   it('preserves sanitization through the actual API boundary', async () => {
-    const query = vi.fn(async (sql: string) => ({ rows: sql.includes('VerifiedNumber') ? [employee] : sql.includes('"Warehouse"') ? [{ id: 12, city: 'Bengaluru', contactNumber: '9876543210', media: { secret: 'private' }, total_space_sqft: [40000] }] : [] }));
+    const query = vi.fn(async (sql: string) => ({ rows: sql.includes('VerifiedNumber') && !sql.includes('"Warehouse"') ? [employee] : sql.includes('"Warehouse"') ? [{ id: 12, city: 'Bengaluru', contactNumber: '9876543210', media: { secret: 'private' }, total_space_sqft: [40000] }] : [] }));
     const read: typeof handleApiRequest = (request, path, deps) => handleApiRequest(request, path, { ...deps, transaction: async work => work({ query } as unknown as PoolClient), audit: () => {} });
     const body = await wire(await handleMcpRequest(rpc('tools/call', { name: 'read_warehouse', arguments: { id: 12 } }), { authenticate: async () => key(), read }));
     expect(body.result.structuredContent.data.id).toBe(12);
     expect(JSON.stringify(body)).not.toMatch(/9876543210|contactNumber|media|secret/);
   });
   it('transports selected source context and unparsed numeric evidence through the real MCP and API boundaries', async () => {
-    const query = vi.fn(async (sql: string) => ({ rows: sql.includes('VerifiedNumber') ? [employee]
+    const query = vi.fn(async (sql: string) => ({ rows: sql.includes('VerifiedNumber') && !sql.includes('"Warehouse"') ? [employee]
       : sql.includes('"Warehouse"') ? [{ id: 12, total_space_sqft: [40000],
         recorded_context: { fire_safety_measures: 'Hydrants installed; document pending', compliances: 'Reported compliant' },
         field_evidence: { dock_count: { source: 'Two operating; another possible' } } }] : [] }));

@@ -121,7 +121,7 @@ describe('warehouse query boundary', () => {
     expect(sql).not.toContain("King's Road");
     expect(values).toEqual(['Bangalore', "King's Road", 4, 6, 12, 11]);
     expect(sql).toContain('w."contactPerson" END AS owner_name');
-    expect(sql).not.toMatch(/contactNumber|address|googleLocation|uploadedBy|scoutNotes/);
+    expect(sql).not.toMatch(/contactNumber|address|googleLocation|scoutNotes/);
   });
 
   it('keeps strict and unknown controls independent for each numeric constraint', async () => {

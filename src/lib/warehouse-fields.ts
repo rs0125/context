@@ -1,6 +1,7 @@
 import { sanitizeLabel } from './privacy';
 import { DATE_PERIODS } from './query-time';
 import { OWNER_MATCH_MODES } from './warehouse-owner';
+import { UPLOADER_GUIDANCE, UPLOADER_NAME_SQL } from './warehouse-uploader';
 import type { RedactedCrmText } from './crm-redaction';
 import { redactWarehouseRecordedSource, warehouseRecordedValueSql, WAREHOUSE_NUMERIC_SOURCE_MAX_BYTES } from './warehouse-recorded-context';
 
@@ -31,6 +32,7 @@ export const WAREHOUSE_NUMERIC_FIELDS: readonly WarehouseNumericField[] = [
 ];
 
 export const WAREHOUSE_CATEGORY_FIELDS = [
+  { name: 'uploaded_by', column: UPLOADER_NAME_SQL, description: UPLOADER_GUIDANCE },
   { name: 'city', column: 'w.city', description: 'Exact city, ignoring case and surrounding spaces. Bangalore/Bengaluru and Gurgaon/Gurugram are aliases.' },
   { name: 'state', column: 'w.state', description: 'Exact state, ignoring case and surrounding spaces.' },
   { name: 'type', column: 'w."warehouseType"', description: 'Exact warehouse type; discover stored values from /warehouses/filters.' },
