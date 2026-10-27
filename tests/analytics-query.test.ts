@@ -36,6 +36,11 @@ describe('analytics query calendar and schema', () => {
     expect(validateGa4Query(new URLSearchParams('report=events&event_name=generate_lead')).event_name).toBe('generate_lead');
     expect(validateGa4Query(new URLSearchParams({ report: 'warehouse_interest', event_name: 'a'.repeat(80) })).event_name).toHaveLength(80);
   });
+  it.each(['report=overview&campaign_id=123', 'report=ads_costs&device=mobile', 'report=ads_costs&country=India',
+    'report=ads_costs&landing_page_contains=/listings', 'report=ads_campaigns&campaign_id=9223372036854775808',
+    'report=ads_queries&campaign_id=abc', 'report=ads_keywords&event_name=generate_lead'])('rejects incompatible GA4 Ads filters: %s', value => {
+    expect(() => validateGa4Query(new URLSearchParams(value))).toThrowError();
+  });
   it('accepts bounded GA4 segments, source domains and aggregate comparisons', () => {
     expect(validateGa4Query(new URLSearchParams({ landing_page_contains: '/warehouses/', device: 'mobile', country: 'India',
       channel: 'Organic Search', source: 'google.com', compare_to: 'previous_period' })))

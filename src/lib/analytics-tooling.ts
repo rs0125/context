@@ -1,4 +1,10 @@
 import { z } from 'zod';
+import { ANALYTICS_SOURCES } from './analytics-query';
+
+export const analyticsCapabilitiesInput = z.object({
+  source: z.enum(ANALYTICS_SOURCES).describe('Inspect one source only. Use google_ads for native Ads, ga4 for website analytics, or search_console for organic Search; call separately when comparing sources.'),
+}).strict();
+import { googleAdsCapabilitiesOutput } from './google-ads-tooling';
 import { ANALYTICS_PERIODS, GA4_REPORT_PRESETS, SEARCH_CONSOLE_GROUPS } from './analytics';
 
 const date = z.string().regex(/^[1-9]\d{3}-\d{2}-\d{2}$/);
@@ -15,6 +21,7 @@ const datesAndPage = {
 export const ga4ToolInput = z.object({
   report: z.enum(GA4_REPORT_PRESETS).describe('For form-vs-session or page-type performance questions use form_performance: separate form_submit/generate_lead counts and server-calculated events per 100 matching entry sessions. One aggregate cohort per call; no event_name, page_path_contains, cursor or compare_to. overview: overall traffic/engagement; daily: trend; acquisition: session channels/sources; landing_pages: entry paths; devices/countries: audience. pages: viewed paths; events: event counts. first_visits: first_visit by entry, not later journeys. form_submissions: separate form events by recorded event page. warehouse_interest: tracked geography; lead_sources: form context. Check capabilities for metric/event definitions.').optional(),
   ...datesAndPage,
+  campaign_id: z.string().regex(/^[1-9]\d{0,18}$/).describe('GA4 ads_costs/ads_campaigns/ads_keywords/ads_queries only: exact campaign ID string. ads_costs reports imported spend in the property currency; the other Ads presets report session-attributed website outcomes. These are separate from native Google Ads conversions.').optional(),
   event_name: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,79}$/).describe('Exact event name for events or warehouse_interest. On form_submissions only form_submit or generate_lead; omit to report both separately. first_visits fixes first_visit and does not accept this parameter. Counts are events, not unique people or CRM leads.').optional(),
   landing_page_contains: literal.describe('Case-sensitive entry-path substring, for example /warehouses/bengaluru. Filters by landing page across any report; it does not filter every page viewed. No query string, fragment or contact details.').optional(),
   page_path_contains: literal.describe('Case-sensitive recorded event-page path substring, available only on pages, events and form_submissions. Different from session entry. For tracked forms it can reflect the page where the form opened. Combines with landing_page_contains using AND. No URL query, fragment or contact details.').optional(),
@@ -36,22 +43,23 @@ export const analyticsInterpretationOutput = z.object({
   event_definitions: z.array(eventDefinition), limits: z.array(z.string()),
 });
 export const analyticsCapabilitiesOutput = z.object({
-  read_only: z.literal(true), access: z.literal('analysts_only'),
+  read_only: z.literal(true), access: z.literal('analysts_only'), requested_source: z.enum(ANALYTICS_SOURCES),
+  google_ads: googleAdsCapabilitiesOutput.nullable(),
   ga4: z.object({ status: z.enum(['available', 'not_configured', 'unavailable']), property: nullableText, timezone: nullableText,
     custom_dimensions: z.array(z.string()), source_fetched_at: z.string().datetime().nullable(), error_code: nullableText,
     event_definitions: z.array(eventDefinition),
     metric_definitions: z.array(z.object({ name: z.string(), unit: z.string(), definition: z.string(), calculation: nullableText })),
     reports: z.array(z.object({ name: z.enum(GA4_REPORT_PRESETS), available: z.boolean(), reason: nullableText,
       dimensions: z.array(z.string()), metrics: z.array(z.string()), event_name: nullableText, event_names: z.array(z.string()),
-      read_strategy: z.enum(['single_report', 'three_matched_aggregates']).optional() })) }),
+      read_strategy: z.enum(['single_report', 'three_matched_aggregates']).optional() })) }).nullable(),
   search_console: z.object({ status: z.enum(['configured_not_verified', 'not_configured']), property: nullableText,
-    timezone: z.literal('America/Los_Angeles'), groups: z.array(z.enum(SEARCH_CONSOLE_GROUPS)) }),
+    timezone: z.literal('America/Los_Angeles'), groups: z.array(z.enum(SEARCH_CONSOLE_GROUPS)) }).nullable(),
   periods: z.array(z.enum(ANALYTICS_PERIODS)), default_period: z.literal('last_28_days'),
   max_date_range_days: z.literal(93), max_rows_per_page: z.literal(25), max_report_rows: z.literal(500),
   served_at: z.string().datetime(), guidance: z.array(z.string()),
 });
 const analyticsReportBaseOutput = z.object({
-  source: z.object({ system: z.enum(['ga4', 'search_console']), property: z.string(), timezone: z.string() }),
+  source: z.object({ system: z.enum(['ga4', 'search_console']), property: z.string(), timezone: z.string(), currency: z.string().optional() }),
   source_status: z.object({ status: z.literal('available'), read_only: z.literal(true) }),
   report: z.string(),
   query_context: z.object({ date_from: date, date_to: date, timezone: z.string(), local_date: date,
@@ -59,7 +67,7 @@ const analyticsReportBaseOutput = z.object({
     event_name: nullableText, event_names: z.array(z.string()), query_contains: nullableText, page_contains: nullableText, data_state: z.enum(['final', 'all']).nullable(),
     landing_page_contains: nullableText, page_path_contains: nullableText, device: nullableText, country: nullableText, channel: nullableText, source: nullableText,
     query_equals: nullableText, page_equals: nullableText, query_not_contains: nullableText,
-    compare_to: z.literal('previous_period').nullable() }),
+    compare_to: z.literal('previous_period').nullable(), campaign_id: nullableText }),
   columns: z.array(z.object({ name: z.string(), kind: z.enum(['dimension', 'metric']), unit: z.string(),
     definition: z.string().optional(), calculation: z.string().optional() })),
   items: z.array(z.object({ dimensions: z.record(z.string(), nullableText), metrics: z.record(z.string(), z.number().nullable()),
@@ -114,7 +122,7 @@ export const searchConsoleToolInput = z.object({
 
 export { ANALYTICS_INSTRUCTIONS } from './prompt-definitions';
 
-export function analyticsQueryParameters(input: typeof ga4ToolInput | typeof searchConsoleToolInput) {
+export function analyticsQueryParameters(input: z.ZodObject) {
   const schema = z.toJSONSchema(input);
   return Object.entries(schema.properties ?? {}).map(([name, definition]) => ({
     name, in: 'query', required: false, schema: definition,

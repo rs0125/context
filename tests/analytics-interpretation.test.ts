@@ -205,11 +205,11 @@ describe('structured analytics interpretation contract', () => {
   });
 
   it('exposes both supported presets and the event/page filter in discovery', async () => {
-    const capabilities = analyticsCapabilitiesOutput.parse(await analyticsCapabilities());
-    expect(capabilities.ga4.reports).toContainEqual(expect.objectContaining({
+    const capabilities = analyticsCapabilitiesOutput.parse(await analyticsCapabilities('ga4'));
+    expect(capabilities.ga4!.reports).toContainEqual(expect.objectContaining({
       name: 'first_visits', available: true, dimensions: ['landingPage'], metrics: ['eventCount', 'totalUsers'], event_name: 'first_visit',
     }));
-    expect(capabilities.ga4.reports).toContainEqual(expect.objectContaining({
+    expect(capabilities.ga4!.reports).toContainEqual(expect.objectContaining({
       name: 'form_submissions', available: true, dimensions: ['eventName', 'pagePath'], metrics: ['eventCount', 'totalUsers'],
     }));
     expect(ga4ToolInput.parse({ report: 'form_submissions', page_path_contains: '/contact' }))

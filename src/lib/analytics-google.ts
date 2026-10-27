@@ -96,16 +96,17 @@ function put<K, V>(map: Map<K, V>, key: K, value: V, maximum = MAX_CACHE) {
   while (map.size >= maximum) map.delete(map.keys().next().value!);
   map.set(key, value);
 }
-async function accessToken(credentials: Credentials): Promise<Token> {
-  const cached = tokens.get(credentials.identity);
+async function accessToken(credentials: Credentials, scope: string): Promise<Token> {
+  const identity = `${credentials.identity}:${scope}`;
+  const cached = tokens.get(identity);
   if (cached && cached.expires > Date.now() + 60_000) return cached;
-  const pending = tokenInflight.get(credentials.identity);
+  const pending = tokenInflight.get(identity);
   if (pending) return pending;
   if (tokenInflight.size >= MAX_INFLIGHT) throw new HttpError(503, 'ANALYTICS_BUSY', 'Analytics reads are busy. Retry later.');
   const promise = deadline(async signal => {
     let key: Awaited<ReturnType<typeof importPKCS8>>;
     try { key = await importPKCS8(credentials.privateKey, 'RS256'); } catch { configError(); }
-    const assertion = await new SignJWT({ scope: SCOPES }).setProtectedHeader({ alg: 'RS256', typ: 'JWT', ...(credentials.keyId ? { kid: credentials.keyId } : {}) })
+    const assertion = await new SignJWT({ scope }).setProtectedHeader({ alg: 'RS256', typ: 'JWT', ...(credentials.keyId ? { kid: credentials.keyId } : {}) })
       .setIssuer(credentials.email).setAudience(TOKEN_URL).setIssuedAt().setExpirationTime('1h').sign(key);
     const result = await jsonRequest(TOKEN_URL, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion }).toString() }, signal);
@@ -115,14 +116,26 @@ async function accessToken(credentials: Credentials): Promise<Token> {
       || value.token_type !== 'Bearer' || typeof value.expires_in !== 'number' || !Number.isInteger(value.expires_in)
       || value.expires_in < 120 || value.expires_in > 7200) analyticsSourceError();
     const token = { value: value.access_token, expires: Date.now() + Math.min(value.expires_in, 3600) * 1000 };
-    put(tokens, credentials.identity, token, 4);
+    put(tokens, identity, token, 4);
     return token;
   });
-  tokenInflight.set(credentials.identity, promise);
-  try { return await promise; } finally { tokenInflight.delete(credentials.identity); }
+  tokenInflight.set(identity, promise);
+  try { return await promise; } finally { tokenInflight.delete(identity); }
 }
-type GoogleRead = { kind: 'ga4_report' | 'ga4_metadata'; property: string } | { kind: 'search_console'; site: string };
+export function googleAdsCustomerId(): string {
+  const value = process.env.GOOGLE_ADS_CUSTOMER_ID;
+  if (!value || !/^[1-9]\d{9}$/.test(value)) configError();
+  return value;
+}
+type GoogleRead = { kind: 'ga4_report' | 'ga4_metadata'; property: string } | { kind: 'search_console'; site: string }
+  | { kind: 'google_ads'; customer: string };
 function destination(read: GoogleRead): string {
+  if (read.kind === 'google_ads') {
+    if (read.customer !== googleAdsCustomerId()) configError();
+    // Google Ads has one OAuth scope. This transport exposes only Search; no
+    // mutate, upload, manager-account selection or arbitrary provider URL.
+    return `https://googleads.googleapis.com/v26/customers/${read.customer}/googleAds:search`;
+  }
   if (read.kind === 'search_console') return `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(read.site)}/searchAnalytics/query`;
   if (!/^[1-9]\d{0,19}$/.test(read.property)) configError();
   return `https://analyticsdata.googleapis.com/v1beta/properties/${read.property}${read.kind === 'ga4_metadata' ? '/metadata' : ':runReport'}`;
@@ -132,6 +145,7 @@ function destination(read: GoogleRead): string {
 export async function googleAnalyticsRead<T>(read: GoogleRead, body: unknown, project: (raw: unknown) => T, signal?: AbortSignal): Promise<{ data: T; source_fetched_at: string; cache_hit: boolean }> {
   if (signal?.aborted) throw new HttpError(503, 'ANALYTICS_SOURCE_TIMEOUT', 'The analytics source did not respond in time.');
   const credentials = analyticsCredentials();
+  const scope = read.kind === 'google_ads' ? 'https://www.googleapis.com/auth/adwords' : SCOPES;
   const url = destination(read);
   const serialized = body === undefined ? undefined : JSON.stringify(body);
   const key = createHash('sha256').update(JSON.stringify([credentials.identity, url, serialized])).digest('hex');
@@ -142,12 +156,13 @@ export async function googleAnalyticsRead<T>(read: GoogleRead, body: unknown, pr
   if (responseInflight.size >= MAX_INFLIGHT) throw new HttpError(503, 'ANALYTICS_BUSY', 'Analytics reads are busy. Retry later.');
   const promise = (async () => {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const token = await accessToken(credentials);
+      const token = await accessToken(credentials, scope);
       if (signal?.aborted) throw new HttpError(503, 'ANALYTICS_SOURCE_TIMEOUT', 'The analytics source did not respond in time.');
       const result = await deadline(signal => jsonRequest(url, { method: serialized === undefined ? 'GET' : 'POST',
         headers: { Authorization: `Bearer ${token.value}`, ...(serialized ? { 'Content-Type': 'application/json' } : {}) }, body: serialized }, signal), signal);
       if (result.status === 401 && attempt === 0) {
-        if (tokens.get(credentials.identity) === token) tokens.delete(credentials.identity);
+        const identity = `${credentials.identity}:${scope}`;
+        if (tokens.get(identity) === token) tokens.delete(identity);
         continue;
       }
       if (result.status !== 200) providerError(result.status);
@@ -161,4 +176,14 @@ export async function googleAnalyticsRead<T>(read: GoogleRead, body: unknown, pr
   responseInflight.set(key, promise);
   try { const result = await promise; return { data: structuredClone(result.value) as T, source_fetched_at: result.fetchedAt, cache_hit: false }; }
   finally { responseInflight.delete(key); }
+}
+
+export async function withAnalyticsDeadline<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => { timer = setTimeout(() => {
+    controller.abort(); reject(new HttpError(503, 'ANALYTICS_SOURCE_TIMEOUT', 'The analytics source did not respond in time.'));
+  }, 35_000); });
+  try { return await Promise.race([work(controller.signal), expired]); }
+  finally { controller.abort(); clearTimeout(timer); }
 }

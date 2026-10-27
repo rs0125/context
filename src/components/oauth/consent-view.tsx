@@ -17,7 +17,7 @@ const permissionLabels: Record<string, string> = {
   'knowledge:read': 'Company guides',
   'warehouses:read': 'Warehouse listings',
   'crm:read': 'CRM records',
-  'analytics:read': 'Website analytics (Analyst access)',
+  'analytics:read': 'Website and Ads analytics (Analyst access)',
   'cms:read': 'Website CMS pages and schemas (Analyst or Admin access)',
   'gis:write': 'Create and undo own GIS points',
   'mail:drafts': 'Create and read own email drafts',

@@ -1,6 +1,6 @@
-# Website analytics
+# Website and Ads analytics
 
-The engine provides read-only Google Analytics 4 and Google Search Console reports through the existing REST API and MCP connection. These reports require current Analyst access and `analytics:read` on the credential. Active roster admins inherit Analyst access; other employees receive it through the main Wareongo dashboard employee editor. Analyst access also permits all CRM leads, subject to the separate `crm:read` scope.
+The engine provides read-only Google Analytics 4, Google Search Console and native Google Ads reports through the existing REST API and MCP connection. These reports require current Analyst access and `analytics:read` on the credential. Active roster admins inherit Analyst access; other employees receive it through the main Wareongo dashboard employee editor. Analyst access also permits all CRM leads, subject to the separate `crm:read` scope.
 
 ## Configure the sources
 
@@ -11,6 +11,7 @@ The engine provides read-only Google Analytics 4 and Google Search Console repor
 | Variable | Value |
 | --- | --- |
 | `GOOGLE_ANALYTICS_SERVICE_ACCOUNT_JSON` | Complete service-account JSON as one inline JSON value, including its private key. This is a secret, not a file path. |
+| `GOOGLE_ADS_CUSTOMER_ID` | Optional fixed production Ads customer ID: ten digits without hyphens. Manager and test accounts are rejected. |
 | `GA4_PROPERTY_ID` | Numeric GA4 property ID, such as `<NUMERIC_PROPERTY_ID>`. This is different from a `G-…` measurement ID. |
 | `SEARCH_CONSOLE_SITE_URL` | Exact configured property, such as `sc-domain:example.com` or `https://www.example.com/`. URL-prefix configuration currently supports an HTTPS root URL with its trailing slash. |
 
@@ -36,8 +37,8 @@ The current active employee's `VerifiedNumber.analystAccess` or `VerifiedNumber.
 Existing employee keys and OAuth grants keep their existing scopes. An eligible Analyst should:
 
 1. Sign in to the console and replace their employee key in **Connect Claude → Key settings**. Replacing the key invalidates connections using the old key.
-2. Remove and re-add the Claude connector so it registers a new OAuth client, then approve a consent request that includes **Website analytics (Analyst access)** using the new employee key. An older client's registered scopes stay fixed; refreshing its token or reconnecting with that same client cannot add the permission.
-3. Check **Your read access** for Website analytics, then ask the connector to run `analytics_capabilities`.
+2. Remove and re-add the Claude connector so it registers a new OAuth client, then approve a consent request that includes **Website and Ads analytics (Analyst access)** using the new employee key. An older client's registered scopes stay fixed; refreshing its token or reconnecting with that same client cannot add the permission.
+3. Check **Your read access** for Website and Ads analytics, then ask the connector to run `analytics_capabilities` with `source=ga4`, `source=search_console` or `source=google_ads`.
 
 For another MCP client, its requested OAuth scopes must include `analytics:read`. For a REST client, replace its stored employee bearer key securely. Never paste a key into chat. Analytics access does not create a new knowledge-page restriction: knowledge pages retain their existing three reader permissions.
 
@@ -45,9 +46,14 @@ For another MCP client, its requested OAuth scopes must include `analytics:read`
 
 | MCP tool | REST endpoint | Purpose |
 | --- | --- | --- |
-| `analytics_capabilities` | `GET /api/v1/analytics/capabilities` | Discover reports, returned metrics, metric definitions, available custom dimensions and event interpretation. |
+| `analytics_capabilities` | `GET /api/v1/analytics/capabilities?source=google_ads` | Select one source (`ga4`, `search_console`, `google_ads`); discover reports, returned metrics, metric definitions, available custom dimensions and event interpretation. |
 | `ga4_report` | `GET /api/v1/analytics/ga4` | Traffic, engagement, acquisition, audience, recorded first visits and form/event reports. |
 | `search_console_report` | `GET /api/v1/analytics/search-console` | Google organic Search clicks, impressions, CTR and position. |
+| `google_ads_filters` | `GET /api/v1/analytics/google-ads/filters` | Campaign and conversion-action names with string IDs; campaign-scoped ad groups. |
+| `google_ads_report` | `GET /api/v1/analytics/google-ads` | Native advertising performance and aggregate comparisons. |
+| `read_google_ads_campaign` | `GET /api/v1/analytics/google-ads/campaigns/{id}` | Current campaign settings and bounded context; `scope=account` uses `/api/v1/analytics/google-ads/account` without an ID. |
+
+Capability discovery requires `source`; there is no combined-health default. Only the selected source is inspected, and the other source nodes are null. This keeps an unrelated source timeout from invalidating a prepared reply. For cross-source comparisons, discover each source separately. Existing clients must add the source parameter.
 
 All REST requests require the employee bearer key. The server uses its service account only for upstream Google reads. The analytics console addition displays permission status; it is not a separate reporting dashboard.
 
@@ -93,6 +99,88 @@ Example tool arguments, without credentials:
 {"group":"query_page","period":"last_28_days","page_contains":"/warehouses/bengaluru","query_not_contains":"wareongo","country":"ind","limit":10}
 ```
 
+## Native Google Ads
+
+Give the existing service account read access to the intended Ads customer, enable Google Ads API in its Cloud project and configure `GOOGLE_ADS_CUSTOMER_ID`. Account access and Cloud project access are separate. The transport uses API v26 and the `adwords` OAuth scope, with a separate token cache from GA4/Search Console. It exposes only fixed Search queries. No developer-token, manager-login or caller-selected account is accepted. See [service-account access](https://developers.google.com/google-ads/api/docs/oauth/service-accounts) and [project access after the developer-token sunset](https://developers.google.com/google-ads/api/docs/api-policy/developer-token).
+
+Existing Analyst credentials with `analytics:read` cover these tools; there is no new scope or database migration. The active role and credential are revalidated before and after source/cache reads. Google requests run outside the database transaction. A missing Ads configuration leaves GA4 and Search Console usable; `analytics_capabilities.google_ads` reports its own status, account, supported reports and filter combinations.
+
+Start with `google_ads_filters`. It returns campaign and account-wide conversion-action choices, plus ad groups when `campaign_id` is supplied. `limit` is 1–100 choices per list (default 100). Follow `nextCursor` with the same campaign and page size until null; exhausted lists are empty on later pages. Discovery has no 100-choice total cap. Its ID-based cursor is bound to the configured account and credential. Lists are not a frozen snapshot. `ad_groups_loaded=false` means that list was not requested. Names are sanitized display labels and can collide; use string IDs. Conversion-action availability does not establish campaign optimization goals.
+
+| Report | Purpose / additional filters |
+| --- | --- |
+| `overview` | Full aggregate; optional `compare_to=previous_period`. |
+| `daily` | Chronological daily trend. |
+| `campaigns` | Campaign performance; optional `campaign_status`. |
+| `ad_groups`, `ads` | Performance by group or ad. |
+| `keywords` | Keyword, match type and `current_quality_score` at retrieval; `keyword_contains`, `match_type`. |
+| `keyword_diagnostics` | Daily historical quality and its components, with explicitly current status, quality components and CPC bid; keyword and match-type filters. |
+| `search_terms` | Reported queries; `query_contains` or `query_equals`. Excludes Performance Max. |
+| `search_term_matches` | Reported query with matched keyword ID/text and matching source/type. Keyword segmentation excludes Performance Max. |
+| `campaign_search_terms` | Campaign-level reported queries, including Performance Max where available, without keyword/ad-group segmentation. |
+| `landing_pages` | Landing URLs with query strings/fragments removed. |
+| `devices`, `networks` | Performance by device or network. |
+| `locations` | Coarse country/region/city by campaign and `targeting_location`, with names and IDs; optional `country_id`. Targeted and untargeted rows remain distinct. |
+| `schedule` | Day-of-week/hour performance. |
+| `conversions` | Named actions, conversions, all-conversions and value; optional `conversion_action_id`. No spend or selected-action CPA. |
+| `conversion_dates` | Campaign/day/action metrics by conversion occurrence date, including all-conversion value; optional `conversion_action_id`. No spend or CPA. |
+| `campaign_diagnostics` | Impression share, budget/rank loss, top-position shares, invalid clicks and phone metrics; optional `campaign_status`. |
+| `asset_performance` | Performance of campaign-asset associations; optional `asset_id`. Overlapping asset rows are not additive totals. |
+| `asset_groups` | Asset-group performance with current status/strength; optional `asset_group_id`. |
+| `age_ranges`, `genders`, `income_ranges` | Google-estimated demographic categories, including unknown categories; optional `ad_group_id`. |
+
+Every report supports `campaign_id`; other filters vary. Use `analytics_capabilities.google_ads.reports[].filters` for the exact supported combinations. Literal `*_contains` filters are case-insensitive substrings, with regex metacharacters escaped. Filters combine with AND, and unsupported combinations fail explicitly. Overview reads one source aggregate at account, campaign or ad-group scope; it never reconstructs totals from a bounded page.
+
+Native report dates are inclusive in the Ads account timezone. The default is the last 28 completed days, with the existing period choices and a 93-day maximum. Results page at 10 rows by default, at most 25 per call and 500 per report; copy `nextCursor` unchanged. Daily and conversion-date reports are chronological; other grouped reports rank by spend, conversions/lag by all-conversions, and search categories by clicks, with resource keys breaking ties where Google permits ordering. Projected results are cached for five minutes. Refreshes can move rows; pages are not frozen snapshots or overall totals. Low-volume search terms can be withheld.
+
+Spend, bids and budgets are converted from micros to the returned account currency. Rates are fractions. Google impression-share sentinels are represented as null metrics plus `metric_bounds`, for example `{ "operator": "lt", "value": 0.1 }`; a bound is not an exact percentage. Conversions can be fractional, and all-conversions includes additional actions. Neither represents unique CRM leads; conversion value is not verified revenue. Missing optional metrics stay null, and only an explicit source zero establishes zero. Rates require present inputs and nonzero denominators. Interaction-date reports and conversion-occurrence reports have distinct `interpretation.date_basis`; do not calculate CPA using conversion-date counts and interaction-date spend. Conversion data can change for older periods; `provisional=false` is a recency flag, not finality. Fetch timestamps ending in `Z` are UTC.
+
+`read_google_ads_campaign` defaults to `scope=campaign` and requires `id`. For `scope=account`, omit `id`; the REST path is `/api/v1/analytics/google-ads/account`. Account scope supports `asset_inventory` (default), `audiences`, `assets` (account links), `conversion_actions`, and unattached `recommendations`. Account reads work even if there are no campaigns.
+
+The reader has these sections:
+
+| Section | Returned context / filters |
+| --- | --- |
+| `settings` | Delivery and bidding status/reasons, strategy targets and CPC ceiling, budgets, networks, optimization score, bidding-system status, maximize-conversion targets and geographic presence/interest options. One row. |
+| `ad_group_settings` | Current ad-group bid/target settings and primary status/reasons; optional `ad_group_id`. Configured bids are not actual CPC. |
+| `asset_inventory` | Account scope: all asset IDs and format content, including unlinked/ad-level assets, lead-form configuration and structured snippets; optional `asset_id`. Inventory presence is not serving evidence. |
+| `audiences` | Account scope: remarketing-list names, type, membership status and estimated Search/Display sizes; optional `user_list_id`. No member identities or campaign-targeting claim. |
+| `targeting` | Location/language IDs and names, schedules, devices, status and bid modifiers. Other criteria may expose only type/ID. |
+| `negative_keywords` | Campaign, ad-group, attached shared-list and account-list exclusions, retaining origin and IDs. Filter `origin`, `ad_group_id` or `shared_set_id`. |
+| `negative_lists` | Attached shared/account list metadata and member counts; filter `origin` or `shared_set_id`. |
+| `creatives` | Responsive-search text, sanitized URLs, current strength, serving and policy diagnostics. |
+| `assets` | Current campaign/ad-group/account associations, text, sitelinks, callouts, image URLs, video IDs, lead-form configuration, structured snippets and price offerings. Filter `origin`, `ad_group_id` or `asset_id`. Each price retains its currency and unit; null means no structured unit was supplied. |
+| `asset_groups` | Current asset-group settings, URLs and strength; optional `asset_group_id`. |
+| `conversion_actions` | Account-wide counting, attribution, lookback and value settings; optional `conversion_action_id`. |
+| `conversion_goals` | Campaign/account goal biddability, campaign configuration level and custom-goal actions when configured. |
+| `recommendations` | Campaign and unattached account suggestions with resource identity, available impact estimates and selected typed details; filter `origin`. Estimates are not measured improvements or approved actions. |
+| `changes` | Recent changed-resource references, typed field paths and account-local timestamps retaining fractional seconds. |
+
+Section filters are also listed in capabilities. Only `changes` accepts dates, within the last 30 days; actor emails and old/new payloads are excluded. Change events can lag or omit changes and are not a complete audit log. Optional flags absent from Google remain null; non-optional protobuf goal `biddable` flags follow Google's false default. Current fields are not historical snapshots. Account-wide actions/default goals and assets are explicitly labeled; availability alone does not establish that this campaign uses or served them. Read goal configuration level/custom goals before inferring effective optimization.
+
+Combined sections expose each source in `components`, including fetch/cache state and truncation. The top-level fetch time is the oldest component; any failed read fails the whole section. Results and each component are bounded at 500 rows: narrow the supported origin/ID filters if truncated. `quality.coverage_complete` describes source coverage, including nested collections, not whether the caller followed every page. Custom-goal action references are bounded at 500 members; other repeated detail fields are bounded at 20. Each item lists any `truncated_fields`, and truncation propagates to component and section quality separately from privacy redaction. A null cursor cannot certify that a nested list is complete. Foreign-account shared-list references appear in `unavailable_resources`; their members are not fetched under the fixed-account boundary. Exclusions retain duplicate text across origins, and cover keyword exclusions rather than every exclusion type. No Ads mutation, upload or optimization is exposed.
+
+Additional performance presets use the same date, filtering, pagination and privacy rules:
+
+| Preset | Meaning |
+| --- | --- |
+| `ad_asset_performance` | Ad-level asset metrics with campaign/ad-group/ad/asset identity and field type. Supports `ad_id` and `asset_id`; use account `asset_inventory` to read content. NOT_APPLICABLE performance labels can coexist with populated metrics. |
+| `conversion_lag` | Interaction-date conversion cohorts by action and delay bucket; accepts `conversion_action_id`. Recent cohorts can gain delayed conversions. No spend/CPA. |
+| `search_categories` | Google's search-category aggregation for one required `campaign_id`, ranked by clicks. Optional `category_id` accepts `0` for the uncategorized bucket. Not a reconstruction of withheld search terms. |
+| `click_types` | Click/impression/performance breakdown by interaction type. Segmented impressions may overlap. |
+| `parental_status` | Estimated parental-status categories, alongside age/gender/income presets; optional campaign/ad-group filters. |
+| `expanded_landing_pages` | Expanded destination URLs and performance. URL queries/fragments are withheld, so displayed URLs can collide. |
+
+`all_conversion_value` remains separate from `conversion_value`; neither establishes CRM revenue. Values can include negative adjustments. Conversion-date equivalents use the occurrence date. Search categories rank by clicks, conversions/lag by all-conversions, and occurrence dates chronologically.
+
+## GA4 Ads views
+
+The existing `ga4_report` adds `ads_costs`, `ads_campaigns`, `ads_keywords`, and `ads_queries`. Each supports an optional numeric-string `campaign_id`. All return customer/campaign IDs so matching does not depend on masked names. They cover linked advertising data within the configured GA4 property; native Ads is pinned separately to its configured customer.
+
+`ads_costs` returns imported advertiser cost, clicks and impressions by Ads campaign, using the GA4 property currency. It accepts dates and campaign ID, and rejects session filters because they do not define advertising spend. The other three presets return session-attributed website outcomes and retain normal session filters. `ads_campaigns` includes standard traffic and engagement metrics; keywords/queries return sessions, engaged sessions and key events. `(not set)` remains explicit when returned. GA4 key events, native Ads conversions and all-conversions must stay separate; matching labels or dates does not prove CRM attribution.
+
+Run deterministic coverage with `npx vitest run tests/google-ads.test.ts tests/analytics-google.test.ts tests/analytics-api.test.ts tests/analytics-mcp.test.ts`. Run the opt-in real Google suite with `CONTEXT_LIVE_GOOGLE_ADS_TEST=1 npx vitest run tests/google-ads-live.test.ts`; it loads only Google configuration from `.env.local`, performs read-only requests and makes no OpenAI calls.
+
 ## GA4 engagement and timing
 
 `overview`, `daily`, `acquisition`, `landing_pages`, `devices` and `countries` include engagement and timing by default. Use the usual report/date/filter arguments; no metric selector is needed. `analytics_capabilities.ga4.reports[].metrics` lists each report's returned metrics, and `ga4.metric_definitions` describes the added metrics and calculations. Report columns carry the same definitions and, for computed values, a `calculation` formula.
@@ -113,7 +201,7 @@ The two engagement-time averages use different denominators and should be named 
 
 `pages` includes total engagement seconds and average engagement seconds per active user alongside its existing views, users, events and key events. This describes activity associated with each viewed path. It does not add session-duration metrics or label engagement per active user as time per page view. Use `landing_pages` for session metrics by entry path, or filtered `overview` for an aggregate. `events`, `first_visits`, `form_submissions`, `warehouse_interest` and `lead_sources` return event-count reports; filtering to an event would not establish overall session engagement.
 
-There are still intentional coverage limits: `newUsers`, revenue, ad costs, funnel reports, retention/cohort analysis and broader attribution dimensions are not exposed. Returned measurements reflect what the property collected and Google's processing, configuration and privacy limits; the connector cannot reconstruct missing tracking. The available engagement metrics do not establish CRM conversions or verified commercial outcomes.
+There are still intentional coverage limits: `newUsers`, verified revenue, funnel reports, retention/cohort analysis and broader attribution dimensions are not exposed. Returned measurements reflect what the property collected and Google's processing, configuration and privacy limits; the connector cannot reconstruct missing tracking. The available engagement metrics do not establish CRM conversions or verified commercial outcomes.
 
 ## Recorded first visits and form activity
 

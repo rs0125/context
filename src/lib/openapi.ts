@@ -1,3 +1,4 @@
+import { GOOGLE_ADS_ACCOUNT_SECTIONS } from './google-ads-catalog';
 import { WAREHOUSE_RECORDED_FIELD_NAMES } from './warehouse-recorded-context';
 import { WAREHOUSE_FILTER_CATALOG, WAREHOUSE_NUMERIC_FIELDS, WAREHOUSE_SUMMARY_CATALOG } from "./warehouse-fields";
 import { ALL_STAGES, CRM_DATE_FIELDS, CRM_SORTS, CRM_FOLLOW_UP, CRM_SUMMARY_GROUPS } from "./data";
@@ -5,7 +6,9 @@ import { DATE_PERIODS } from "./query-time";
 import { CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS, CRM_INDUSTRIES, CRM_OCCUPANCY_TIMELINES, CRM_LANGUAGES } from "./crm-fields";
 import { z } from "zod";
 import { SCOPES } from "./auth";
-import { ga4ToolInput, searchConsoleToolInput, analyticsQueryParameters, analyticsReportOutput, analyticsCapabilitiesOutput } from "./analytics-tooling";
+import { ga4ToolInput, searchConsoleToolInput, analyticsQueryParameters, analyticsReportOutput, analyticsCapabilitiesOutput, analyticsCapabilitiesInput } from "./analytics-tooling";
+import { googleAdsFiltersInput, googleAdsReportInput, googleAdsCampaignInput } from "./google-ads-query";
+import { googleAdsFiltersOutput, googleAdsReportOutput, googleAdsCampaignOutput } from "./google-ads-tooling";
 import { shortlistAssessmentQuerySchema, shortlistAssessmentOutput } from "./shortlist-assessment";
 import { locationOutputSchema } from "./location-resolver";
 import { emailConnectionOutputSchema, emailDraftReadOutputSchema, emailDraftListOutputSchema } from "./gmail-tools";
@@ -495,7 +498,8 @@ export function getOpenApiDocument() {
         },
       },
       "/analytics/capabilities": {
-        get: { operationId: "analyticsCapabilities", tags: ["Analytics"], summary: "Discover available website analytics reports",
+        get: { operationId: "analyticsCapabilities", tags: ["Analytics"], summary: "Discover one analytics source",
+          parameters: analyticsQueryParameters(analyticsCapabilitiesInput).map(parameter => ({ ...parameter, required: true })),
           description: "Analyst access: report capabilities, event and metric definitions, and registered custom dimensions. Definitions distinguish recorded activity from individual journeys and CRM outcomes. Missing fields and source failures are reported as unavailable, never as zero traffic. Does not depend on the optional Analytics Admin API.",
           responses: jsonResponses("Available configured reports and source status.", false, z.toJSONSchema(analyticsCapabilitiesOutput)),
         },
@@ -513,6 +517,30 @@ export function getOpenApiDocument() {
           parameters: analyticsQueryParameters(searchConsoleToolInput),
           responses: jsonResponses("Search performance, coverage limits, source clock and pagination.", false, z.toJSONSchema(analyticsReportOutput)),
         },
+      },
+      "/analytics/google-ads/filters": {
+        get: { operationId: "googleAdsFilters", tags: ["Analytics"], summary: "Discover valid Google Ads names and IDs",
+          description: "Analyst access: bounded current campaign and conversion-action choices for the configured customer. Supply campaign_id for its ad groups. Copy string IDs into filters; inspect per-list truncation and ad_groups_loaded. Account-wide conversion actions do not establish a campaign's goals.",
+          parameters: analyticsQueryParameters(googleAdsFiltersInput),
+          responses: jsonResponses("Names, string IDs, supported enums and list coverage.", false, z.toJSONSchema(googleAdsFiltersOutput)) },
+      },
+      "/analytics/google-ads": {
+        get: { operationId: "googleAdsReport", tags: ["Analytics"], summary: "Read native Google Ads performance",
+          description: "Analyst access: fixed report presets with AND filters. Use overview for full aggregates and previous-period comparisons; grouped pages are not totals. Inclusive account-timezone dates, at most 93 days, default last 28 completed days. Spend is converted from micros to the stated currency; CTR is a fraction. Conversions, all_conversions, GA4 key events and unique CRM leads are distinct. Search terms can omit low-volume queries and exclude Performance Max. Preserve quality, cache age and pagination; copy cursors unchanged. Customer selection and arbitrary GAQL are not accepted.",
+          parameters: analyticsQueryParameters(googleAdsReportInput),
+          responses: jsonResponses("Performance, dates, units, quality, pagination and optional comparison.", false, z.toJSONSchema(googleAdsReportOutput)) },
+      },
+      "/analytics/google-ads/account": {
+        get: { operationId: "readGoogleAdsAccount", tags: ["Analytics"], summary: "Read account-wide Google Ads context without a campaign ID",
+          description: "Analyst access: asset inventory, audience-list metadata, account asset links, conversion actions and unattached recommendations. Current configuration only; bounded pages with explicit truncation and account scope.",
+          parameters: analyticsQueryParameters(googleAdsCampaignInput.omit({ id: true, scope: true }).extend({ section: z.enum(GOOGLE_ADS_ACCOUNT_SECTIONS).optional() })),
+          responses: jsonResponses("Account context with scope, provenance and coverage.", false, z.toJSONSchema(googleAdsCampaignOutput)) },
+      },
+      "/analytics/google-ads/campaigns/{id}": {
+        get: { operationId: "readGoogleAdsCampaign", tags: ["Analytics"], summary: "Read current campaign settings or bounded context",
+          description: "Analyst access: settings, targeting, campaign-level negative keywords, creatives, recommendations or recent change metadata. Only changes accepts dates, within the last 30 days; change history is incomplete and excludes actor emails and old/new payloads. Other sections describe current settings. Recommendations are suggestions, not approved actions. No settings are changed.",
+          parameters: [{ name: "id", in: "path", required: true, schema: z.toJSONSchema(googleAdsCampaignInput).properties!.id }, ...analyticsQueryParameters(googleAdsCampaignInput.omit({ id: true, scope: true }))],
+          responses: jsonResponses("Campaign section with source, coverage and pagination.", false, z.toJSONSchema(googleAdsCampaignOutput)) },
       },
       "/context": {
         get: {

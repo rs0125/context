@@ -2,11 +2,18 @@ import { createHash } from 'node:crypto';
 import { HttpError } from './errors';
 import { redactCrmText } from './crm-redaction';
 
+export const ANALYTICS_SOURCES = ['ga4', 'search_console', 'google_ads'] as const;
+export type AnalyticsSource = typeof ANALYTICS_SOURCES[number];
+export function validateAnalyticsCapabilities(query: URLSearchParams): AnalyticsSource {
+  parameters(query, ['source']);
+  return enumValue(query.get('source') ?? '', ANALYTICS_SOURCES, 'source');
+}
+
 export const ANALYTICS_PERIODS = ['today', 'yesterday', 'last_7_days', 'last_28_days', 'this_month', 'last_month'] as const;
-export const GA4_REPORT_PRESETS = ['overview', 'daily', 'acquisition', 'landing_pages', 'pages', 'devices', 'countries', 'events', 'warehouse_interest', 'lead_sources', 'first_visits', 'form_submissions', 'form_performance'] as const;
+export const GA4_REPORT_PRESETS = ['overview', 'daily', 'acquisition', 'landing_pages', 'pages', 'devices', 'countries', 'events', 'warehouse_interest', 'lead_sources', 'first_visits', 'form_submissions', 'form_performance', 'ads_costs', 'ads_campaigns', 'ads_keywords', 'ads_queries'] as const;
 export const SEARCH_CONSOLE_GROUPS = ['summary', 'date', 'query', 'page', 'query_page', 'country', 'device'] as const;
 const COMMON = ['period', 'date_from', 'date_to', 'limit', 'cursor', 'compare_to', 'device', 'country'] as const;
-export const GA4_QUERY_PARAMETER_NAMES = ['report', 'event_name', 'landing_page_contains', 'page_path_contains', 'channel', 'source', ...COMMON] as const;
+export const GA4_QUERY_PARAMETER_NAMES = ['report', 'event_name', 'landing_page_contains', 'page_path_contains', 'channel', 'source', 'campaign_id', ...COMMON] as const;
 export const SEARCH_CONSOLE_QUERY_PARAMETER_NAMES = ['group', 'query_contains', 'query_equals', 'query_not_contains', 'page_contains', 'page_equals', 'data_state', ...COMMON] as const;
 export const ANALYTICS_MAX_ROWS = 500;
 const DAY = 86_400_000;
@@ -15,7 +22,7 @@ export type AnalyticsPeriod = typeof ANALYTICS_PERIODS[number];
 type DateQuery = { period: AnalyticsPeriod | null; date_from: string | null; date_to: string | null; limit: number; cursor: string | null };
 type SegmentQuery = { compare_to: 'previous_period' | null; device: 'desktop' | 'mobile' | 'tablet' | null; country: string | null };
 export type Ga4Query = DateQuery & SegmentQuery & { report: typeof GA4_REPORT_PRESETS[number]; event_name: string | null;
-  landing_page_contains: string | null; page_path_contains: string | null; channel: string | null; source: string | null };
+  landing_page_contains: string | null; page_path_contains: string | null; channel: string | null; source: string | null; campaign_id: string | null };
 export type SearchConsoleQuery = DateQuery & SegmentQuery & { group: typeof SEARCH_CONSOLE_GROUPS[number]; query_contains: string | null;
   query_equals: string | null; query_not_contains: string | null; page_contains: string | null; page_equals: string | null; data_state: 'final' | 'all' };
 
@@ -37,7 +44,7 @@ function enumValue<T extends string>(value: string, values: readonly T[], name: 
   if (!values.includes(value as T)) invalidAnalyticsQuery(`${name} must be one of: ${values.join(', ')}.`);
   return value as T;
 }
-function common(query: URLSearchParams): DateQuery {
+export function analyticsDateParameters(query: URLSearchParams): DateQuery {
   const from = query.get('date_from');
   const to = query.get('date_to');
   const period = query.get('period');
@@ -57,8 +64,15 @@ function common(query: URLSearchParams): DateQuery {
 }
 export function validateGa4Query(query: URLSearchParams): Ga4Query {
   parameters(query, GA4_QUERY_PARAMETER_NAMES);
-  const base = common(query);
+  const base = analyticsDateParameters(query);
   const report = enumValue(query.get('report') ?? 'overview', GA4_REPORT_PRESETS, 'report');
+  const campaign_id = query.get('campaign_id');
+  if (campaign_id !== null && (!report.startsWith('ads_') || !/^[1-9]\d{0,18}$/.test(campaign_id) || BigInt(campaign_id) > 9223372036854775807n)) {
+    invalidAnalyticsQuery('campaign_id is a numeric string ID available only on GA4 ads_costs, ads_campaigns, ads_keywords and ads_queries.');
+  }
+  if (report === 'ads_costs' && ['landing_page_contains', 'device', 'country', 'channel', 'source'].some(name => query.has(name))) {
+    invalidAnalyticsQuery('ads_costs supports dates and campaign_id; session filters do not define advertising cost. Use ads_campaigns for website sessions.');
+  }
   if (report === 'form_performance' && ['cursor', 'compare_to', 'page_path_contains', 'event_name'].some(name => query.has(name))) {
     invalidAnalyticsQuery('form_performance returns one aggregate for matching session-entry filters; cursor, compare_to, page_path_contains and event_name are not supported. Its form_submit and generate_lead counts remain separate.');
   }
@@ -73,9 +87,9 @@ export function validateGa4Query(query: URLSearchParams): Ga4Query {
   }
   if (report === 'overview' && base.cursor) invalidAnalyticsQuery('overview has one aggregate row and does not support cursors.');
   const compare_to = comparison(query, report === 'overview');
-  return { ...base, report, event_name: event, compare_to, device: device(query), country: literal(query, 'country'),
-    landing_page_contains: literal(query, 'landing_page_contains'), page_path_contains: literal(query, 'page_path_contains'),
-    channel: literal(query, 'channel'), source: literal(query, 'source') };
+  return { ...base, report, event_name: event, compare_to, campaign_id, device: device(query), country: validateAnalyticsLiteral(query, 'country'),
+    landing_page_contains: validateAnalyticsLiteral(query, 'landing_page_contains'), page_path_contains: validateAnalyticsLiteral(query, 'page_path_contains'),
+    channel: validateAnalyticsLiteral(query, 'channel'), source: validateAnalyticsLiteral(query, 'source') };
 }
 function comparison(query: URLSearchParams, aggregate: boolean): SegmentQuery['compare_to'] {
   const value = query.get('compare_to');
@@ -87,7 +101,7 @@ function device(query: URLSearchParams): SegmentQuery['device'] {
   const value = query.get('device');
   return value === null ? null : enumValue(value, ['desktop', 'mobile', 'tablet'] as const, 'device');
 }
-function literal(query: URLSearchParams, name: string): string | null {
+export function validateAnalyticsLiteral(query: URLSearchParams, name: string): string | null {
   const value = query.get(name);
   if (value === null) return null;
   let decoded = value;
@@ -129,7 +143,7 @@ export function validateSearchConsolePageScope(page: string | null, site: string
 }
 export function validateSearchConsoleQuery(query: URLSearchParams): SearchConsoleQuery {
   parameters(query, SEARCH_CONSOLE_QUERY_PARAMETER_NAMES);
-  const base = common(query);
+  const base = analyticsDateParameters(query);
   const group = enumValue(query.get('group') ?? 'summary', SEARCH_CONSOLE_GROUPS, 'group');
   const state = enumValue(query.get('data_state') ?? 'final', ['final', 'all'] as const, 'data_state');
   if (group === 'summary' && base.cursor) invalidAnalyticsQuery('summary has one aggregate row and does not support cursors.');
@@ -139,8 +153,8 @@ export function validateSearchConsoleQuery(query: URLSearchParams): SearchConsol
   const country = query.get('country');
   if (country !== null && !/^[A-Za-z]{3}$/.test(country)) invalidAnalyticsQuery('Search Console country must be a three-letter ISO country code, such as ind.');
   return { ...base, group, data_state: state, compare_to: comparison(query, group === 'summary'), device: device(query), country: country?.toLowerCase() ?? null,
-    query_contains: literal(query, 'query_contains'), query_equals: literal(query, 'query_equals'), query_not_contains: literal(query, 'query_not_contains'),
-    page_contains: literal(query, 'page_contains'), page_equals: pageEquals(query) };
+    query_contains: validateAnalyticsLiteral(query, 'query_contains'), query_equals: validateAnalyticsLiteral(query, 'query_equals'), query_not_contains: validateAnalyticsLiteral(query, 'query_not_contains'),
+    page_contains: validateAnalyticsLiteral(query, 'page_contains'), page_equals: pageEquals(query) };
 }
 export function analyticsLocalDate(timezone: string, now = new Date()): string {
   try {
@@ -164,10 +178,10 @@ export function resolveAnalyticsDates(query: DateQuery, timezone: string, now = 
   return { date_from: format(from), date_to: format(to), timezone, local_date,
     period: query.period, inclusive: true as const, includes_recent_days: to >= today - 2 * DAY };
 }
-export function analyticsPagination(query: Ga4Query | SearchConsoleQuery, resolved: ReturnType<typeof resolveAnalyticsDates>, sourceIdentity: string) {
+export function analyticsPagination<T extends { cursor: string | null; limit: number }>(query: T, resolved: Pick<ReturnType<typeof resolveAnalyticsDates>, 'date_from' | 'date_to' | 'timezone'> | null, sourceIdentity: string) {
   const { cursor: _cursor, limit: _limit, ...filters } = query;
   const fingerprint = createHash('sha256').update(JSON.stringify({ sourceIdentity, filters,
-    from: resolved.date_from, to: resolved.date_to, timezone: resolved.timezone })).digest('hex');
+    from: resolved?.date_from ?? null, to: resolved?.date_to ?? null, timezone: resolved?.timezone ?? null })).digest('hex');
   let offset = 0;
   if (query.cursor !== null) {
     try {

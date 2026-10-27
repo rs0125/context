@@ -1,3 +1,4 @@
+import { validateAnalyticsCapabilities } from './analytics-query';
 import { randomUUID } from 'node:crypto';
 import { callCms, cmsInputs, type CmsTool } from './cms-tools';
 import type { PoolClient } from 'pg';
@@ -13,6 +14,8 @@ import { clockContext } from './query-time';
 import { getRelatedCrmContext } from './crm-related';
 import { parseCrmContextQuery } from './crm-context-query';
 import { analyticsCapabilities, ga4Report, searchConsoleReport, validateGa4Query, validateSearchConsoleQuery } from './analytics';
+import { googleAdsFilters, googleAdsReport, readGoogleAdsCampaign } from './google-ads';
+import { validateGoogleAdsFilters, validateGoogleAdsReport, validateGoogleAdsCampaign } from './google-ads-query';
 import { parseShortlistAssessmentQuery, buildShortlistAssessment } from './shortlist-assessment';
 import { parseLocationQuery, resolveLocation } from './location-resolver';
 import { getEmailConnection, readEmailDraft, listEmailDrafts } from './gmail-tools';
@@ -28,7 +31,7 @@ import { WAREHOUSE_RECORDED_FIELD_NAMES, type WarehouseRecordedFieldName } from 
 import { WAREHOUSE_EVIDENCE_GUIDANCE } from './prompt-definitions';
 import { crmContactsRedacted, crmTextGuidance } from './crm-presentation';
 
-const ANALYTICS_GUIDANCE = 'Aggregate website analytics for Analysts: /api/v1/analytics/capabilities discovers supported reports; /api/v1/analytics/ga4 reports traffic and recorded events; /api/v1/analytics/search-console reports Google organic search. Analytics dates use the source timezone, not necessarily the India server clock. Preserve source_fetched_at, resolved dates, quality warnings and pagination. For form activity per session use ga4?report=form_performance with a landing_page_contains filter; its separate event ratios use matching entry sessions. For relative comparisons resolve period on the first group and reuse the returned dates for later groups. Recent data may change. Event counts are not unique CRM leads or a sequential conversion funnel; Search Console clicks are not GA sessions. Failed reads mean unavailable, never zero.';
+const ANALYTICS_GUIDANCE = 'Website and Ads analytics for Analysts: /api/v1/analytics/capabilities discovers supported reports; /api/v1/analytics/ga4 reports traffic and recorded events; /api/v1/analytics/search-console reports Google organic search; /api/v1/analytics/google-ads reports native Ads performance, /api/v1/analytics/google-ads/filters discovers valid names and IDs, and /api/v1/analytics/google-ads/campaigns/{id} reads campaign context. Ads conversions and all_conversions are separate from GA4 key events and unique CRM leads. Analytics dates use the source timezone, not necessarily the India server clock. Preserve source_fetched_at, resolved dates, quality warnings and pagination. For form activity per session use ga4?report=form_performance with a landing_page_contains filter; its separate event ratios use matching entry sessions. For relative comparisons resolve period on the first group and reuse the returned dates for later groups. Recent data may change. Event counts are not unique CRM leads or a sequential conversion funnel; Search Console clicks are not GA sessions. Failed reads mean unavailable, never zero.';
 
 const QUERY_GUIDANCE = `Warehouse and CRM dates use Asia/Kolkata and the server clock. For warehouses added today in Bangalore use warehouses?city=Bangalore&period=today&sort=created_desc. For leads created this month use crm/opportunities?period=this_month; add view=created only for leads created BY you. Native Twenty creation time is source_created_at; it is not the mirror insertion time. Use date_field=follow_up&period=tomorrow for tomorrow's follow-ups. A date range uses inclusive YYYY-MM-DD date_from/date_to, or period, not both. Inspect query_context for resolved start_at/end_before and has_more; only summaries give full counts. Use warehouses/summary and crm/summary with the same filters for totals and grouped counts. Use crm/filters for stages, dates, sorting and permitted cities. Use crm/opportunities/{id}/assessment for a requirement checklist; add warehouse_ids as one to five comma-separated IDs for property comparisons and verification questions. Optional criteria must be supplied by the employee, not inferred; overrides never update CRM. Missing dates do not match date filters. Unknown is not zero. Updated timestamps do not establish an edit history, newly available inventory, or historical conversion rates. Keep filters and sort unchanged when passing nextCursor; searches are not frozen snapshots across concurrent source edits.`;
 
@@ -42,6 +45,9 @@ type ApiDependencies = {
   analyticsCapabilities: typeof analyticsCapabilities;
   ga4Report: typeof ga4Report;
   searchConsoleReport: typeof searchConsoleReport;
+  googleAdsFilters: typeof googleAdsFilters;
+  googleAdsReport: typeof googleAdsReport;
+  readGoogleAdsCampaign: typeof readGoogleAdsCampaign;
   resolveLocation: typeof resolveLocation;
   getEmailConnection: typeof getEmailConnection;
   readEmailDraft: typeof readEmailDraft;
@@ -58,7 +64,8 @@ const defaults: ApiDependencies = {
   authenticate: request => authenticateRequestKey(request, hash => withReadOnlyTransaction(client => findDatabaseKey(client, hash))),
   liveCrmAccess: (principal, view, opportunityId) => getLiveCrmAccess(principal, { view, opportunityId }),
   relatedCrmContext: getRelatedCrmContext,
-  analyticsCapabilities, ga4Report, searchConsoleReport, resolveLocation, getEmailConnection, readEmailDraft, listEmailDrafts, readCrmRfq, listCrmRfqChanges, readCrmNote, listCrmNoteChanges,
+  analyticsCapabilities, ga4Report, searchConsoleReport, googleAdsFilters, googleAdsReport, readGoogleAdsCampaign,
+  resolveLocation, getEmailConnection, readEmailDraft, listEmailDrafts, readCrmRfq, listCrmRfqChanges, readCrmNote, listCrmNoteChanges,
   audit: entry => console.info(JSON.stringify(entry)),
 };
 
@@ -342,7 +349,9 @@ export async function handleApiRequest(request: Request, path: string[], depende
     if (path[0] === 'analytics') {
       const route = path.join('/');
       const query = new URL(request.url).searchParams;
-      if (!['analytics/capabilities', 'analytics/ga4', 'analytics/search-console'].includes(route)) {
+      const adsAccount = route === 'analytics/google-ads/account';
+      const adsCampaign = path.length === 4 && path[1] === 'google-ads' && path[2] === 'campaigns';
+      if (!adsCampaign && !adsAccount && !['analytics/capabilities', 'analytics/ga4', 'analytics/search-console', 'analytics/google-ads', 'analytics/google-ads/filters'].includes(route)) {
         throw new HttpError(404, 'NOT_FOUND', 'Endpoint not found.');
       }
       verifiedPrincipal = await deps.transaction(async client => {
@@ -354,12 +363,19 @@ export async function handleApiRequest(request: Request, path: string[], depende
         requireScope(principal, 'analytics:read');
         return principal;
       });
-      if (route === 'analytics/capabilities') strictQuery(query, []);
+      if (route === 'analytics/capabilities') validateAnalyticsCapabilities(query);
       else if (route === 'analytics/ga4') validateGa4Query(query);
-      else validateSearchConsoleQuery(query);
+      else if (route === 'analytics/search-console') validateSearchConsoleQuery(query);
+      else if (route === 'analytics/google-ads') validateGoogleAdsReport(query);
+      else if (route === 'analytics/google-ads/filters') validateGoogleAdsFilters(query);
+      else validateGoogleAdsCampaign(adsAccount ? null : path[3], query);
       // No Supabase socket is held during Google requests or cache retrieval.
-      analyticsValue = route === 'analytics/capabilities' ? await deps.analyticsCapabilities()
-        : route === 'analytics/ga4' ? await deps.ga4Report(query) : await deps.searchConsoleReport(query);
+      analyticsValue = route === 'analytics/capabilities' ? await deps.analyticsCapabilities(validateAnalyticsCapabilities(query))
+        : route === 'analytics/ga4' ? await deps.ga4Report(query)
+        : route === 'analytics/search-console' ? await deps.searchConsoleReport(query)
+        : route === 'analytics/google-ads' ? await deps.googleAdsReport(query)
+        : route === 'analytics/google-ads/filters' ? await deps.googleAdsFilters(query)
+        : await deps.readGoogleAdsCampaign(adsAccount ? null : path[3], query);
     }
     if (path[0] === 'crm') {
       const route = path.join('/');
@@ -438,8 +454,9 @@ export async function handleApiRequest(request: Request, path: string[], depende
     const route = path.join('/');
     const operation = ['context', 'context.md', 'wiki/pages', 'wiki/search', 'warehouses', 'warehouses/filters',
       'warehouses/summary', 'crm/rfq-changes', 'crm/opportunities', 'crm/summary', 'crm/filters', 'crm/my-briefing',
-      'analytics/capabilities', 'analytics/ga4', 'analytics/search-console', 'locations/resolve', 'mail/connection', 'mail/drafts', 'openapi.json'].includes(route)
+      'analytics/capabilities', 'analytics/ga4', 'analytics/search-console', 'analytics/google-ads', 'analytics/google-ads/filters', 'locations/resolve', 'mail/connection', 'mail/drafts', 'openapi.json'].includes(route)
       ? route : path.length === 3 && path[0] === 'crm' && path[1] === 'rfqs' ? 'crm/rfq/read'
+        : path.length === 4 && path[0] === 'analytics' && path[1] === 'google-ads' && path[2] === 'campaigns' ? 'analytics/google-ads/campaigns/read'
         : path.length === 5 && path[0] === 'crm' && path[1] === 'deals' && path[3] === 'notes' ? 'crm/note/read'
         : path.length === 4 && path[0] === 'crm' && path[1] === 'deals' && path[3] === 'note-changes' ? 'crm/note-changes'
         : path.length === 2 && path[0] === 'warehouses' ? 'warehouses/read'

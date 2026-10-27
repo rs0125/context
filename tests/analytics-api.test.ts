@@ -24,6 +24,7 @@ function harness(options: { admin?: boolean; analyst?: boolean; scopes?: KeyRegi
   const revalidateKey = vi.fn(async () => {});
   return { deps: { transaction, authenticate: vi.fn(() => key), revalidateKey,
     analyticsCapabilities: source as never, ga4Report: source as never, searchConsoleReport: source as never,
+    googleAdsFilters: source as never, googleAdsReport: source as never, readGoogleAdsCampaign: source as never,
     audit: vi.fn() }, query, source, demote: () => { roster = { ...roster, adminAccess: false, analystAccess: false }; },
     deactivate: () => { roster = { ...roster, is_active: false }; } };
 }
@@ -32,7 +33,18 @@ function read(path: string, deps: Parameters<typeof handleApiRequest>[2]) {
 }
 
 describe('Analyst analytics REST boundary', () => {
-  it.each(['capabilities', 'ga4', 'search-console'])('revalidates the admin before and after %s without holding a pool socket', async name => {
+  it.each(['google-ads/filters?limit=2&cursor=opaque_cursor', 'google-ads?report=conversion_dates&campaign_id=123',
+    'google-ads?report=asset_performance&asset_id=456', 'google-ads/campaigns/123?section=negative_keywords&origin=shared&shared_set_id=456',
+    'google-ads/campaigns/123?section=assets&origin=ad_group&ad_group_id=789'])('passes expanded Ads arguments through the authorized REST boundary: %s', async path => {
+    const h = harness();
+    expect((await read(`analytics/${path}`, h.deps)).status).toBe(200);
+    const args = h.source.mock.calls[0] as unknown[];
+    const params = args.find(value => value instanceof URLSearchParams) as URLSearchParams;
+    expect(params.toString()).toBe(path.split('?')[1]);
+    if (path.includes('/campaigns/')) expect(args[0]).toBe('123');
+    expect(h.deps.revalidateKey).toHaveBeenCalledTimes(2);
+  });
+  it.each(['capabilities?source=google_ads', 'ga4', 'search-console', 'google-ads', 'google-ads/filters', 'google-ads/campaigns/123', 'google-ads/account'])('revalidates the admin before and after %s without holding a pool socket', async name => {
     const h = harness();
     const response = await read(`analytics/${name}`, h.deps);
     expect(response.status).toBe(200);
@@ -41,19 +53,19 @@ describe('Analyst analytics REST boundary', () => {
     expect(h.source).toHaveBeenCalledOnce();
     expect(response.headers.get('cache-control')).toContain('no-store');
   });
-  it.each(['capabilities', 'ga4', 'search-console'])('allows Analysts without admin access to read %s', async name => {
+  it.each(['capabilities?source=google_ads', 'ga4', 'search-console', 'google-ads', 'google-ads/filters', 'google-ads/campaigns/123', 'google-ads/account'])('allows Analysts without admin access to read %s', async name => {
     const h = harness({ admin: false, analyst: true });
     expect((await read(`analytics/${name}`, h.deps)).status).toBe(200);
     expect(h.source).toHaveBeenCalledOnce();
   });
-  it.each(['capabilities', 'ga4', 'search-console'])('withholds %s when Analyst access is revoked during the source read', async name => {
+  it.each(['capabilities?source=google_ads', 'ga4', 'search-console', 'google-ads', 'google-ads/filters', 'google-ads/campaigns/123', 'google-ads/account'])('withholds %s when Analyst access is revoked during the source read', async name => {
     const h = harness({ admin: false, analyst: true });
     h.source.mockImplementation(async () => { h.demote(); return payload; });
     const result = await read(`analytics/${name}`, h.deps);
     expect(result.status).toBe(403);
     expect(await result.text()).not.toContain('source_fetched_at');
   });
-  it.each(['capabilities', 'ga4', 'search-console'])('rejects non-Analysts holding a claimed analytics scope before reading %s', async name => {
+  it.each(['capabilities?source=google_ads', 'ga4', 'search-console', 'google-ads', 'google-ads/filters', 'google-ads/campaigns/123', 'google-ads/account'])('rejects non-Analysts holding a claimed analytics scope before reading %s', async name => {
     const h = harness({ admin: false });
     expect((await read(`analytics/${name}`, h.deps)).status).toBe(403);
     expect(h.source).not.toHaveBeenCalled();
@@ -78,7 +90,7 @@ describe('Analyst analytics REST boundary', () => {
     expect(await response.text()).not.toContain('source_fetched_at');
   });
   it.each(['ga4?property_id=123', 'ga4?limit=1000', 'ga4?report=overview&report=events',
-    'search-console?site=https://another.example', 'capabilities?credentials=anything'])('rejects hidden or invalid query options: %s', async path => {
+    'search-console?site=https://another.example', 'capabilities?credentials=anything', 'capabilities', 'capabilities?source=ads', 'capabilities?source=ga4&source=google_ads', 'google-ads/account?id=123', 'google-ads/account?section=settings', 'google-ads/campaigns/123?section=asset_inventory', 'google-ads?customer_id=1234567890', 'google-ads?gaql=SELECT', 'google-ads/filters?campaign_id=1&campaign_id=2', 'google-ads/campaigns/not-an-id', 'google-ads/campaigns/123?section=settings&period=last_month'])('rejects hidden or invalid query options: %s', async path => {
     const h = harness();
     expect([400, 422]).toContain((await read(`analytics/${path}`, h.deps)).status);
     expect(h.source).not.toHaveBeenCalled();

@@ -280,10 +280,10 @@ export const TOOL_CATALOG = {
     read: { requiredScopes: [], sourceFamily: 'context' },
   },
   analytics_capabilities: {
-    title: 'Discover website analytics',
+    title: 'Discover website and Ads analytics',
     group: 'Analytics',
     description:
-      'Analyst access: discover available GA4 reports, their returned metrics, metric definitions/calculations, registered custom fields, event definitions and Search Console capabilities. Engagement rates and timing are included in traffic reports by default. Check before warehouse-interest or lead-source reports; missing custom dimensions are unavailable, not zero activity. Configuration health is separate for each source. Does not grant broader property access.',
+      'Analyst access: select source=ga4, search_console or google_ads to discover only that source. Other entries are null and are not checked. Call separately for source comparisons. Returns supported reports, filters and definitions; Ads includes campaign/account sections. Use google_ads_filters for valid names and string IDs. Missing fields or failed reads are unavailable, not zero activity. Does not grant broader account access.',
     capability: 'analytics',
     platforms: ['claude', 'whatsapp'],
     loading: 'deferred',
@@ -293,7 +293,7 @@ export const TOOL_CATALOG = {
     title: 'Report website traffic and events',
     group: 'Analytics',
     description:
-      'Analyst access: GA4 traffic, engagement and recorded events. For "engagement rate and average engagement/session time" use overview; it includes rates, average engagement seconds per session/per active user and average session duration. For "form activity per entry session" or comparing warehouse/listing entry pages, use form_performance with the relevant landing_page_contains filter; the server returns separate form-event counts and matched events per 100 entry sessions. For relative periods, use period on the first group, then reuse its returned query_context.date_from/date_to for subsequent groups with the same segments; do not derive GA4 dates from UTC. For "traffic change over four weeks" use overview, last_28_days, compare_to=previous_period; "where visitors came from" use acquisition; "most viewed pages" use pages; "first visits by page" use first_visits; "form events by recorded page" use form_submissions, optionally event_name=form_submit or generate_lead. These are different signals; keep them separate. Filter by entry path, device, country label, channel or source using AND. page_path_contains filters recorded event context only on pages/events/form_submissions; it is not session entry or lifetime first touch. Use daily for a chronological trend and paginate for the whole range. Read interpretation, event definitions, units, source dates and quality. Events per session are not visitor conversion rates. Label causal explanations as hypotheses. Events/key events are not unique CRM leads, sequential funnels or revenue.',
+      'Analyst access: GA4 traffic, engagement and recorded events. ads_costs reports imported advertising cost/clicks/impressions in the property currency; ads_campaigns, ads_keywords and ads_queries report session-attributed website outcomes with optional campaign_id. These cover linked data within the GA4 property; use google_ads_report for native Ads conversions. For "engagement rate and average engagement/session time" use overview; it includes rates, average engagement seconds per session/per active user and average session duration. For "form activity per entry session" or comparing warehouse/listing entry pages, use form_performance with the relevant landing_page_contains filter; the server returns separate form-event counts and matched events per 100 entry sessions. For relative periods, use period on the first group, then reuse its returned query_context.date_from/date_to for subsequent groups with the same segments; do not derive GA4 dates from UTC. For "traffic change over four weeks" use overview, last_28_days, compare_to=previous_period; "where visitors came from" use acquisition; "most viewed pages" use pages; "first visits by page" use first_visits; "form events by recorded page" use form_submissions, optionally event_name=form_submit or generate_lead. These are different signals; keep them separate. Filter by entry path, device, country label, channel or source using AND. page_path_contains filters recorded event context only on pages/events/form_submissions; it is not session entry or lifetime first touch. Use daily for a chronological trend and paginate for the whole range. Read interpretation, event definitions, units, source dates and quality. Events per session are not visitor conversion rates. Label causal explanations as hypotheses. Events/key events are not unique CRM leads, sequential funnels or revenue.',
     capability: 'analytics',
     platforms: ['claude', 'whatsapp'],
     loading: 'deferred',
@@ -308,6 +308,24 @@ export const TOOL_CATALOG = {
     platforms: ['claude', 'whatsapp'],
     loading: 'deferred',
     read: { requiredScopes: ['analytics:read'], sourceFamily: 'analytics' },
+  },
+  google_ads_filters: {
+    title: 'Discover Google Ads filters', group: 'Analytics', capability: 'analytics',
+    platforms: ['claude', 'whatsapp'], loading: 'deferred',
+    read: { requiredScopes: ['analytics:read'], sourceFamily: 'analytics' },
+    description: 'Analyst access: discover Google Ads campaign and conversion-action names/string IDs, plus ad groups with campaign_id. Follow nextCursor with unchanged campaign_id and limit until null; each list holds up to 100 choices per page, and exhausted lists are empty on later pages. Names can be masked or collide; filter by IDs. Null primary_for_goal is unknown. Actions are account-wide choices, not proof of campaign goals. Current configuration is not limited to recent activity.',
+  },
+  google_ads_report: {
+    title: 'Report Google Ads performance', group: 'Analytics', capability: 'analytics',
+    platforms: ['claude', 'whatsapp'], loading: 'deferred',
+    read: { requiredScopes: ['analytics:read'], sourceFamily: 'analytics' },
+    description: 'Analyst access: fixed native Ads reports. overview is a full aggregate/comparison; daily is a trend. campaign_diagnostics and keyword_diagnostics expose delivery/quality; search_term_matches and campaign_search_terms expose reported queries, with the latter including Performance Max. search_categories requires campaign_id and includes category 0. ad_asset_performance is ad-level; asset_performance is campaign-link performance. Asset rows can overlap, so never sum them as campaign totals. Other breakdowns include asset_groups, age_ranges, genders, income_ranges, parental_status, click_types and expanded_landing_pages. conversions separates actions by interaction date; conversion_dates separates actions by occurrence date; conversion_lag shows delay buckets. These exclude selected-action spend/CPA. Discover exact filters with analytics_capabilities(source=google_ads) and IDs with google_ads_filters. Filters combine with AND. Dates use account timezone, maximum 93 days. Money is in the stated currency; rates are fractions and metric_bounds are inequalities. Conversions/all_conversions and their values are distinct, not unique CRM leads or verified revenue. Pages have at most 25 rows, capped at 500; copy nextCursor unchanged. Do not average row rates or treat a page as a total. Low-volume queries can be withheld. Fetch timestamps ending Z are UTC; provisional=false does not certify finality.',
+  },
+  read_google_ads_campaign: {
+    title: 'Read Google Ads campaign context', group: 'Analytics', capability: 'analytics',
+    platforms: ['claude', 'whatsapp'], loading: 'deferred',
+    read: { requiredScopes: ['analytics:read'], sourceFamily: 'analytics' },
+    description: 'Analyst access: default scope=campaign requires a discovered id. settings and ad_group_settings expose current budgets, configured bids and delivery status; targeting resolves locations/languages/devices/schedules. negative_keywords combines campaign, ad_group, shared and account exclusions; negative_lists discovers attached lists. creatives, assets and asset_groups expose current text/links and diagnostics. conversion_goals explains campaign/default/custom goals. scope=account requires no id: asset_inventory lists all assets including unlinked and ad-level content; audiences lists remarketing metadata, never members; assets lists account links; conversion_actions gives account counting/attribution/lookback settings; recommendations lists unattached suggestions. Suggestions are unapproved estimates. Only changes accepts dates, within 30 days; omit dates for current sections. Discover section filters with analytics_capabilities(source=google_ads). Preserve origins, components, coverage, truncated_fields and pagination; a null cursor does not certify complete nested lists. Null optional flags are unknown. Read-only; change-author emails and old/new payloads are withheld.',
   },
   search_knowledge: {
     title: 'Search company knowledge',

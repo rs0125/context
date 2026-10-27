@@ -7,7 +7,7 @@ export const SCOPE_OPTIONS = [
 // Knowledge-page restrictions intentionally retain their existing three scopes.
 export const READ_SCOPE_OPTIONS = [
   ...SCOPE_OPTIONS,
-  { value: 'analytics:read', label: 'Website analytics' },
+  { value: 'analytics:read', label: 'Website and Ads analytics' },
   { value: 'cms:read', label: 'Website CMS pages and schemas' },
 ] as const;
 

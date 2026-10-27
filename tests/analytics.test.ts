@@ -39,6 +39,23 @@ afterEach(() => vi.useRealTimers());
 const actualGaCall = () => readMock.mock.calls.find(([read, body]) => read.kind === 'ga4_report' && body.dateRanges[0].startDate !== '7daysAgo');
 
 describe('bounded GA4 presets and source semantics', () => {
+  it.each(['ads_costs', 'ads_campaigns', 'ads_keywords', 'ads_queries'])('keeps GA4 %s separate from native Ads conversion metrics and preserves string IDs', async name => {
+    const base = responseFactory;
+    responseFactory = (read, body) => {
+      if (read.kind !== 'ga4_report' || !body.dimensions?.length) return base(read, body);
+      return { ...gaResponse(body, ['1234567890', '24326913721', 'Warehouse campaign']), metadata: { timeZone: 'Asia/Kolkata', currencyCode: 'INR' } };
+    };
+    const result = await ga4Report(new URLSearchParams({ report: name, campaign_id: '24326913721' }));
+    const idDimension = name === 'ads_costs' ? 'googleAdsCampaignId' : 'sessionGoogleAdsCampaignId';
+    expect(result.items[0].dimensions[idDimension]).toBe('24326913721');
+    expect(actualGaCall()![1].dimensionFilter).toEqual({ filter: { fieldName: idDimension, stringFilter: { matchType: 'EXACT', value: '24326913721', caseSensitive: true } } });
+    expect(result.items[0].metrics).not.toHaveProperty('conversions');
+    expect(result.items[0].metrics).not.toHaveProperty('all_conversions');
+    if (name === 'ads_costs') {
+      expect(result.source).toMatchObject({ currency: 'INR' });
+      expect(result.columns).toContainEqual(expect.objectContaining({ name: 'advertiserAdCost', unit: 'INR' }));
+    } else expect(result.interpretation.acquisition_basis).toBe('session');
+  });
   it('fetches only known aggregate metrics, authoritative timezone and useful units', async () => {
     const report = await ga4Report(new URLSearchParams());
     expect(report.source).toEqual({ system: 'ga4', property: '123', timezone: 'Asia/Kolkata' });
@@ -145,16 +162,17 @@ describe('bounded GA4 presets and source semantics', () => {
   it('marks unavailable presets rather than issuing invalid custom dimension queries', async () => {
     const base = responseFactory;
     responseFactory = (read, body) => read.kind === 'ga4_metadata' ? { dimensions: [], metrics: [] } : base(read, body);
-    const capabilities = await analyticsCapabilities();
-    expect(capabilities.ga4.reports.find(x => x.name === 'lead_sources')).toMatchObject({ available: false });
+    const capabilities = await analyticsCapabilities('ga4');
+    expect(capabilities.ga4!.reports.find(x => x.name === 'lead_sources')).toMatchObject({ available: false });
     await expect(ga4Report(new URLSearchParams('report=lead_sources'))).rejects.toMatchObject({ status: 400, code: 'ANALYTICS_REPORT_UNAVAILABLE' });
     expect(actualGaCall()).toBeUndefined();
   });
   it('preserves independently configured Search Console when GA reads are denied', async () => {
     readMock.mockRejectedValue(new HttpError(503, 'ANALYTICS_SOURCE_DENIED', 'Unavailable'));
-    const capabilities = await analyticsCapabilities();
+    const capabilities = await analyticsCapabilities('ga4');
     expect(capabilities.ga4).toMatchObject({ status: 'unavailable', timezone: null, error_code: 'ANALYTICS_SOURCE_DENIED' });
-    expect(capabilities.search_console).toMatchObject({ status: 'configured_not_verified', property: 'sc-domain:wareongo.com' });
+    expect(capabilities.search_console).toBeNull();
+    expect((await analyticsCapabilities('search_console')).search_console).toMatchObject({ status: 'configured_not_verified', property: 'sc-domain:wareongo.com' });
   });
   it('retains all material quality flags and never returns raw source metadata extensions', async () => {
     const base = responseFactory;
@@ -304,15 +322,15 @@ describe('GA4 engagement metric semantics', () => {
     expect(Object.keys(report.items[0].metrics)).toEqual(['eventCount', 'totalUsers']);
   });
   it('discovers every returned engagement metric and distinguishes source metrics from calculations', async () => {
-    const capabilities = await analyticsCapabilities();
-    expect(capabilities.ga4.reports.find(report => report.name === 'overview')?.metrics).toHaveLength(15);
-    expect(capabilities.ga4.reports.find(report => report.name === 'pages')?.metrics).toContain('averageEngagementTimePerActiveUser');
-    expect(capabilities.ga4.metric_definitions.map(metric => metric.name)).toEqual(expect.arrayContaining([
+    const capabilities = await analyticsCapabilities('ga4');
+    expect(capabilities.ga4!.reports.find(report => report.name === 'overview')?.metrics).toHaveLength(15);
+    expect(capabilities.ga4!.reports.find(report => report.name === 'pages')?.metrics).toContain('averageEngagementTimePerActiveUser');
+    expect(capabilities.ga4!.metric_definitions.map(metric => metric.name)).toEqual(expect.arrayContaining([
       'engagementRate', 'userEngagementDuration', 'averageSessionDuration', 'averageEngagementTimePerSession',
       'averageEngagementTimePerActiveUser', 'bounceRate', 'screenPageViewsPerSession', 'eventsPerSession',
     ]));
-    expect(capabilities.ga4.metric_definitions.find(metric => metric.name === 'userEngagementDuration')).toMatchObject({ unit: 'seconds', calculation: null });
-    expect(capabilities.ga4.metric_definitions.find(metric => metric.name === 'averageEngagementTimePerActiveUser')).toMatchObject({ unit: 'seconds', calculation: 'userEngagementDuration / activeUsers' });
+    expect(capabilities.ga4!.metric_definitions.find(metric => metric.name === 'userEngagementDuration')).toMatchObject({ unit: 'seconds', calculation: null });
+    expect(capabilities.ga4!.metric_definitions.find(metric => metric.name === 'averageEngagementTimePerActiveUser')).toMatchObject({ unit: 'seconds', calculation: 'userEngagementDuration / activeUsers' });
   });
 });
 
@@ -395,4 +413,26 @@ describe('Search Console aggregate semantics', () => {
     expect(zero.items[0].metrics.clicks).toBe(0);
     expect(zero.quality.empty_reason).toBeNull();
   });
+});
+
+
+it('does not call GA4 or Ads when discovering Search Console', async () => {
+  readMock.mockRejectedValue(new HttpError(503, 'ANALYTICS_SOURCE_TIMEOUT', 'Unavailable'));
+  const result = await analyticsCapabilities('search_console');
+  expect(result).toMatchObject({ requested_source: 'search_console', ga4: null, google_ads: null,
+    search_console: { status: 'configured_not_verified' } });
+  expect(readMock).not.toHaveBeenCalled();
+});
+it('does not call GA4 when discovering Ads, even when GA4 would time out', async () => {
+  vi.stubEnv('GOOGLE_ADS_CUSTOMER_ID', '1234567890');
+  readMock.mockImplementation(async (read, body, project) => {
+    if (read.kind !== 'google_ads') throw new HttpError(503, 'ANALYTICS_SOURCE_TIMEOUT', 'Unavailable');
+    return { data: project({ results: [{ customer: { id: '1234567890', descriptiveName: 'Example', currencyCode: 'INR', timeZone: 'Asia/Kolkata', manager: false, testAccount: false } }],
+      fieldMask: 'customer.id,customer.descriptiveName,customer.currencyCode,customer.timeZone,customer.manager,customer.testAccount' }), source_fetched_at: '2026-09-26T01:59:30.000Z', cache_hit: false };
+  });
+  try {
+    const result = await analyticsCapabilities('google_ads');
+    expect(result).toMatchObject({ requested_source: 'google_ads', ga4: null, search_console: null, google_ads: { status: 'available' } });
+    expect(readMock.mock.calls.map(([read]) => read.kind)).toEqual(['google_ads']);
+  } finally { vi.unstubAllEnvs(); }
 });

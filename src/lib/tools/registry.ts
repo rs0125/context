@@ -18,7 +18,7 @@ export const CAPABILITIES = {
     'Search warehouse properties, inspect recorded details, filters and supply summaries.',
   crm: 'Find permitted customer deals and RFQs, inspect requirements and activity, assess warehouse shortlists, and make authorized RFQ or note changes.',
   analytics:
-    'Website traffic, Google Analytics reports and Google Search performance.',
+    'Website traffic, Google Analytics, organic Search and Google Ads performance, filters and campaign context.',
   mail: 'Read, create and edit the employee’s app-created Gmail drafts.',
   gis: 'Create requested map points and reverse eligible unchanged creations.',
 } satisfies Record<(typeof TOOL_CATALOG)[ToolName]['capability'], string>;

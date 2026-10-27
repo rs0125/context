@@ -159,7 +159,7 @@ export function AgentAccess({ session, onSessionExpired, onKeyChanged }: { sessi
         <p>Claude can retrieve these sources using your employee key.</p>
         <div className={styles.scopeList} role="list" aria-label="Your read access">{READ_SCOPE_OPTIONS.filter(scope => effectiveScopes.includes(scope.value)).map(scope => <span className={styles.scope} role="listitem" key={scope.value}>{scope.label}</span>)}</div>
         {effectiveScopes.includes('crm:read') && <p>{session.employee.isAnalyst ? 'Analyst access includes all CRM leads. Personal views need a linked Twenty account.' : 'You can read leads you created or are assigned to in Twenty.'}</p>}
-        {effectiveScopes.includes('analytics:read') && <p>Website analytics is included with Analyst access.</p>}
+        {effectiveScopes.includes('analytics:read') && <p>Website and Ads analytics is included with Analyst access.</p>}
         <div className={styles.boundary}><span className={styles.label}>Read-only by design</span><p>Research, compare and draft. Claude cannot change records, send messages or reserve a property through this connection.</p></div>
       </section>
       {effectiveScopes.includes('warehouses:read') && <div className={styles.verificationNote}><Icon name="file" size={18} /><p>Warehouse specifications can be approximate or incomplete. Ask Claude to flag details that need verification.</p></div>}

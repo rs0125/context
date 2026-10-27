@@ -19,6 +19,34 @@ const projection = (x: unknown) => ({ count: (x as { count: number }).count });
 const read = { kind: 'ga4_report' as const, property: '123' };
 
 describe('Google analytics read transport', () => {
+  it('keeps Ads tokens separate and pins its endpoint to the configured customer', async () => {
+    vi.stubEnv('GOOGLE_ADS_CUSTOMER_ID', '1234567890');
+    const fetch = vi.fn().mockResolvedValueOnce(token('analytics')).mockResolvedValueOnce(Response.json({ count: 1 }))
+      .mockResolvedValueOnce(token('ads')).mockResolvedValueOnce(Response.json({ count: 2 }));
+    vi.stubGlobal('fetch', fetch);
+    const api = await import('../src/lib/analytics-google');
+    await api.googleAnalyticsRead(read, {}, projection);
+    const ads = { kind: 'google_ads' as const, customer: '1234567890' };
+    await api.googleAnalyticsRead(ads, { query: 'SELECT customer.id FROM customer LIMIT 1' }, projection);
+    const cached = await api.googleAnalyticsRead(ads, { query: 'SELECT customer.id FROM customer LIMIT 1' }, projection);
+    expect(cached.data.count).toBe(2);
+    expect(cached.cache_hit).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(4);
+    const claims = decodeJwt(new URLSearchParams(fetch.mock.calls[2][1].body).get('assertion')!);
+    expect(claims.scope).toBe('https://www.googleapis.com/auth/adwords');
+    expect(fetch.mock.calls[3][0]).toBe('https://googleads.googleapis.com/v26/customers/1234567890/googleAds:search');
+    expect(fetch.mock.calls[3][1].headers.Authorization).toBe('Bearer ads');
+    expect(fetch.mock.calls[3][1].redirect).toBe('error');
+    await expect(api.googleAnalyticsRead({ ...ads, customer: '9999999999' }, {}, projection)).rejects.toMatchObject({ code: 'ANALYTICS_CONFIGURATION' });
+    expect(fetch).toHaveBeenCalledTimes(4);
+  });
+  it.each(['', '123-456-7890', '123', '1234567890/mutate', 'https://evil.test'])('rejects invalid Ads customer configuration: %s', async value => {
+    vi.stubEnv('GOOGLE_ADS_CUSTOMER_ID', value);
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    const api = await import('../src/lib/analytics-google');
+    await expect(api.googleAnalyticsRead({ kind: 'google_ads', customer: value }, {}, projection)).rejects.toMatchObject({ code: 'ANALYTICS_CONFIGURATION' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it('uses only readonly scopes, fixed HTTPS endpoints, redirection refusal and a single cached token', async () => {
     const fetch = vi.fn().mockResolvedValueOnce(token()).mockResolvedValueOnce(Response.json({ count: 7, hidden: 'secret' }))
       .mockResolvedValueOnce(Response.json({ count: 8 }));

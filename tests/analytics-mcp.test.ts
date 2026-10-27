@@ -16,7 +16,7 @@ const report = {
   query_context: { date_from: '2026-09-01', date_to: '2026-09-25', timezone: 'Asia/Kolkata', local_date: '2026-09-26',
     period: null, inclusive: true as const, includes_recent_days: true, event_name: null, event_names: [], query_contains: null, page_contains: null, data_state: null,
     landing_page_contains: null, device: null, country: null, channel: null, source: null,
-    page_path_contains: null,
+    page_path_contains: null, campaign_id: null,
     query_equals: null, page_equals: null, query_not_contains: null, compare_to: null },
   interpretation: { aggregation: 'aggregate', page_basis: 'none', acquisition_basis: 'not_reported',
     individual_journeys_available: false, crm_linkage_available: false, event_counts_are_unique_leads: false,
@@ -33,24 +33,74 @@ const report = {
 beforeEach(() => vi.stubEnv('CONTEXT_CONSOLE_ORIGIN', origin));
 afterEach(() => vi.unstubAllEnvs());
 async function withClient(scopes: KeyRegistration['scopes'], read: typeof handleApiRequest | undefined,
-  work: (client: Client) => Promise<void>) {
+  work: (client: Client) => Promise<void>, platform: 'claude' | 'whatsapp' = 'claude') {
   const key: KeyRegistration = { id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: 'admin@example.test', scopes, expiresAt: '2099-01-01T00:00:00Z' };
   const client = new Client({ name: 'analytics-toy-harness', version: '1.0.0' });
   const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
-    fetch: async (url, init) => handleMcpRequest(new Request(url, init), { authenticate: async () => key, read }),
+    fetch: async (url, init) => handleMcpRequest(new Request(url, init), { authenticate: async () => key, read, platform }),
   });
   try { await client.connect(transport); await work(client); } finally { await client.close(); }
 }
 
 describe('analytics MCP contract', () => {
-  it('advertises the three bounded analytics tools only with the analytics grant', async () => {
+  it.each(['claude', 'whatsapp'] as const)('routes all Ads tools with their bindings and output contracts on %s', async platform => {
+    const source = { system: 'google_ads', property: '1234567890', account_name: 'Example', timezone: 'Asia/Kolkata', currency: 'INR' };
+    const dates = { date_from: '2026-09-01', date_to: '2026-09-25', timezone: 'Asia/Kolkata', local_date: '2026-09-26', period: null, inclusive: true, includes_recent_days: true };
+    const { quota: _quota, ...reportBase } = report;
+    const data = { ...reportBase, source, query_context: { ...dates, report: 'overview', compare_to: null }, comparison: null,
+      quality: { provisional: true, warnings: [], data_truncated: false, privacy_redactions: false, totals_included: true, aggregation_type: 'google_ads_interaction_date', empty_reason: null },
+      interpretation: { aggregation: 'aggregate', conversion_basis: 'google_ads_campaign_goals', date_basis: 'ad_interaction', event_counts_are_unique_leads: false, crm_linkage_available: false, guidance: 'Separate metrics.' } };
+    const choice = { id: '123', name: 'Example', status: 'ENABLED' };
+    const filters = { source, read_only: true, campaign_id: null, campaigns: [choice], campaigns_truncated: false,
+      nextCursor: null, pagination: { limit: 100, has_more: false, snapshot: false },
+      ad_groups: [], ad_groups_truncated: false, ad_groups_loaded: false, conversion_actions: [], conversion_actions_truncated: false,
+      devices: ['mobile'], networks: ['SEARCH'], campaign_statuses: ['ENABLED'], source_fetched_at: meta.generatedAt, served_at: meta.generatedAt, guidance: 'Use string IDs.' };
+    const campaign = { source, source_status: report.source_status, source_fetched_at: report.source_fetched_at, served_at: report.served_at,
+      cache: report.cache, pagination: report.pagination, nextCursor: null, campaign: choice, scope: 'campaign', section: 'creatives', query_context: null,
+      quality: { data_truncated: false, privacy_redactions: false, warnings: [] }, items: [{ values: { id: '789', headlines: ['Warehouse space'] }, redacted: false, truncated_fields: [] }] };
+    const read = vi.fn(async (request: Request, path: string[]) => {
+      const params = new URL(request.url).searchParams;
+      const expandedCampaign = { ...campaign, ...(path.at(-1) === 'account' ? { scope: 'account', campaign: null } : {}), section: params.get('section') ?? 'settings',
+        components: [{ name: 'account_assets', source_fetched_at: report.source_fetched_at, cache: report.cache, data_truncated: false }],
+        quality: { ...campaign.quality, coverage_complete: true, unavailable_resources: [] },
+        items: [{ values: { origin: 'account', unknown_flag: null, changed_fields: 'keyword.text,keyword.matchType',
+          price_offerings: [{ header: 'Space', description: 'Storage', amount: 25, currency: 'USD', unit: 'PER_MONTH', final_url: 'https://example.test/space' }] }, redacted: false, verification_required: true, truncated_fields: [] }] };
+      const expandedReport = { ...data, report: params.get('report') ?? 'overview',
+        items: [{ dimensions: { campaign_id: '123' }, metrics: { search_impression_share: null }, metric_bounds: { search_impression_share: { operator: 'lt', value: 0.1 } }, redacted: false, verification_required: false }] };
+      return Response.json({ data: path.at(-1) === 'filters' ? filters : (path.includes('campaigns') || path.at(-1) === 'account') ? expandedCampaign : expandedReport, meta });
+    });
+    await withClient(['analytics:read'], read, async client => {
+      const { tools } = await client.listTools();
+      const cases = [
+        { name: 'google_ads_filters', args: { campaign_id: '123' }, path: ['analytics', 'google-ads', 'filters'] },
+        { name: 'google_ads_report', args: { report: 'overview', campaign_id: '123', period: 'last_28_days' }, path: ['analytics', 'google-ads'] },
+        { name: 'read_google_ads_campaign', args: { scope: 'account', section: 'asset_inventory', asset_id: '789' }, path: ['analytics', 'google-ads', 'account'] },
+        { name: 'read_google_ads_campaign', args: { id: '123', section: 'creatives' }, path: ['analytics', 'google-ads', 'campaigns', '123'] },
+        { name: 'google_ads_filters', args: { campaign_id: '123', limit: 2, cursor: 'opaque_cursor' }, path: ['analytics', 'google-ads', 'filters'] },
+        { name: 'google_ads_report', args: { report: 'campaign_diagnostics', campaign_id: '123' }, path: ['analytics', 'google-ads'] },
+        { name: 'google_ads_report', args: { report: 'asset_groups', asset_group_id: '789' }, path: ['analytics', 'google-ads'] },
+        { name: 'read_google_ads_campaign', args: { id: '123', section: 'negative_keywords', origin: 'shared', shared_set_id: '456' }, path: ['analytics', 'google-ads', 'campaigns', '123'] },
+        { name: 'read_google_ads_campaign', args: { id: '123', section: 'assets', origin: 'account', asset_id: '789' }, path: ['analytics', 'google-ads', 'campaigns', '123'] },
+      ];
+      for (const entry of cases) {
+        expect(tools.find(tool => tool.name === entry.name)?.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
+        const result = await client.callTool({ name: entry.name, arguments: entry.args });
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({ status: 200, data: { source }, meta: { toolName: entry.name, argumentsSha256: expect.stringMatching(/^[a-f0-9]{64}$/) } });
+        const [request, path] = read.mock.calls.at(-1)!;
+        expect(path).toEqual(entry.path);
+        for (const [name, value] of Object.entries(entry.args)) if (!['id', 'scope'].includes(name)) expect(new URL(request.url).searchParams.get(name)).toBe(String(value));
+      }
+    }, platform);
+  });
+  it('advertises the six bounded analytics tools only with the analytics grant', async () => {
     for (const granted of [false, true]) {
       await withClient(granted ? ['knowledge:read', 'analytics:read'] : ['knowledge:read'], undefined, async client => {
         const { tools } = await client.listTools();
-        for (const name of ['analytics_capabilities', 'ga4_report', 'search_console_report']) {
+        for (const name of ['analytics_capabilities', 'ga4_report', 'search_console_report', 'google_ads_filters', 'google_ads_report', 'read_google_ads_campaign']) {
           expect(tools.some(tool => tool.name === name)).toBe(granted);
         }
-        if (granted) for (const tool of tools.filter(tool => ['ga4_report', 'search_console_report'].includes(tool.name))) {
+        if (granted) for (const tool of tools.filter(tool => ['ga4_report', 'search_console_report', 'google_ads_report', 'google_ads_filters', 'read_google_ads_campaign'].includes(tool.name))) {
           expect(tool.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
           expect(tool.inputSchema.additionalProperties).toBe(false);
           expect(tool.inputSchema.properties).not.toHaveProperty('property_id');
@@ -154,31 +204,50 @@ describe('analytics MCP contract', () => {
       expect(result.structuredContent).toMatchObject({ data: { columns: data.columns, items: data.items } });
     });
   });
-  it('retains Search Console discovery when GA4 is unavailable', async () => {
-    const partial = { read_only: true, access: 'analysts_only',
-      ga4: { status: 'unavailable', property: '123', timezone: null, source_fetched_at: null,
-        error_code: 'ANALYTICS_SOURCE_DENIED', custom_dimensions: [], reports: [], event_definitions: [], metric_definitions: [
-          { name: 'averageEngagementTimePerSession', unit: 'seconds', definition: 'Average recorded engagement per session.', calculation: 'userEngagementDuration / sessions' },
-        ] },
-      search_console: { status: 'configured_not_verified', property: 'sc-domain:example.test', timezone: 'America/Los_Angeles',
-        groups: ['summary', 'date', 'query', 'page', 'country', 'device'] },
-      periods: ['today', 'yesterday', 'last_7_days', 'last_28_days', 'this_month', 'last_month'],
-      default_period: 'last_28_days', max_date_range_days: 93, max_rows_per_page: 25, max_report_rows: 500,
-      served_at: meta.generatedAt, guidance: ['Configured does not establish successful source access.'] };
-    await withClient(['analytics:read'], async () => Response.json({ data: partial, meta }), async client => {
-      const result = await client.callTool({ name: 'analytics_capabilities', arguments: {} });
+  it.each(['ga4', 'search_console', 'google_ads'] as const)('routes only the requested %s capability source', async source => {
+    const partial = { read_only: true, access: 'analysts_only', requested_source: source,
+      ga4: source === 'ga4' ? { status: 'unavailable', property: '123', timezone: null, source_fetched_at: null,
+        error_code: 'ANALYTICS_SOURCE_DENIED', custom_dimensions: [], reports: [], event_definitions: [], metric_definitions: [] } : null,
+      google_ads: source === 'google_ads' ? { status: 'available', account: { id: '1234567890', name: 'Example', currency: 'INR', timezone: 'Asia/Kolkata' },
+        source_fetched_at: meta.generatedAt, error_code: null, reports: [], campaign_sections: [], account_sections: [], guidance: 'Use Ads reports.' } : null,
+      search_console: source === 'search_console' ? { status: 'configured_not_verified', property: 'sc-domain:example.test', timezone: 'America/Los_Angeles', groups: ['summary'] } : null,
+      periods: ['last_28_days'], default_period: 'last_28_days', max_date_range_days: 93, max_rows_per_page: 25, max_report_rows: 500,
+      served_at: meta.generatedAt, guidance: ['Other sources are not checked.'] };
+    const read = vi.fn(async (request: Request) => {
+      expect(new URL(request.url).searchParams.get('source')).toBe(source);
+      return Response.json({ data: partial, meta });
+    });
+    await withClient(['analytics:read'], read, async client => {
+      const result = await client.callTool({ name: 'analytics_capabilities', arguments: { source } });
       expect(result.isError).not.toBe(true);
-      expect(result.structuredContent).toMatchObject({ data: { ga4: { status: 'unavailable', metric_definitions: partial.ga4.metric_definitions }, search_console: { status: 'configured_not_verified' } } });
+      expect(result.structuredContent).toMatchObject({ data: partial });
+      expect(read).toHaveBeenCalledTimes(1);
+    });
+  });
+  it.each([{}, { scope: 'account', id: '123' }])('rejects ambiguous Ads reader scope: %j', async args => {
+    const read = vi.fn();
+    await withClient(['analytics:read'], read, async client => {
+      const result = await client.callTool({ name: 'read_google_ads_campaign', arguments: args });
+      expect(result.isError).toBe(true);
+      expect(read).not.toHaveBeenCalled();
+    });
+  });
+  it('requires a source before capability discovery', async () => {
+    const read = vi.fn();
+    await withClient(['analytics:read'], read, async client => {
+      expect((await client.callTool({ name: 'analytics_capabilities', arguments: {} })).isError).toBe(true);
+      expect(read).not.toHaveBeenCalled();
     });
   });
   it('uses the same input bounds and enums in the public REST reference', async () => {
     const doc = getOpenApiDocument();
     await withClient(['analytics:read'], undefined, async client => {
       const { tools } = await client.listTools();
-      for (const [name, route] of [['ga4_report', '/analytics/ga4'], ['search_console_report', '/analytics/search-console']] as const) {
+      for (const [name, route] of [['ga4_report', '/analytics/ga4'], ['search_console_report', '/analytics/search-console'],
+        ['google_ads_report', '/analytics/google-ads'], ['google_ads_filters', '/analytics/google-ads/filters'], ['read_google_ads_campaign', '/analytics/google-ads/campaigns/{id}']] as const) {
         const tool = tools.find(value => value.name === name)!;
         const params = doc.paths[route].get.parameters;
-        expect(params.map(param => param.name).sort()).toEqual(Object.keys(tool.inputSchema.properties ?? {}).sort());
+        expect(params.map(param => param.name).sort()).toEqual(Object.keys(tool.inputSchema.properties ?? {}).filter(key => !(name === 'read_google_ads_campaign' && key === 'scope')).sort());
         for (const param of params) expect(param.schema).toEqual(tool.inputSchema.properties?.[param.name]);
       }
     });

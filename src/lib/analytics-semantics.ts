@@ -61,7 +61,7 @@ export function analyticsInterpretation(query: Ga4Query | SearchConsoleQuery,
     ? 'recorded_event_page' as const : ga && (['landing_pages', 'first_visits', 'form_performance'].includes(query.report) || query.landing_page_contains)
       ? 'session_entry' as const : 'none' as const;
   const acquisitionBasis = firstVisits ? 'first_visit_events_only' as const
-    : ga && (['acquisition', 'landing_pages', 'form_performance'].includes(query.report) || query.landing_page_contains || query.channel || query.source)
+    : ga && (['acquisition', 'landing_pages', 'form_performance', 'ads_campaigns', 'ads_keywords', 'ads_queries'].includes(query.report) || query.landing_page_contains || query.channel || query.source)
       ? 'session' as const : 'not_reported' as const;
   const limits = [
     'No individual user journeys or verified website-to-CRM linkage are available. Missing fields here do not prove they are absent upstream.',
@@ -74,6 +74,7 @@ export function analyticsInterpretation(query: Ga4Query | SearchConsoleQuery,
     'Zero key events does not prove zero enquiries. Key-event configuration and tracking history may differ across dates.',
   );
   if (firstVisits) limits.push('First-visit counts describe recorded acquisition only; later engagement, submissions and pipeline for that same group are not linked.');
+  if (ga && query.report.startsWith('ads_')) limits.push('GA4 linked advertising costs and session-attributed website outcomes are separate reports. Do not equate GA4 key events with native Ads conversions or all_conversions; do not join by masked campaign/query names or assume the sources share a timezone.');
   if (ga && query.report === 'form_performance') limits.push('The two form event counts are separate, potentially overlapping actions during matching sessions. Events per 100 entry sessions can exceed 100 and are not a percentage of visitors or sessions that converted. Independent component reads can have different fetch/cache times; null ratios must not be reconstructed from quality-limited counts.');
   if (ga && query.landing_page_contains && query.page_path_contains) limits.push('Both page filters apply: session entry must match landing_page_contains and recorded event page must match page_path_contains.');
   return {

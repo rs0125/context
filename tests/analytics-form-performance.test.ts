@@ -207,9 +207,9 @@ describe('matched session-entry form performance', () => {
 
   it('advertises the composite and calculated metrics without requiring custom dimensions or a new tool', async () => {
     expect(ga4ToolInput.safeParse({ report: 'form_performance', landing_page_contains: '/warehouse/' }).success).toBe(true);
-    const capabilities = await analyticsCapabilities();
+    const capabilities = await analyticsCapabilities('ga4');
     expect(analyticsCapabilitiesOutput.safeParse(capabilities).success).toBe(true);
-    expect(capabilities.ga4.reports.find(report => report.name === 'form_performance')).toMatchObject({ available: true, dimensions: [],
+    expect(capabilities.ga4!.reports.find(report => report.name === 'form_performance')).toMatchObject({ available: true, dimensions: [],
       metrics: ['sessions', 'formSubmitEventCount', 'generateLeadEventCount', 'formSubmitEventsPer100EntrySessions', 'generateLeadEventsPer100EntrySessions'],
       event_name: null, event_names: ['form_submit', 'generate_lead'], read_strategy: 'three_matched_aggregates' });
   });

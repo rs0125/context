@@ -364,5 +364,5 @@ test('Analyst connection explains broad read access without showing admin editin
   await expect(page.getByRole('button', { name: 'Knowledge', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Prompts', exact: true })).toHaveCount(0);
   await expect(page.getByText('Analyst access includes all CRM leads. Personal views need a linked Twenty account.')).toBeVisible();
-  await expect(page.getByText('Website analytics is included with Analyst access.')).toBeVisible();
+  await expect(page.getByText('Website and Ads analytics is included with Analyst access.')).toBeVisible();
 });

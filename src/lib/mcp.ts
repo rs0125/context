@@ -17,7 +17,9 @@ import { DATE_PERIODS } from './query-time';
 import { CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS, CRM_INDUSTRIES, CRM_OCCUPANCY_TIMELINES, CRM_LANGUAGES } from './crm-fields';
 import { compactWarehouseResults, compactWarehouseFilters } from './mcp-results';
 import { WAREHOUSE_RECORDED_FIELD_NAMES } from './warehouse-recorded-context';
-import { ga4ToolInput, searchConsoleToolInput, analyticsReportOutput, analyticsCapabilitiesOutput } from './analytics-tooling';
+import { ga4ToolInput, searchConsoleToolInput, analyticsReportOutput, analyticsCapabilitiesOutput, analyticsCapabilitiesInput } from './analytics-tooling';
+import { googleAdsFiltersInput, googleAdsReportInput, googleAdsCampaignInput } from './google-ads-query';
+import { googleAdsFiltersOutput, googleAdsReportOutput, googleAdsCampaignOutput } from './google-ads-tooling';
 import { NOTE_DELETE_RECOVERY_GUIDANCE, WAREHOUSE_EVIDENCE_GUIDANCE, promptText, toolPlatforms, type PromptValues, type ToolPlatform, type ToolPromptName } from './prompt-definitions';
 import { loadPromptValues } from './prompts';
 import type { PoolClient } from 'pg';
@@ -453,12 +455,20 @@ function registerTools(server: McpServer, key: KeyRegistration, request: Request
     annotations: { ...annotations, openWorldHint: true },
   }, args => call(name, ['locations', 'resolve'], args)));
   if (allowed('analytics:read')) {
-    registerTool('analytics_capabilities', name => register(name, { title: 'Discover website analytics', description: promptText('tool.analytics_capabilities', prompts),
-      inputSchema: empty, outputSchema: output(analyticsCapabilitiesOutput), annotations }, () => call(name, ['analytics', 'capabilities'])));
+    registerTool('analytics_capabilities', name => register(name, { title: 'Discover website and Ads analytics', description: promptText('tool.analytics_capabilities', prompts),
+      inputSchema: analyticsCapabilitiesInput, outputSchema: output(analyticsCapabilitiesOutput), annotations }, args => call(name, ['analytics', 'capabilities'], args)));
     registerTool('ga4_report', name => register(name, { title: 'Report website traffic and events', description: promptText('tool.ga4_report', prompts),
       inputSchema: ga4ToolInput, outputSchema: output(analyticsReportOutput), annotations }, args => call(name, ['analytics', 'ga4'], args)));
     registerTool('search_console_report', name => register(name, { title: 'Report Google Search performance', description: promptText('tool.search_console_report', prompts),
       inputSchema: searchConsoleToolInput, outputSchema: output(analyticsReportOutput), annotations }, args => call(name, ['analytics', 'search-console'], args)));
+    registerTool('google_ads_filters', name => register(name, { title: 'Discover Google Ads filters', description: promptText('tool.google_ads_filters', prompts),
+      inputSchema: googleAdsFiltersInput, outputSchema: output(googleAdsFiltersOutput), annotations }, args => call(name, ['analytics', 'google-ads', 'filters'], args)));
+    registerTool('google_ads_report', name => register(name, { title: 'Report Google Ads performance', description: promptText('tool.google_ads_report', prompts),
+      inputSchema: googleAdsReportInput, outputSchema: output(googleAdsReportOutput), annotations }, args => call(name, ['analytics', 'google-ads'], args)));
+    registerTool('read_google_ads_campaign', name => register(name, { title: 'Read Google Ads campaign context', description: promptText('tool.read_google_ads_campaign', prompts),
+      inputSchema: googleAdsCampaignInput.refine(input => input.scope === 'account' ? input.id === undefined : input.id !== undefined,
+        { message: 'Campaign scope requires id; account scope requires no id.' }), outputSchema: output(googleAdsCampaignOutput), annotations },
+      ({ id, scope, ...args }) => call(name, scope === 'account' ? ['analytics', 'google-ads', 'account'] : ['analytics', 'google-ads', 'campaigns', id!], args)));
   }
   if (allowed('knowledge:read')) {
     registerTool('search_knowledge', name => register(name, { title: 'Search company knowledge', description: promptText('tool.search_knowledge', prompts), inputSchema: z.object({ q: z.string().trim().min(1).max(120).describe('Words to match in titles, summaries and bodies. Omit to browse.').optional(), limit: z.number().int().min(1).max(10).optional(), cursor: z.string().min(1).max(1024).optional() }).strict(), outputSchema: output(z.object({ items: z.array(knowledge.extend({ snippet: z.string().optional() })).max(10), nextCursor: z.string().nullable() }).passthrough()), annotations }, args => call(name, ['wiki', args.q ? 'search' : 'pages'], args)));
