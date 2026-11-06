@@ -5,7 +5,7 @@ import { HttpError } from './errors';
 import { checkFailedCredential, noteFailedCredential } from './rate-limit';
 import { hasAnalystAccess, readRosterEmployees } from './employee-access';
 
-export const READ_SCOPES = ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read', 'cms:read'] as const;
+export const READ_SCOPES = ['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read', 'cms:read', 'calls.performance:read'] as const;
 /** Supported permissions are not defaults: writes always need an explicit credential grant. */
 export const SCOPES = [...READ_SCOPES, 'gis:write', 'mail:drafts', 'crm.rfq:write', 'crm.notes:write', 'cms:write'] as const;
 export type Scope = typeof SCOPES[number];
@@ -33,6 +33,7 @@ export function rosterReadScopes(employee: RosterAccess): Scope[] {
   if (hasAnalystAccess(employee) || rosterTwentyUserId(employee)) scopes.push('crm:read');
   if (hasAnalystAccess(employee)) scopes.push('analytics:read');
   if (hasAnalystAccess(employee)) scopes.push('cms:read');
+  if (hasAnalystAccess(employee)) scopes.push('calls.performance:read');
   return scopes;
 }
 

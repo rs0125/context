@@ -1,4 +1,6 @@
 import { validateAnalyticsCapabilities } from './analytics-query';
+import { readCallPerformance } from './call-performance';
+import { CALL_PERFORMANCE_GUIDANCE, CALL_PERFORMANCE_SCOPE, validateCallRequest } from './call-performance-query';
 import { randomUUID } from 'node:crypto';
 import { callCms, cmsInputs, type CmsTool } from './cms-tools';
 import type { PoolClient } from 'pg';
@@ -36,6 +38,7 @@ const ANALYTICS_GUIDANCE = 'Website and Ads analytics for Analysts: /api/v1/anal
 const QUERY_GUIDANCE = `Warehouse and CRM dates use Asia/Kolkata and the server clock. For warehouses added today in Bangalore use warehouses?city=Bangalore&period=today&sort=created_desc. For leads created this month use crm/opportunities?period=this_month; add view=created only for leads created BY you. Native Twenty creation time is source_created_at; it is not the mirror insertion time. Use date_field=follow_up&period=tomorrow for tomorrow's follow-ups. A date range uses inclusive YYYY-MM-DD date_from/date_to, or period, not both. Inspect query_context for resolved start_at/end_before and has_more; only summaries give full counts. Use warehouses/summary and crm/summary with the same filters for totals and grouped counts. Use crm/filters for stages, dates, sorting and permitted cities. Use crm/opportunities/{id}/assessment for a requirement checklist; add warehouse_ids as one to five comma-separated IDs for property comparisons and verification questions. Optional criteria must be supplied by the employee, not inferred; overrides never update CRM. Missing dates do not match date filters. Unknown is not zero. Updated timestamps do not establish an edit history, newly available inventory, or historical conversion rates. Keep filters and sort unchanged when passing nextCursor; searches are not frozen snapshots across concurrent source edits.`;
 
 type ApiDependencies = {
+  callPerformance: typeof readCallPerformance;
   cmsCall: typeof callCms;
   transaction: <T>(work: (client: PoolClient) => Promise<T>) => Promise<T>;
   authenticate: (request: Request) => KeyRegistration | Promise<KeyRegistration>;
@@ -59,6 +62,7 @@ type ApiDependencies = {
   audit: (entry: Record<string, unknown>) => void;
 };
 const defaults: ApiDependencies = {
+  callPerformance: readCallPerformance,
   cmsCall: callCms,
   transaction: withReadOnlyTransaction,
   authenticate: request => authenticateRequestKey(request, hash => withReadOnlyTransaction(client => findDatabaseKey(client, hash))),
@@ -115,6 +119,10 @@ async function dispatch(client: PoolClient, principal: Principal, path: string[]
       analytics_discovery: { permitted: principal.scopes.includes('analytics:read'),
         status: principal.scopes.includes('analytics:read') ? 'not_checked' : 'not_permitted',
         capabilities_path: principal.scopes.includes('analytics:read') ? '/api/v1/analytics/capabilities' : null },
+      call_performance_discovery: { permitted: principal.scopes.includes(CALL_PERFORMANCE_SCOPE),
+        status: principal.scopes.includes(CALL_PERFORMANCE_SCOPE) ? 'not_checked' : 'not_permitted',
+        capabilities_path: principal.scopes.includes(CALL_PERFORMANCE_SCOPE) ? '/api/v1/calls/capabilities' : null },
+      ...(principal.scopes.includes(CALL_PERFORMANCE_SCOPE) ? { call_performance_guidance: CALL_PERFORMANCE_GUIDANCE } : {}),
       ...(principal.scopes.includes('analytics:read') ? { analytics_guidance: ANALYTICS_GUIDANCE } : {}),
       warehouse_guidance: 'Warehouse results are candidates. Provisional recommendations may use available evidence with material conflicts and uncertainty stated. Read field_evidence and verification_required; retain a verification caveat covering the named candidates, using one shared caveat for common gaps. Optional unknown fields do not block a useful recommendation. Approximate values and ranges are not confirmed specifications. Permissive numeric filters include unknowns by default; explicit category/boolean filters remain exact. Do not silently relax a requested strict filter.',
       ...(!crmContactsRedacted() ? { crm_text_guidance: crmTextGuidance() } : {}),
@@ -331,7 +339,20 @@ export async function handleApiRequest(request: Request, path: string[], depende
     let verifiedPrincipal: Principal | undefined;
     let relatedContext: Awaited<ReturnType<typeof getRelatedCrmContext>> | undefined;
     let analyticsValue: unknown;
+    let callPerformanceValue: unknown;
     let locationValue: Awaited<ReturnType<typeof resolveLocation>> | undefined;
+    if (path[0] === 'calls') {
+      verifiedPrincipal = await deps.transaction(async client => {
+        await deps.revalidateKey?.(client, key);
+        const principal = await resolvePrincipal(client, key);
+        employeeId = principal.employeeId;
+        requireScope(principal, CALL_PERFORMANCE_SCOPE);
+        return principal;
+      });
+      const input = validateCallRequest(path, new URL(request.url).searchParams);
+      // CallOnGo is a separate database. Release the WAG connection first.
+      callPerformanceValue = await deps.callPerformance(input);
+    }
     if (path[0] === 'locations') {
       if (path.join('/') !== 'locations/resolve') throw new HttpError(404, 'NOT_FOUND', 'Endpoint not found.');
       const input = parseLocationQuery(new URL(request.url).searchParams);
@@ -428,6 +449,10 @@ export async function handleApiRequest(request: Request, path: string[], depende
         requireScope(principal, 'analytics:read');
         return { value: analyticsValue, markdown: undefined };
       }
+      if (path[0] === 'calls') {
+        requireScope(principal, CALL_PERFORMANCE_SCOPE);
+        return { value: callPerformanceValue, markdown: undefined };
+      }
       // Recheck identity, grant expiry and revocation before releasing coordinates.
       if (path[0] === 'locations') return { value: locationValue, markdown: undefined };
       return dispatch(client, principal, path, new URL(request.url).searchParams, crmAccess, relatedContext);
@@ -454,8 +479,10 @@ export async function handleApiRequest(request: Request, path: string[], depende
     const route = path.join('/');
     const operation = ['context', 'context.md', 'wiki/pages', 'wiki/search', 'warehouses', 'warehouses/filters',
       'warehouses/summary', 'crm/rfq-changes', 'crm/opportunities', 'crm/summary', 'crm/filters', 'crm/my-briefing',
+      'calls/capabilities', 'calls/summary', 'calls/assignments',
       'analytics/capabilities', 'analytics/ga4', 'analytics/search-console', 'analytics/google-ads', 'analytics/google-ads/filters', 'locations/resolve', 'mail/connection', 'mail/drafts', 'openapi.json'].includes(route)
       ? route : path.length === 3 && path[0] === 'crm' && path[1] === 'rfqs' ? 'crm/rfq/read'
+        : path.length === 3 && path[0] === 'calls' && path[1] === 'assignments' ? 'calls/assignments/read'
         : path.length === 4 && path[0] === 'analytics' && path[1] === 'google-ads' && path[2] === 'campaigns' ? 'analytics/google-ads/campaigns/read'
         : path.length === 5 && path[0] === 'crm' && path[1] === 'deals' && path[3] === 'notes' ? 'crm/note/read'
         : path.length === 4 && path[0] === 'crm' && path[1] === 'deals' && path[3] === 'note-changes' ? 'crm/note-changes'

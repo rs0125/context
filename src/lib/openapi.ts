@@ -1,4 +1,6 @@
 import { GOOGLE_ADS_ACCOUNT_SECTIONS } from './google-ads-catalog';
+import { CALL_PERFORMANCE_GUIDANCE, callCapabilitiesInput, callSummaryInput, callSearchInput, callDetailInput,
+  callCapabilitiesOutput, callSummaryOutput, callSearchOutput, callDetailOutput } from './call-performance-query';
 import { WAREHOUSE_RECORDED_FIELD_NAMES } from './warehouse-recorded-context';
 import { WAREHOUSE_FILTER_CATALOG, WAREHOUSE_NUMERIC_FIELDS, WAREHOUSE_SUMMARY_CATALOG } from "./warehouse-fields";
 import { ALL_STAGES, CRM_DATE_FIELDS, CRM_SORTS, CRM_FOLLOW_UP, CRM_SUMMARY_GROUPS } from "./data";
@@ -447,6 +449,15 @@ const knowledgeSummarySchema = {
   },
 };
 
+function callReportOperation(operationId: string, input: z.ZodObject, result: z.ZodType) {
+  const schema = z.toJSONSchema(input);
+  return { tags: ['Call performance'], operationId,
+    description: `Requires current Analyst access and calls.performance:read. ${CALL_PERFORMANCE_GUIDANCE}`,
+    parameters: Object.entries(schema.properties ?? {}).map(([name, property]) => ({
+      name, in: name === 'id' ? 'path' : 'query', required: name === 'id', schema: property,
+    })), responses: jsonResponses('Current assignment evidence and source coverage.', false, z.toJSONSchema(result)) };
+}
+
 /** Public, credential-free description of the read-only REST surface. */
 export function getOpenApiDocument() {
   return {
@@ -464,9 +475,14 @@ export function getOpenApiDocument() {
       { name: "Warehouses", description: "Permitted warehouse fields. Requires warehouses:read and active dashboard or administrator access in the employee roster." },
       { name: "CRM", description: "Requires crm:read and an active employee. Current roster Analysts (including administrators) can read all non-deleted mirrored leads without a linked Twenty identity. Other employees can read leads they created OR are assigned to, using a linked CRM user verified against live Twenty. Personal created/assigned views require that live identity for every role. Named-assignee filters only narrow these permissions. Incomplete or failed checks deny access. Mirror facts require a successful opportunity sync within 30 minutes." },
       { name: "Service", description: "Public service metadata without organisation records." },
+      { name: 'Call performance', description: 'Read-only caller assignment workload and recorded outcomes. Current Analyst access and calls.performance:read are both required.' },
       { name: "Analytics", description: "Read-only GA4 and Google Search Console aggregates. Requires analytics:read on the credential AND current Analyst access, inherited by roster administrators. Twenty administrator status alone does not grant analytics access. Sources are pinned by server configuration; clients cannot choose another property or supply Google credentials." },
     ],
     paths: {
+      '/calls/capabilities': { get: callReportOperation('call_performance_capabilities', callCapabilitiesInput, callCapabilitiesOutput) },
+      '/calls/summary': { get: callReportOperation('call_performance_summary', callSummaryInput, callSummaryOutput) },
+      '/calls/assignments': { get: callReportOperation('search_call_assignments', callSearchInput, callSearchOutput) },
+      '/calls/assignments/{id}': { get: callReportOperation('read_call_assignment', callDetailInput, callDetailOutput) },
       "/mail/connection": {
         get: { summary: "Check your Gmail draft connection", description: "Requires explicit mail:drafts scope and enabled Gmail integration. Returns only the current employee mailbox, frozen connection identity/version, and the browser connection page. Never returns tokens.",
           operationId: "get_email_connection", security: [{ bearerAuth: [] }],

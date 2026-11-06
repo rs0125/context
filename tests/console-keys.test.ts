@@ -44,7 +44,7 @@ describe('employee-bound encrypted console keys', () => {
     const client = { query } as unknown as PoolClient;
     const currentIdentity = await resolveConsoleEmployee(client, identity.email);
     const key = await rotateOwnConsoleKey(client, currentIdentity, now);
-    expect(key.scopes).toEqual(['knowledge:read', 'warehouses:read', 'crm:read', ...((adminAccess || analystAccess) ? ['analytics:read', 'cms:read'] : [])]);
+    expect(key.scopes).toEqual(['knowledge:read', 'warehouses:read', 'crm:read', ...((adminAccess || analystAccess) ? ['analytics:read', 'cms:read', 'calls.performance:read'] : [])]);
     expect(query.mock.calls[1][1][5]).toEqual(key.scopes);
   });
 

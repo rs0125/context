@@ -1,4 +1,6 @@
 import { MAX_MCP_BODY_BYTES } from './mcp-limits';
+import { CALL_PERFORMANCE_SCOPE, callCapabilitiesInput, callSummaryInput, callSearchInput, callDetailInput,
+  callCapabilitiesOutput, callSummaryOutput, callSearchOutput, callDetailOutput } from './call-performance-query';
 import { toolRegistrar } from './tools/registry';
 import { callCms, cmsAvailability, cmsInputs, cmsEnvelope, cmsWriteOutput, type CmsTool } from './cms-tools';
 import { createMcpHandler } from 'mcp-handler';
@@ -229,6 +231,8 @@ function registerTools(server: McpServer, key: KeyRegistration, request: Request
     if (path[0] === 'crm' && path[3] === 'assessment') citation.search = '';
     // Precise locations and user-supplied Maps links must not enter citations.
     if (path[0] === 'locations') citation.search = '';
+    // Caller work emails and cursors are unnecessary in shareable citations.
+    if (path[0] === 'calls') citation.search = '';
     if (path[0] === 'warehouses' && !response.ok && body.error && typeof body.error === 'object'
       && (body.error as { code?: string }).code === 'UPLOADER_NAME_AMBIGUOUS') {
       body.error = { ...body.error, recovery: { retryable: false, action: 'correct_query',
@@ -454,6 +458,24 @@ function registerTools(server: McpServer, key: KeyRegistration, request: Request
     inputSchema: locationInputSchema, outputSchema: output(locationOutputSchema),
     annotations: { ...annotations, openWorldHint: true },
   }, args => call(name, ['locations', 'resolve'], args)));
+  if (allowed(CALL_PERFORMANCE_SCOPE)) {
+    registerTool('call_performance_capabilities', name => register(name, {
+      title: 'Discover caller performance reports', description: promptText('tool.call_performance_capabilities', prompts),
+      inputSchema: callCapabilitiesInput, outputSchema: output(callCapabilitiesOutput), annotations,
+    }, args => call(name, ['calls', 'capabilities'], args)));
+    registerTool('call_performance_summary', name => register(name, {
+      title: 'Summarize caller assignment performance', description: promptText('tool.call_performance_summary', prompts),
+      inputSchema: callSummaryInput, outputSchema: output(callSummaryOutput), annotations,
+    }, args => call(name, ['calls', 'summary'], args)));
+    registerTool('search_call_assignments', name => register(name, {
+      title: 'Find caller assignments', description: promptText('tool.search_call_assignments', prompts),
+      inputSchema: callSearchInput, outputSchema: output(callSearchOutput), annotations,
+    }, args => call(name, ['calls', 'assignments'], args)));
+    registerTool('read_call_assignment', name => register(name, {
+      title: 'Read assignment progress history', description: promptText('tool.read_call_assignment', prompts),
+      inputSchema: callDetailInput, outputSchema: output(callDetailOutput), annotations,
+    }, ({ id, ...args }) => call(name, ['calls', 'assignments', id], args)));
+  }
   if (allowed('analytics:read')) {
     registerTool('analytics_capabilities', name => register(name, { title: 'Discover website and Ads analytics', description: promptText('tool.analytics_capabilities', prompts),
       inputSchema: analyticsCapabilitiesInput, outputSchema: output(analyticsCapabilitiesOutput), annotations }, args => call(name, ['analytics', 'capabilities'], args)));

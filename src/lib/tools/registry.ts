@@ -11,6 +11,7 @@ import { TOOL_CATALOG, type ToolName, type ToolPlatform } from './catalog';
 
 export const TOOL_DISCOVERY_KEY = 'wareongo/tool-discovery-v1';
 export const CAPABILITIES = {
+  calls: 'Read caller assignment workload, aging, recorded outcomes and retained structured progress history. Analyst access; source coverage limits remain explicit.',
   context: 'Session capabilities, current clock and location resolution.',
   cms: 'Website CMS page types, CSV templates, page states, validated import diffs and private content drafts. Final editorial approval happens in the CMS.',
   knowledge: 'Find and read Wareongo company knowledge, guidance and policies.',

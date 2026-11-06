@@ -9,6 +9,7 @@ export const READ_SCOPE_OPTIONS = [
   ...SCOPE_OPTIONS,
   { value: 'analytics:read', label: 'Website and Ads analytics' },
   { value: 'cms:read', label: 'Website CMS pages and schemas' },
+  { value: 'calls.performance:read', label: 'Caller assignment performance' },
 ] as const;
 
 /** Explicit OAuth consent vocabulary; console key issuance still defaults to reads only. */

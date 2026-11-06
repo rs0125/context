@@ -22,14 +22,16 @@ type CatalogTable = {
   indexes: { definition: string; valid: boolean; ready: boolean }[];
 };
 
-function existingCatalog(kind: 'console' | 'mcp', options: { wrongSignature?: boolean; privacy?: boolean; analytics?: boolean; gis?: boolean; mail?: boolean; rfq?: boolean; allPrevious?: boolean } = {}) {
+function existingCatalog(kind: 'console' | 'mcp', options: { wrongSignature?: boolean; privacy?: boolean; analytics?: boolean; gis?: boolean; mail?: boolean; rfq?: boolean; allPrevious?: boolean; cms?: boolean } = {}) {
   const schema = kind === 'console' ? 'context_auth_private' : 'context_mcp_private';
   const schemaMarker = kind === 'console' ? 'context-console-auth-schema-v1' : 'context-mcp-oauth-schema-v1';
   const tableMarker = kind === 'console' ? 'context-console-employee-keys-v1:' : 'context-mcp-oauth-table-v1:';
   const signature = (table: CatalogTable) => createHash('sha256').update(JSON.stringify({
     columns: table.columns, constraints: table.constraints, ...(kind === 'mcp' ? { indexes: table.indexes } : {}),
   })).digest('hex');
-  const oldScopeCheck = options.allPrevious
+  const oldScopeCheck = options.cms
+    ? CREDENTIAL_SCOPE_CHECK.replace('BETWEEN 1 AND 11', 'BETWEEN 1 AND 10').replace(", 'calls.performance:read'", '').replace(/\s*\+ CASE WHEN 'calls\.performance:read' = ANY\(scopes\) THEN 1 ELSE 0 END/, '')
+    : options.allPrevious
     ? "CHECK (cardinality(scopes) BETWEEN 1 AND 7 AND scopes <@ ARRAY['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read', 'gis:write', 'mail:drafts', 'crm.rfq:write']::text[])"
     : options.mail || options.rfq
     ? `CHECK (cardinality(scopes) BETWEEN 1 AND 6 AND scopes <@ ARRAY['knowledge:read', 'warehouses:read', 'crm:read', 'analytics:read', 'gis:write', '${options.mail ? 'mail:drafts' : 'crm.rfq:write'}']::text[])`
@@ -87,7 +89,7 @@ describe.each([
   { kind: 'console' as const, migrate: migrateConsoleStorage, upgraded: ['employee_api_keys'] },
   { kind: 'mcp' as const, migrate: migrateMcpOAuthStorage, upgraded: ['oauth_clients', 'oauth_grants'] },
 ])('$kind credential scope migration', ({ kind, migrate, upgraded }) => {
-  it.each([{ analytics: false }, { analytics: true }, { gis: true }, { mail: true }, { rfq: true }, { allPrevious: true }])('upgrades only verified locked constraints, preserving rows and idempotency (%j)', async previous => {
+  it.each([{ analytics: false }, { analytics: true }, { gis: true }, { mail: true }, { rfq: true }, { allPrevious: true }, { cms: true }])('upgrades only verified locked constraints, preserving rows and idempotency (%j)', async previous => {
     const { client, queries, catalog } = existingCatalog(kind, previous);
     await migrate(client);
     const statements = queries.mock.calls.map(([sql]) => sql);
@@ -95,7 +97,8 @@ describe.each([
     expect(alterations).toHaveLength(upgraded.length);
     for (const name of upgraded) {
       const alteration = alterations.find(sql => sql.includes(`.${name}`))!;
-      expect(alteration).toContain('BETWEEN 1 AND 10');
+      expect(alteration).toContain('BETWEEN 1 AND 11');
+      expect(alteration).toContain('calls.performance:read');
       expect(alteration).toContain('cms:read');
       expect(alteration).toContain('cms:write');
       expect(alteration).toContain("'gis:write'");

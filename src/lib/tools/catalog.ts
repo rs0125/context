@@ -3,6 +3,26 @@ import { NOTE_DELETE_RECOVERY_GUIDANCE, WAREHOUSE_EVIDENCE_GUIDANCE } from './gu
 import type { Scope } from '../auth';
 
 export const TOOL_CATALOG = {
+  call_performance_capabilities: {
+    title: 'Discover caller performance reports', group: 'Call performance', capability: 'calls', platforms: ['claude', 'whatsapp'], loading: 'deferred',
+    description: 'Analyst access: discover caller emails, supported assignment metrics and coverage. Inactive callers with history remain visible. Period completions, first-call time, follow-up compliance and actual-call rankings are unsupported: explain this from capabilities without scanning assignments. Missing/stale logs do not prove inactivity.',
+    read: { requiredScopes: ['calls.performance:read'], sourceFamily: 'calls' },
+  },
+  call_performance_summary: {
+    title: 'Summarize caller assignment performance', group: 'Call performance', capability: 'calls', platforms: ['claude', 'whatsapp'], loading: 'deferred',
+    description: 'Analyst access: current counts, open-age buckets and recorded outcomes, overall and by caller. Use this for totals; pages of assignments are unnecessary. Discover exact caller emails for named filters. Dates select assigned_at in IST, never completion or onboarding dates. Keep date scope separate for each subquestion; clarify ambiguous timing or label the current all-date total. Done/Added are staff-recorded; references are unverified and caller counts overlap. Inspect coverage and truncation.',
+    read: { requiredScopes: ['calls.performance:read'], sourceFamily: 'calls' },
+  },
+  search_call_assignments: {
+    title: 'Find caller assignments', group: 'Call performance', capability: 'calls', platforms: ['claude', 'whatsapp'], loading: 'deferred',
+    description: 'Analyst access: fetch requested assignments or examples using the same filters as summary. Use summary for full counts. Set limit to the examples still needed (maximum 25); stop once enough are returned. For additional requested rows, follow nextCursor with unchanged filters. Pages are not frozen snapshots. Scanning cannot recover unsupported period completions, first-call time or follow-up compliance. Missing evidence does not prove inactivity.',
+    read: { requiredScopes: ['calls.performance:read'], sourceFamily: 'calls' },
+  },
+  read_call_assignment: {
+    title: 'Read assignment progress history', group: 'Call performance', capability: 'calls', platforms: ['claude', 'whatsapp'], loading: 'deferred',
+    description: 'Analyst access: read an assignment ID supplied by the user or returned by search; a supplied ID needs no preliminary search. Fetch only the requested history entries. Convert timestamps to IST or label UTC. Preserve history_has_creation_event and coverage; missing history cannot establish historical state or first contact. Actor is the recorded editor, not necessarily the caller. Continue with the same ID only for more requested history. Phones, notes and raw audit payloads are excluded.',
+    read: { requiredScopes: ['calls.performance:read'], sourceFamily: 'calls' },
+  },
   delete_crm_rfq: { title: 'Move my agent-created opportunity to CRM trash', group: 'CRM RFQs', description: 'Delete one opportunity this agent created for the current employee, still assigned to that employee, only after their explicit removal request. Resolve the exact target and read_crm_rfq freshly; copy its exact updated_at into expected_updated_at. Prior edits and current deal stage do not require undoing earlier actions. Uses recoverable CRM trash, never permanent destruction. Return the actual target name and ID from the deletion receipt. If the record changed, read and review again; if outcome is unknown, keep the same operation_id and arguments and reconcile before attempting another operation. No generic CRM history redisclosure and no in-chat restoration. The current direct request authorizes this action after review; do not add a second confirmation.', capability: 'crm', platforms: ['claude', 'whatsapp'], loading: 'deferred', write: { executionMode: 'direct_request', requiredScopes: ['crm:read', 'crm.rfq:write'], sourceFamily: 'crm', effect: 'delete', idempotencyArgument: 'operation_id', sourceTextArgument: 'raw_text' } },
   delete_crm_note: { title: 'Recover my prior note-trash receipt', group: 'CRM notes', description: NOTE_DELETE_RECOVERY_GUIDANCE, fixedDescription: true, capability: 'crm', platforms: ['claude', 'whatsapp'], loading: 'deferred', write: { executionMode: 'direct_request', requiredScopes: ['crm:read', 'crm.notes:write'], sourceFamily: 'crm', effect: 'delete', idempotencyArgument: 'operation_id', sourceTextArgument: 'raw_text' } },
   cms_schema: { title: 'Discover CMS schemas and CSV templates', group: 'Website CMS', description: 'Discover CMS page types, then fetch a page_type for its current schema_version, full JSON schema, exact CSV columns and CSV template. CMS owns the schemas. Read uploaded CSV content as UTF-8; do not pass filesystem paths or fetch arbitrary URLs. Preserve the schema version during validation.', capability: 'cms', platforms: ['claude', 'whatsapp'], loading: 'deferred', read: { requiredScopes: ['cms:read'], sourceFamily: 'cms' } },

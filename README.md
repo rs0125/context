@@ -1,5 +1,7 @@
 # Wareongo Context
 
+Read-only caller assignment reports are documented in [call performance setup and semantics](docs/call-performance.md), with scope and implementation boundaries in the [implementation plan](docs/call-performance-plan.md). They require current Analyst access and the explicit `calls.performance:read` grant.
+
 A REST, Markdown, and remote MCP context service for employee AI tools. REST remains read-only; MCP additionally supports explicitly authorized GIS creation, guarded GIS compensation, employee Gmail draft creation/editing and new CRM RFQ creation. It combines reviewed company guides with permitted warehouse facts and CRM opportunities. Employees see leads they created or are assigned to; Analysts (including roster admins) see all mirrored leads. The same Next.js deployment hosts the `/mcp` endpoint and an employee console for agent setup, with Markdown editing for roster admins.
 
 CRM writes use separately granted, explicit tools. RFQ creation, detail edits and eligible undo are described in [RFQ SOP, permissions and setup](docs/crm-rfq-writes.md). [Deal note tools](docs/crm-notes.md) can add notes to any currently authorized deal and edit or undo only the current employee’s agent-created notes. Features remain disabled until configured.

@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import { HttpError } from './errors';
 
-type Config = { idColumn: string; idType: 'integer' | 'uuid'; sortColumns: Record<string, string>; defaultSort?: string; filterContext?: unknown };
+type Config = { idColumn: string; idType: 'integer' | 'bigint' | 'uuid'; sortColumns: Record<string, string>; defaultSort?: string; filterContext?: unknown };
 function invalid(message: string): never { throw new HttpError(400, 'INVALID_QUERY', message); }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CURSOR_VERSION = 2;
 type Cursor = { v: number; sort: string; id: string | number; date: string | null; filter: string };
 function validId(value: unknown, type: Config['idType']) {
+  if (type === 'bigint') return typeof value === 'string' && /^[1-9]\d{0,18}$/.test(value) && BigInt(value) <= 9223372036854775807n;
   return type === 'integer'
     ? ((typeof value === 'number' && Number.isSafeInteger(value)) || (typeof value === 'string' && /^[1-9]\d{0,9}$/.test(value)))
       && Number(value) >= 1 && Number(value) <= 2147483647

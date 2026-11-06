@@ -19,6 +19,7 @@ const permissionLabels: Record<string, string> = {
   'crm:read': 'CRM records',
   'analytics:read': 'Website and Ads analytics (Analyst access)',
   'cms:read': 'Website CMS pages and schemas (Analyst or Admin access)',
+  'calls.performance:read': 'Caller assignment performance (Analyst or Admin access)',
   'gis:write': 'Create and undo own GIS points',
   'mail:drafts': 'Create and read own email drafts',
   'crm.rfq:write': 'Create, edit and undo own agent RFQs',
