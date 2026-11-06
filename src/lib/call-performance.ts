@@ -16,6 +16,9 @@ const METRICS = {
   missing_outcome: 'Matching assignments with no recorded outcome; not proof of no work.',
   staff_marked_added: 'Matching assignments currently marked Added to DB; not deduplicated or independently verified onboarding.',
   distinct_numeric_references: 'Distinct numeric warehouse references on matching assignments marked Added. Caller counts can overlap; use the overall total. This is not first onboarding credit or verified warehouse existence.',
+  warehouse_matched: 'Assignments whose contact has a warehouse DB match in CallOnGo\'s imported WAG contact index, independent of the staff Added flag. Counts assignments, not unique warehouses or newly onboarded properties.',
+  without_warehouse_match: 'Assignments with no warehouse DB contact match. For Available backlog use outcome=Available and warehouse_match=no; inspect warehouse_sync coverage.',
+  warehouse_match_needs_review: 'Matched assignments with at least one retained contact-to-warehouse association awaiting source review; a subset of warehouse_matched.',
   open_under_7_days: 'Current open assignments younger than seven elapsed 24-hour days since assignment.',
   open_7_to_30_days: 'Current open assignments at least seven but less than thirty elapsed days old.',
   open_30_days_plus: 'Current open assignments at least thirty elapsed days old. Age is not time spent working.',
@@ -27,6 +30,7 @@ type AssignmentRow = {
   name: string | null; active: boolean | null; assigned_at: Date; state: 'open' | 'done' | 'dropped';
   outcome: 'Available' | 'Unavailable' | 'Unclear' | null; completed_at: Date | null;
   staff_marked_added: boolean; has_recorded_reference: boolean; numeric_warehouse_reference: string | null;
+  warehouse_matched: boolean; matched_warehouse_ids: string[]; warehouse_match_needs_review: boolean;
   audit_events: number; open_age_days: number | null;
 };
 const iso = (value: Date | string | null) => value === null ? null : new Date(value).toISOString();
@@ -38,6 +42,8 @@ function assignment(row: AssignmentRow) {
     assigned_at: iso(row.assigned_at)!, state: row.state, outcome: row.outcome, completed_at: iso(row.completed_at),
     staff_marked_added: row.staff_marked_added, has_recorded_reference: row.has_recorded_reference,
     numeric_warehouse_reference: row.numeric_warehouse_reference, open_age_days: row.open_age_days,
+    warehouse_matched: row.warehouse_matched, matched_warehouse_ids: row.matched_warehouse_ids.slice(0, 25),
+    warehouse_matches_truncated: row.matched_warehouse_ids.length > 25, warehouse_match_needs_review: row.warehouse_match_needs_review,
     audit_events: row.audit_events, source_path: `/api/v1/calls/assignments/${row.id}` };
 }
 
@@ -52,6 +58,7 @@ export function callAssignmentFilter(input: CallFilters, now: Date) {
   if (input.entity_type) where.push(`a.entity_type=${bind(input.entity_type)}`);
   if (input.state) where.push(`a.state=${bind(input.state)}`);
   if (input.outcome) where.push(`a.outcome=${bind(input.outcome)}`);
+  if (input.warehouse_match) where.push(input.warehouse_match === 'yes' ? 'a.warehouse_matched' : 'NOT a.warehouse_matched');
   if (input.min_open_age_days !== undefined) where.push(`a.state='open'`, `a.assigned_at<=${snapshot}-${bind(input.min_open_age_days)}::integer*interval '24 hours'`);
   if (input.gap === 'missing_outcome') where.push('a.outcome IS NULL');
   if (input.gap === 'added_without_reference') where.push('a.staff_marked_added AND NOT a.has_recorded_reference');
@@ -67,6 +74,9 @@ async function sourceContext(client: PoolClient) {
     snapshot_at: Date; manual_attempts: number; first_audit_at: Date | null; assignments_without_audit: number;
     employee_callers: number; linked_employee_callers: number; callyzer_accounts: number;
     callyzer_last_success_at: Date | null; callyzer_has_error: boolean | null;
+    warehouse_sync_enabled: boolean; warehouse_sync_initialized: boolean; warehouse_sync_interval_seconds: number | null;
+    warehouse_last_success_at: Date | null; warehouse_last_snapshot_at: Date | null; warehouse_sync_has_error: boolean;
+    warehouse_sync_has_more: boolean; warehouse_audit_replay_limited: boolean; warehouse_pending_reviews: number;
   }>('SELECT transaction_timestamp() AS snapshot_at,c.* FROM call_performance.coverage c')).rows[0];
   if (!row) throw new HttpError(503, 'CALLS_SOURCE_UNAVAILABLE', 'Call reporting coverage is unavailable.');
   const now = new Date(row.snapshot_at);
@@ -74,8 +84,17 @@ async function sourceContext(client: PoolClient) {
   const lag = lastSuccess ? now.getTime() - Date.parse(lastSuccess) : Infinity;
   const status = row.callyzer_accounts !== 1 || !lastSuccess ? 'unavailable' as const
     : row.callyzer_has_error || lag < -60000 || lag > 15 * 60000 ? 'stale' as const : 'recent_import' as const;
+  const warehouseLastSuccess = iso(row.warehouse_last_success_at);
+  const warehouseLag = warehouseLastSuccess ? now.getTime() - Date.parse(warehouseLastSuccess) : Infinity;
+  // The warehouse job runs at its configured interval through a ten-minute scheduler.
+  const warehouseStatus = !row.warehouse_sync_initialized || !warehouseLastSuccess ? 'unavailable' as const
+    : !row.warehouse_sync_enabled || row.warehouse_sync_has_error || warehouseLag < -60000
+      || !row.warehouse_sync_interval_seconds || warehouseLag > (row.warehouse_sync_interval_seconds + 600) * 1000 ? 'stale' as const
+      : row.warehouse_sync_has_more || row.warehouse_audit_replay_limited ? 'catching_up' as const : 'recent_import' as const;
   const warnings = ['Manual logs are recorded evidence only; missing attempts do not prove inactivity.',
-    'Assignment outcomes and warehouse references are staff-recorded, not independently verified.'];
+    'Staff Added flags and saved references are separate from warehouse DB contact matches. A phone match does not establish the same physical property, first onboarding credit or unique-warehouse counts.'];
+  if (warehouseStatus !== 'recent_import') warnings.push('Warehouse contact sync is stale, incomplete or unavailable; no match does not prove absence from the current warehouse database.');
+  if (row.warehouse_pending_reviews) warnings.push('Warehouse associations awaiting source review remain in the match index; inspect warehouse_match_needs_review.');
   if (row.assignments_without_audit || !row.first_audit_at) warnings.push('Retained change history does not cover every assignment from creation; historical states cannot be fully reconstructed.');
   if (row.linked_employee_callers < row.employee_callers) warnings.push('Callyzer links do not cover all employee callers.');
   if (status !== 'recent_import') warnings.push('Callyzer imports are stale or unavailable; missing recent calls cannot be interpreted as zero activity.');
@@ -85,7 +104,11 @@ async function sourceContext(client: PoolClient) {
     coverage: { scope: 'whole_source' as const, manual_attempts: row.manual_attempts, first_audit_at: iso(row.first_audit_at),
       assignments_without_audit: row.assignments_without_audit, employee_callers: row.employee_callers,
       linked_employee_callers: row.linked_employee_callers, callyzer_last_success_at: lastSuccess,
-      callyzer_status: status, warnings } } };
+      callyzer_status: status, warehouse_sync: { status: warehouseStatus, enabled: row.warehouse_sync_enabled,
+        initialized: row.warehouse_sync_initialized, interval_seconds: row.warehouse_sync_interval_seconds,
+        last_success_at: warehouseLastSuccess, last_snapshot_at: iso(row.warehouse_last_snapshot_at),
+        has_more: row.warehouse_sync_has_more, audit_replay_limited: row.warehouse_audit_replay_limited,
+        pending_reviews: row.warehouse_pending_reviews }, warnings } } };
 }
 
 function totalsSql(snapshot: string) {
@@ -99,6 +122,9 @@ function totalsSql(snapshot: string) {
     count(*) FILTER(WHERE a.outcome IS NULL)::integer AS missing_outcome,
     count(*) FILTER(WHERE a.staff_marked_added)::integer AS staff_marked_added,
     count(DISTINCT a.numeric_warehouse_reference) FILTER(WHERE a.staff_marked_added)::integer AS distinct_numeric_references,
+    count(*) FILTER(WHERE a.warehouse_matched)::integer AS warehouse_matched,
+    count(*) FILTER(WHERE NOT a.warehouse_matched)::integer AS without_warehouse_match,
+    count(*) FILTER(WHERE a.warehouse_match_needs_review)::integer AS warehouse_match_needs_review,
     count(*) FILTER(WHERE a.state='open' AND a.assigned_at>${snapshot}-interval '7 days')::integer AS open_under_7_days,
     count(*) FILTER(WHERE a.state='open' AND a.assigned_at<=${snapshot}-interval '7 days'
       AND a.assigned_at>${snapshot}-interval '30 days')::integer AS open_7_to_30_days,
@@ -109,6 +135,7 @@ function metrics(row: Metrics): Metrics {
 }
 const assignmentColumns = (snapshot: string) => `a.id::text,a.entity_type,a.entity_id::text,a.assignee,u.name,u.active,
   a.assigned_at,a.state,a.outcome,a.completed_at,a.staff_marked_added,a.has_recorded_reference,a.numeric_warehouse_reference,
+  a.warehouse_matched,a.matched_warehouse_ids,a.warehouse_match_needs_review,
   CASE WHEN a.state='open' THEN greatest(0,floor(extract(epoch FROM (${snapshot}-a.assigned_at))/86400))::integer END AS open_age_days,
   (SELECT count(*)::integer FROM call_performance.assignment_changes h WHERE h.assignment_id=a.id) AS audit_events`;
 const assignmentFrom = 'FROM call_performance.assignments a LEFT JOIN call_performance.callers u ON u.email=a.assignee';
@@ -120,7 +147,7 @@ export async function readCallPerformance(request: CallRequest, transaction: typ
     if (request.report === 'capabilities') {
       const people = (await client.query<Caller>('SELECT email,name,active FROM call_performance.callers ORDER BY email LIMIT 101')).rows;
       return { ...base, callers: people.slice(0, 100), callers_truncated: people.length > 100,
-        filters: { states: [...CALL_STATES], outcomes: [...CALL_OUTCOMES], entity_types: ['record', 'call'], gaps: [...CALL_GAPS] },
+        filters: { states: [...CALL_STATES], outcomes: [...CALL_OUTCOMES], entity_types: ['record', 'call'], gaps: [...CALL_GAPS], warehouse_match: ['yes', 'no'] },
         metrics: Object.entries(METRICS).map(([name, definition]) => ({ name, definition })), max_page_size: 25 as const, max_date_range_days: 366 as const };
     }
     if (request.report === 'summary') {

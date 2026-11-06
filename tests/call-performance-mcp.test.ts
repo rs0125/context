@@ -14,19 +14,23 @@ const now = '2026-11-05T12:00:00.000Z';
 const base = { source: 'callongo', read_only: true, snapshot_at: now, timezone: 'Asia/Kolkata', guidance: 'Preserve evidence limits.',
   coverage: { scope: 'whole_source', manual_attempts: 2, first_audit_at: null, assignments_without_audit: 1,
     employee_callers: 5, linked_employee_callers: 2, callyzer_last_success_at: '2026-10-27T12:00:00.000Z',
-    callyzer_status: 'stale', warnings: ['Missing activity does not prove inactivity.'] } };
+    callyzer_status: 'stale', warehouse_sync: { status: 'recent_import', enabled: true, initialized: true, interval_seconds: 3600,
+      last_success_at: now, last_snapshot_at: now, has_more: false, audit_replay_limited: false, pending_reviews: 0 },
+    warnings: ['Missing activity does not prove inactivity.'] } };
 const caller = { email: 'alice@example.test', name: 'Alice', active: true };
 const context = { date_basis: 'assigned_at', state_basis: 'current', date_from: null, date_to: null, start_at: null, end_before: null, filters: {} };
 const counts = { assignments: 1, open: 1, done: 0, dropped: 0, available: 0, unavailable: 0, unclear: 0, missing_outcome: 1,
-  staff_marked_added: 0, distinct_numeric_references: 0, open_under_7_days: 1, open_7_to_30_days: 0, open_30_days_plus: 0 };
+  staff_marked_added: 0, distinct_numeric_references: 0, warehouse_matched: 1, without_warehouse_match: 0, warehouse_match_needs_review: 0,
+  open_under_7_days: 1, open_7_to_30_days: 0, open_30_days_plus: 0 };
 const assignment = { id: '9007199254740993', entity_type: 'record', entity_id: '00000000-0000-4000-8000-000000000001',
   caller, assigned_at: now, state: 'open', outcome: null, completed_at: null, staff_marked_added: false,
   has_recorded_reference: false, numeric_warehouse_reference: null, open_age_days: 0, audit_events: 0,
+  warehouse_matched: true, matched_warehouse_ids: ['123'], warehouse_matches_truncated: false, warehouse_match_needs_review: false,
   source_path: '/api/v1/calls/assignments/9007199254740993' };
 const page = { nextCursor: null, pagination: { limit: 25, has_more: false, snapshot: false } };
 const results = {
   capabilities: { ...base, callers: [caller], callers_truncated: false,
-    filters: { states: ['open', 'done', 'dropped'], outcomes: ['Available', 'Unavailable', 'Unclear'], entity_types: ['record', 'call'], gaps: [] },
+    filters: { states: ['open', 'done', 'dropped'], outcomes: ['Available', 'Unavailable', 'Unclear'], entity_types: ['record', 'call'], gaps: [], warehouse_match: ['yes', 'no'] },
     metrics: [{ name: 'assignments', definition: 'Assignment episodes.' }], max_page_size: 25, max_date_range_days: 366 },
   summary: { ...base, query_context: context, totals: counts, callers: [{ caller, metrics: counts }], callers_truncated: false, assignments_outside_caller_breakdown: 0 },
   assignments: { ...base, query_context: context, items: [assignment], ...page },
@@ -60,8 +64,8 @@ describe('caller performance MCP and OpenAPI contract', () => {
       }
       const cases = [
         { name: names[0], arguments: {}, path: ['calls', 'capabilities'] },
-        { name: names[1], arguments: { caller: caller.email }, path: ['calls', 'summary'] },
-        { name: names[2], arguments: { min_open_age_days: 7 }, path: ['calls', 'assignments'] },
+        { name: names[1], arguments: { caller: caller.email, outcome: 'Available', warehouse_match: 'no' }, path: ['calls', 'summary'] },
+        { name: names[2], arguments: { min_open_age_days: 7, warehouse_match: 'yes' }, path: ['calls', 'assignments'] },
         { name: names[3], arguments: { id: assignment.id }, path: ['calls', 'assignments', assignment.id] },
       ];
       for (const entry of cases) {
@@ -74,6 +78,8 @@ describe('caller performance MCP and OpenAPI contract', () => {
         expect(read.mock.calls.at(-1)?.[1]).toEqual(entry.path);
       }
       expect(new URL(read.mock.calls[1][0].url).searchParams.get('caller')).toBe(caller.email);
+      expect(new URL(read.mock.calls[1][0].url).searchParams.get('warehouse_match')).toBe('no');
+      expect(new URL(read.mock.calls[2][0].url).searchParams.get('warehouse_match')).toBe('yes');
       expect(new URL(read.mock.calls[3][0].url).searchParams.has('id')).toBe(false);
       read.mockClear();
       for (const arguments_ of [{ limit: 100 }, { sql: 'select 1' }, { state: 'won' }]) {
@@ -96,6 +102,7 @@ describe('caller performance MCP and OpenAPI contract', () => {
     const paths = getOpenApiDocument().paths;
     expect(paths['/calls/summary'].get.operationId).toBe('call_performance_summary');
     expect(paths['/calls/summary'].get.parameters.map(p => p.name)).not.toContain('limit');
+    expect(paths['/calls/summary'].get.parameters.map(p => p.name)).toContain('warehouse_match');
     expect(paths['/calls/assignments'].get.parameters.map(p => p.name)).toContain('cursor');
     expect(paths['/calls/assignments/{id}'].get.parameters.find(p => p.name === 'id')).toMatchObject({ in: 'path', required: true });
   });

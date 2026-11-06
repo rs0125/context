@@ -1,6 +1,6 @@
 # Call performance API and tool plan
 
-Status: first slice implemented and validated locally on 2026-11-05. Deployment and live database provisioning remain rollout steps; see [setup instructions](call-performance.md).
+Status: implemented and validated locally on 2026-11-05; production activation completed on 2026-11-06. See the [production rollout record](#production-activation-on-2026-11-06) and [setup instructions](call-performance.md).
 
 ## Objective
 
@@ -86,7 +86,7 @@ Restore and verify Callyzer ingestion; expand caller links; agree on explicit at
 - `npm run build`: passed.
 - `git diff --check`: passed.
 
-Live source schema changes, reader login/secret provisioning, credential-scope migrations, grant renewal and deployment have not been applied. The configuration and rollout order are documented in [Caller assignment performance](call-performance.md).
+At the local implementation checkpoint, live source schema changes, reader login/secret provisioning, credential-scope migrations, grant renewal and deployment had not been applied. The configuration and rollout order are documented in [Caller assignment performance](call-performance.md); production activation is recorded below.
 
 ## Local Ramesh review on 2026-11-05
 
@@ -163,3 +163,27 @@ All ten answers completed and passed delivery revalidation: nine passed semantic
 All 68 model requests settled. Conservative accounted cost is USD 0.210516 against the USD 3 cap, with zero pending requests, unknown usage or held reservations in this campaign. Rates were rechecked against [official Luna pricing](https://developers.openai.com/api/docs/models/gpt-6-luna) on 2026-11-06; the meter retains conservative upper rates. This is model usage accounting, not invoice reconciliation, and is separate from previous campaigns.
 
 Artifacts are retained under `.local/call-performance-review-20261106-fixes/`: `local-validation.json`, local test/build logs, the runner and criteria, `connection-health.json`, `preflight-review.json`, the failed unpaid attempt in `paid-campaign/`, and the completed campaign in `paid-campaign-2/`. The latter contains all ten replies in `answers.txt`, review notes in `manual-review.json`, and the original traces and usage ledger. No paid trials were repeated, no Ramesh runtime changes were made, and no live rollout was performed.
+
+## Production activation on 2026-11-06
+
+The user explicitly authorized applying the SQL and production permissions through Vercel and AWS. Applied `scripts/sql/call-performance.sql` to CallOnGo and provisioned the `call_performance_reader` login. Verified four readable reporting views, zero direct business-table access, zero reporting write privileges and no schema-creation privileges. The actual reader connection passed all four report functions with verified TLS and read-only transactions.
+
+Applied the console and OAuth scope migrations. Configured production `CONTEXT_CALLS_DATABASE_URL` and `CONTEXT_CALLS_SSL_CA`, then added only `calls.performance:read` to the existing Ramesh public registration. Preserved its key, expiry, other scopes and other Vercel settings. Redeployed Context Engine commit `1cce6f8` as deployment `dpl_9gehze8DZ5d7PLMFDWv1s2SuK2Ui`. All four signed MCP reads passed; omitting the scope hid all four tools while preserving the existing tool catalogue.
+
+Updated AWS runtime Parameter Store to version 19 and installed the matching signer scope on the EC2 host, preserving a private environment backup and every other setting. Ramesh release `c090ec1` restarted healthy and connected to WhatsApp. A model-free probe using the deployed worker's actual configuration and the previously selected operator identity passed all four tools and delivery revalidation: eight call-tool executions, including the four fresh delivery reads. Scheduler health also passed. No model calls, business-record writes or WhatsApp sends were made by the rollout probes.
+
+Existing standalone employee API keys and OAuth grants were not widened or rotated. Those clients must opt in to the new scope through key rotation and renewed consent; Ramesh's current admin/analyst authorization applies immediately. The earlier answer-quality partial result remains separate from this successful configuration rollout.
+
+Private configuration backups, operator scripts and sanitized verification results are retained under `.local/call-performance-rollout-20261106/`; `rollout.json` records the completed activation without credentials or source rows.
+
+## Warehouse-match correction on 2026-11-06
+
+The initial reporting projection omitted CallOnGo's existing warehouse-contact match view. Ramesh consequently answered the Available backlog question using the manual Added checkbox: 859 Available minus 325 manually marked Added = 534. A read-only source check instead found 317 matched and 542 unmatched Available assignment episodes. Ten matched assignments lacked the manual flag, while eighteen manually flagged assignments lacked a database contact match. These are source-snapshot counts, not unique physical warehouses.
+
+Extend the existing assignment and coverage views with the source's warehouse matches and sync metadata. Add the shared `warehouse_match=yes/no` summary/search filter, matching totals, bounded distinct warehouse IDs and pending-review indicators. Keep manual flags and references independent. Reuse the existing reader, four tools and Ramesh dynamic contracts; no new service, sync job, direct WAG contact query or Ramesh runtime change is needed.
+
+Validate duplicate contact matches, cross-entity ID collisions, disagreement with manual flags, bounded IDs, independent sync freshness, shared filter counts and reader privileges against isolated PostgreSQL. Then apply the appended reporting columns before deploying Context Engine, compare the real reader with independent source counts and verify live tool execution and delivery revalidation without model calls or WhatsApp sends. Retain the earlier evaluation results: they did not cover warehouse-contact matches.
+
+Validation passed: 64 focused tests, 25 isolated PostgreSQL 17.7 tests, type checking, production build and whitespace checks. The default suite passed 3,638 tests with 225 environment-gated skips; two unrelated subprocess tests were blocked by sandbox `EPERM`. Their complete five-test file passed when rerun with subprocess permission. No test or application change was needed for that restriction.
+
+Applied the appended reporting-view columns to production, preserving the reader credentials and privileges. Nine reads through the real restricted reader passed and agreed with independent source queries before and after verification. At 17:40 UTC, the Available counts remained 859 total, 317 matched and 542 unmatched; none of the Available matches required review. Warehouse sync last succeeded at 17:30 UTC, with four pending associations elsewhere in the whole source. Individual report transactions completed in 0.55–1.90 seconds under the existing timeouts. Source-view backups, SQL hash, test logs and rollout verification artifacts are retained privately under `.local/call-warehouse-match-fix-20261106/`.

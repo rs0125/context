@@ -23,7 +23,7 @@ describe('call report query contract', () => {
     'date_from=2026-11-02&date_to=2026-11-01', 'date_from=2025-01-01&date_to=2026-11-01',
     'date_from=2026-11-05&date_to=2026-11-06', 'state=done&min_open_age_days=0',
     'state=open&state=done', 'limit=1.5', 'limit=26', 'min_open_age_days=-1',
-    'sql=select+1', 'caller=not-an-email', 'outcome=won', 'gap=no_work', 'period=this_week',
+    'sql=select+1', 'caller=not-an-email', 'outcome=won', 'gap=no_work', 'period=this_week', 'warehouse_match=true',
   ])('rejects unsupported or misleading query %s', query => expect(() => parse(query)).toThrow());
   it('keeps all retained work when dates are omitted and rejects unknown routes', () => {
     const spec = callAssignmentFilter({}, now);

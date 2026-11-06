@@ -22,7 +22,16 @@ SELECT a.id,a.entity_type,a.entity_id,a.assignee,a.assigned_at,a.state,a.outcome
   a.added_to_db AS staff_marked_added,
   coalesce(length(trim(a.wh_id)) BETWEEN 1 AND 100
     AND lower(trim(a.wh_id)) NOT IN ('na','n/a','none','unknown','tbd','-'),false) AS has_recorded_reference,
-  CASE WHEN trim(a.wh_id) ~ '^[1-9][0-9]{0,99}$' THEN trim(a.wh_id) END AS numeric_warehouse_reference
+  CASE WHEN trim(a.wh_id) ~ '^[1-9][0-9]{0,99}$' THEN trim(a.wh_id) END AS numeric_warehouse_reference,
+  EXISTS(SELECT 1 FROM public.bolna_warehouse_matches w
+    WHERE w.entity_type=a.entity_type AND w.entity_id=a.entity_id) AS warehouse_matched,
+  -- One extra ID reports truncation; multiple phones or warehouses never multiply assignments.
+  ARRAY(SELECT DISTINCT w.warehouse_id FROM public.bolna_warehouse_matches w
+    WHERE w.entity_type=a.entity_type AND w.entity_id=a.entity_id
+    ORDER BY w.warehouse_id LIMIT 26)::text[] AS matched_warehouse_ids,
+  EXISTS(SELECT 1 FROM public.bolna_warehouse_matches w
+    JOIN public.bolna_warehouse_sync_reviews r USING(phone_last10,warehouse_id)
+    WHERE w.entity_type=a.entity_type AND w.entity_id=a.entity_id AND r.resolved_at IS NULL) AS warehouse_match_needs_review
 FROM public.bolna_assignments a;
 
 CREATE OR REPLACE VIEW call_performance.callers WITH (security_barrier=true) AS
@@ -53,7 +62,18 @@ SELECT
   (SELECT count(*)::integer FROM public.bolna_app_users WHERE role='employee' AND callyzer_number IS NOT NULL) AS linked_employee_callers,
   (SELECT count(*)::integer FROM public.callyzer_sync_state) AS callyzer_accounts,
   (SELECT min(last_success_at) FROM public.callyzer_sync_state) AS callyzer_last_success_at,
-  (SELECT bool_or(last_error IS NOT NULL) FROM public.callyzer_sync_state) AS callyzer_has_error;
+  (SELECT bool_or(last_error IS NOT NULL) FROM public.callyzer_sync_state) AS callyzer_has_error,
+  coalesce(ws.enabled,false) AS warehouse_sync_enabled,
+  coalesce(ws.initialized,false) AS warehouse_sync_initialized,
+  ws.interval_seconds AS warehouse_sync_interval_seconds,
+  ws.last_success_at AS warehouse_last_success_at,
+  ws.last_snapshot_at AS warehouse_last_snapshot_at,
+  ws.last_error_code IS NOT NULL AS warehouse_sync_has_error,
+  coalesce((ws.last_summary->>'hasMore')::boolean,false) AS warehouse_sync_has_more,
+  coalesce((ws.last_summary->>'auditReplayLimited')::boolean,false) AS warehouse_audit_replay_limited,
+  (SELECT count(*)::integer FROM public.bolna_warehouse_sync_reviews WHERE resolved_at IS NULL) AS warehouse_pending_reviews
+FROM (VALUES (1)) AS singleton(id)
+LEFT JOIN public.bolna_warehouse_sync_state ws ON ws.id=singleton.id;
 
 REVOKE ALL ON call_performance.assignments,call_performance.callers,
   call_performance.assignment_changes,call_performance.coverage FROM PUBLIC;

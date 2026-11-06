@@ -24,6 +24,11 @@ describe.skipIf(!connection)('call performance on isolated PostgreSQL', () => {
       CREATE TABLE public.bolna_manual_attempts(id bigint);
       CREATE VIEW public.bolna_effective_manual_attempts AS SELECT id FROM public.bolna_manual_attempts;
       CREATE TABLE public.callyzer_sync_state(last_success_at timestamptz,last_error text);
+      CREATE TABLE public.bolna_warehouse_matches(entity_type text,entity_id uuid,phone_last10 text,warehouse_id integer);
+      CREATE TABLE public.bolna_warehouse_sync_reviews(phone_last10 text,warehouse_id integer,resolved_at timestamptz);
+      CREATE TABLE public.bolna_warehouse_sync_state(id integer PRIMARY KEY,enabled boolean,initialized boolean,interval_seconds integer,
+        last_success_at timestamptz,last_snapshot_at timestamptz,last_error_code text,last_summary jsonb);
+      INSERT INTO public.bolna_warehouse_sync_state VALUES (1,true,true,3600,now()-interval '5 minutes',now()-interval '5 minutes',null,'{}');
       INSERT INTO public.bolna_app_users VALUES
         ('alice@example.test','Alice',true,'employee','private-device'),
         ('bob@example.test','Bob',false,'employee',null),
@@ -39,6 +44,15 @@ describe.skipIf(!connection)('call performance on isolated PostgreSQL', () => {
         (7,'record','00000000-0000-4000-8000-000000000007','alice@example.test',now()-interval '7 days','open',null,null,true,'N/A','private notes'),
         (8,'record','00000000-0000-4000-8000-000000000008','bob@example.test',now()-interval '30 days','open','Unclear',null,false,null,'private notes'),
         (9007199254740993,'call','00000000-0000-4000-8000-000000000009','alice@example.test',now()-interval '8 days','done','Available',now(),false,null,'private notes');
+      INSERT INTO public.bolna_warehouse_matches VALUES
+        ('record','00000000-0000-4000-8000-000000000002','private-phone-a',100),
+        ('record','00000000-0000-4000-8000-000000000002','private-phone-b',100),
+        ('record','00000000-0000-4000-8000-000000000002','private-phone-a',101),
+        ('call','00000000-0000-4000-8000-000000000004','private-phone-a',100),
+        ('call','00000000-0000-4000-8000-000000000009','private-phone-c',777),
+        ('call','00000000-0000-4000-8000-000000000008','private-phone-c',777);
+      INSERT INTO public.bolna_warehouse_matches SELECT 'record','00000000-0000-4000-8000-000000000005'::uuid,'private-phone-d',n FROM generate_series(200,229) n;
+      INSERT INTO public.bolna_warehouse_sync_reviews VALUES ('private-phone-a',100,null);
       INSERT INTO public.bolna_assignment_changes VALUES
         (1,2,'2026-10-11 12:00:00Z','alice@example.test','{}','{"state":"open","notes":"private audit notes"}'),
         (2,2,'2026-10-12 12:00:00Z','alice@example.test','{"state":"open","wh_id":"private-reference-text"}','{"state":"done","outcome":"Available","added_to_db":true,"wh_id":"100","phone":"private customer phone"}'),
@@ -55,7 +69,8 @@ describe.skipIf(!connection)('call performance on isolated PostgreSQL', () => {
       await owner.query(`DROP SCHEMA IF EXISTS call_performance CASCADE;
         DROP VIEW IF EXISTS public.bolna_effective_manual_attempts;
         DROP TABLE IF EXISTS public.bolna_assignment_changes,public.bolna_assignments,public.bolna_app_users,
-          public.bolna_manual_attempts,public.callyzer_sync_state CASCADE;
+          public.bolna_manual_attempts,public.callyzer_sync_state,public.bolna_warehouse_matches,
+          public.bolna_warehouse_sync_reviews,public.bolna_warehouse_sync_state CASCADE;
         DROP ROLE IF EXISTS call_performance_reader;`);
       await owner.end();
     }
@@ -63,13 +78,15 @@ describe.skipIf(!connection)('call performance on isolated PostgreSQL', () => {
   it('counts assignment episodes once despite multiple history events and deduplicates overall references', async () => {
     const result = callSummaryOutput.parse(await run('calls/summary'));
     expect(result.totals).toMatchObject({ assignments: 8, open: 4, done: 3, dropped: 1, available: 4,
-      unavailable: 1, unclear: 1, missing_outcome: 2, staff_marked_added: 4, distinct_numeric_references: 1 });
+      unavailable: 1, unclear: 1, missing_outcome: 2, staff_marked_added: 4, distinct_numeric_references: 1,
+      warehouse_matched: 4, without_warehouse_match: 4, warehouse_match_needs_review: 2 });
     expect(result.callers.reduce((n, c) => n + c.metrics.assignments, 0)).toBe(8);
     expect(result.callers.reduce((n, c) => n + c.metrics.distinct_numeric_references, 0)).toBe(2);
     expect(result.callers.find(c => c.caller.email === 'bob@example.test')?.caller.active).toBe(false);
     expect(result.coverage).toMatchObject({ manual_attempts: 0, assignments_without_audit: 7,
       employee_callers: 3, linked_employee_callers: 1, callyzer_status: 'stale' });
     expect(result.coverage.warnings.join(' ')).toContain('cannot be interpreted as zero');
+    expect(result.coverage.warehouse_sync).toMatchObject({ status: 'recent_import', pending_reviews: 1 });
   });
   it('uses assignment dates with exact IST boundaries and current outcomes', async () => {
     const query = 'date_from=2026-10-02&date_to=2026-10-02';
@@ -80,10 +97,45 @@ describe.skipIf(!connection)('call performance on isolated PostgreSQL', () => {
     expect(search.query_context.state_basis).toBe('current');
   });
   it.each(['gap=missing_outcome', 'gap=added_without_reference', 'gap=done_available_without_numeric_reference',
-    'gap=without_audit', 'caller=bob%40example.test&state=open', 'entity_type=call', 'min_open_age_days=7'])('keeps summary and search filters aligned: %s', async query => {
+    'gap=without_audit', 'caller=bob%40example.test&state=open', 'entity_type=call', 'min_open_age_days=7',
+    'outcome=Available&warehouse_match=no', 'warehouse_match=yes'])('keeps summary and search filters aligned: %s', async query => {
     const summary = callSummaryOutput.parse(await run('calls/summary', query));
     const search = callSearchOutput.parse(await run('calls/assignments', query));
     expect(summary.totals.assignments).toBe(search.items.length);
+  });
+  it('uses DB contact matches for Available backlog independently of manual Added flags', async () => {
+    const available = callSummaryOutput.parse(await run('calls/summary', 'outcome=Available'));
+    expect(available.totals).toMatchObject({ assignments: 4, staff_marked_added: 2, warehouse_matched: 3, without_warehouse_match: 1 });
+    const missing = callSearchOutput.parse(await run('calls/assignments', 'outcome=Available&warehouse_match=no'));
+    expect(missing.items.map(row => row.id)).toEqual(['3']);
+    expect(missing.items[0]).toMatchObject({ staff_marked_added: true, warehouse_matched: false, matched_warehouse_ids: [] });
+    const matched = callDetailOutput.parse(await run('calls/assignments/9007199254740993'));
+    expect(matched.assignment).toMatchObject({ staff_marked_added: false, warehouse_matched: true, matched_warehouse_ids: ['777'] });
+    const otherType = callDetailOutput.parse(await run('calls/assignments/8'));
+    expect(otherType.assignment.warehouse_matched).toBe(false);
+  });
+  it('deduplicates and bounds matched IDs, keeps pending-review matches and never exposes phones', async () => {
+    const detail = callDetailOutput.parse(await run('calls/assignments/2'));
+    expect(detail.assignment).toMatchObject({ matched_warehouse_ids: ['100', '101'], warehouse_match_needs_review: true, warehouse_matches_truncated: false });
+    const many = callDetailOutput.parse(await run('calls/assignments/5'));
+    expect(many.assignment.matched_warehouse_ids).toEqual(Array.from({ length: 25 }, (_, i) => String(200 + i)));
+    expect(many.assignment.warehouse_matches_truncated).toBe(true);
+    expect(JSON.stringify([detail, many])).not.toContain('private');
+  });
+  it.each([
+    ["initialized=false", 'unavailable'], ["enabled=false", 'stale'],
+    ["last_success_at=now()-interval '3 hours'", 'stale'], ["last_error_code='SOURCE_FAILED'", 'stale'],
+    ["last_summary='{\"hasMore\":true}'", 'catching_up'], ["last_summary='{\"auditReplayLimited\":true}'", 'catching_up'],
+  ])('reports independent warehouse-sync coverage for %s', async (update, status) => {
+    try {
+      await owner.query(`UPDATE public.bolna_warehouse_sync_state SET ${update}`);
+      const result = callCapabilitiesOutput.parse(await run('calls/capabilities'));
+      expect(result.coverage.warehouse_sync.status).toBe(status);
+      expect(result.coverage.callyzer_status).toBe('stale');
+      expect(result.coverage.warnings.join(' ')).toContain('no match does not prove absence');
+    } finally {
+      await owner.query("UPDATE public.bolna_warehouse_sync_state SET initialized=true,enabled=true,last_success_at=now()-interval '5 minutes',last_error_code=null,last_summary='{}'");
+    }
   });
   it('partitions open ages with no overlap at seven and thirty days', async () => {
     const all = callSummaryOutput.parse(await run('calls/summary'));
@@ -136,6 +188,7 @@ describe.skipIf(!connection)('call performance on isolated PostgreSQL', () => {
   });
   it('enforces projected source access and read-only transactions in PostgreSQL', async () => {
     await expect(reader.query('SELECT remarks FROM public.bolna_assignments')).rejects.toMatchObject({ code: '42501' });
+    await expect(reader.query('SELECT phone_last10 FROM public.bolna_warehouse_matches')).rejects.toMatchObject({ code: '42501' });
     await expect(reader.query('SELECT wh_id FROM call_performance.assignments')).rejects.toMatchObject({ code: '42703' });
     await expect(reader.query("UPDATE call_performance.assignments SET state='done' WHERE id=1")).rejects.toBeDefined();
     const result = await withCallRead(async client => (await client.query("SHOW transaction_read_only")).rows[0], reader);

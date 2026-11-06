@@ -6,7 +6,7 @@ export const CALL_PERFORMANCE_SCOPE = 'calls.performance:read' as const;
 export const CALL_STATES = ['open', 'done', 'dropped'] as const;
 export const CALL_OUTCOMES = ['Available', 'Unavailable', 'Unclear'] as const;
 export const CALL_GAPS = ['missing_outcome', 'added_without_reference', 'done_available_without_numeric_reference', 'without_audit'] as const;
-export const CALL_PERFORMANCE_GUIDANCE = 'Read-only assignment reports for Analysts. Use summary for totals; search only for requested records/examples and stop once enough are returned. Capabilities establish that period completions, time to first call, follow-up compliance and actual-call rankings are unsupported; explain that limit without scanning assignments. Omit entity_type unless listing assignments or AI reviews are requested; call means AI reviews, and both types carry references. Dates select assigned_at in IST; states are current. Keep each subquestion\'s date scope separate; if reference timing is ambiguous, clarify or give a labeled current all-date total. Done, Added and references are staff-recorded, not verified calls or onboarding. Caller reference counts overlap; use the overall total. Missing/stale logs never prove inactivity. Read a supplied assignment ID directly for retained history; convert timestamps to IST or label UTC. Missing history cannot establish creation state or first contact.';
+export const CALL_PERFORMANCE_GUIDANCE = "Read-only assignment reports for Analysts. Use summary for totals and search only for requested examples; stop when enough are returned. For Available markings not in the warehouse DB, use outcome=Available and warehouse_match=no. Warehouse DB contact matches are independent of staff_marked_added and saved references; never subtract staff markings to infer DB matches. Inspect warehouse_sync freshness and pending reviews separately from Callyzer. Counts are assignments; phone matches do not establish unique properties or first onboarding credit. Omit entity_type unless a subset is requested; call means AI reviews. Dates select assigned_at in IST, with current states; keep each subquestion's date scope separate. Actual-call rankings, period completions, first-call time and follow-up compliance are unsupported. Missing/stale logs never prove inactivity. Read supplied assignment IDs directly; convert history times to IST or label UTC. Missing history cannot establish creation state or first contact.";
 
 const date = z.string().regex(/^[1-9]\d{3}-\d{2}-\d{2}$/);
 const id = z.string().regex(/^[1-9]\d{0,18}$/).describe('Exact assignment ID string supplied by the user or returned by search.');
@@ -17,6 +17,7 @@ export const callSummaryInput = z.object({
   entity_type: z.enum(['record', 'call']).describe('Omit for all call-dashboard assignments and team warehouse-reference totals. Filter only if the user explicitly chooses record (listing assignments) or call (AI execution reviews). Both types can record warehouse references; call does not mean calls made.').optional(),
   state: z.enum(CALL_STATES).describe('Current assignment state.').optional(),
   outcome: z.enum(CALL_OUTCOMES).describe('Current staff-recorded outcome.').optional(),
+  warehouse_match: z.enum(['yes', 'no']).describe('Contact match against the imported warehouse DB index, independent of the manual Added flag. Use no with outcome=Available for Available markings with no DB match. Inspect warehouse_sync coverage and review flags.').optional(),
   date_from: date.describe('Inclusive first assignment date, IST. Pair with date_to. Omit both for all retained assignments.').optional(),
   date_to: date.describe('Inclusive last assignment date, IST. Maximum 366 days; no future dates.').optional(),
   min_open_age_days: z.number().int().min(0).max(36500).describe('Open for at least this many elapsed 24-hour days since assignment. Only current open work.').optional(),
@@ -82,6 +83,9 @@ const coverage = z.object({
   scope: z.literal('whole_source'), manual_attempts: count, first_audit_at: timestamp.nullable(),
   assignments_without_audit: count, employee_callers: count, linked_employee_callers: count,
   callyzer_last_success_at: timestamp.nullable(), callyzer_status: z.enum(['unavailable', 'stale', 'recent_import']),
+  warehouse_sync: z.object({ status: z.enum(['unavailable', 'stale', 'catching_up', 'recent_import']), enabled: z.boolean(), initialized: z.boolean(),
+    interval_seconds: count.nullable(), last_success_at: timestamp.nullable(), last_snapshot_at: timestamp.nullable(),
+    has_more: z.boolean(), audit_replay_limited: z.boolean(), pending_reviews: count }),
   warnings: z.array(z.string()),
 });
 const base = {
@@ -96,11 +100,12 @@ export const callMetricsOutput = z.object({
   assignments: count, open: count, done: count, dropped: count,
   available: count, unavailable: count, unclear: count, missing_outcome: count,
   staff_marked_added: count, distinct_numeric_references: count,
+  warehouse_matched: count, without_warehouse_match: count, warehouse_match_needs_review: count,
   open_under_7_days: count, open_7_to_30_days: count, open_30_days_plus: count,
 });
 export const callCapabilitiesOutput = z.object({ ...base,
   callers: z.array(caller).max(100), callers_truncated: z.boolean(),
-  filters: z.object({ states: z.array(z.string()), outcomes: z.array(z.string()), entity_types: z.array(z.string()), gaps: z.array(z.string()) }),
+  filters: z.object({ states: z.array(z.string()), outcomes: z.array(z.string()), entity_types: z.array(z.string()), gaps: z.array(z.string()), warehouse_match: z.array(z.enum(['yes', 'no'])) }),
   metrics: z.array(z.object({ name: z.string(), definition: z.string() })), max_page_size: z.literal(25), max_date_range_days: z.literal(366),
 });
 export const callSummaryOutput = z.object({ ...base, query_context: context, totals: callMetricsOutput,
@@ -112,6 +117,8 @@ const assignment = z.object({
   assigned_at: timestamp, state: z.enum(CALL_STATES), outcome: z.enum(CALL_OUTCOMES).nullable(),
   completed_at: timestamp.nullable(), staff_marked_added: z.boolean(),
   has_recorded_reference: z.boolean(), numeric_warehouse_reference: z.string().nullable(),
+  warehouse_matched: z.boolean(), matched_warehouse_ids: z.array(z.string()).max(25),
+  warehouse_matches_truncated: z.boolean(), warehouse_match_needs_review: z.boolean(),
   open_age_days: count.nullable(), audit_events: count, source_path: z.string(),
 });
 const pagination = { nextCursor: z.string().nullable(), pagination: z.object({ limit: count, has_more: z.boolean(), snapshot: z.literal(false) }) };
