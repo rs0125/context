@@ -22,6 +22,10 @@ export const CRM_LANGUAGES = [
   'GUJARATI', 'MARATHI', 'MALAYALAM', 'KONKANI',
 ] as const;
 export const CRM_ENUM_ARRAY_LIMIT = 32;
+// Match the website's click-ID alphabet and bound, with a strict end-of-string
+// assertion so a trailing newline cannot become part of an opaque identifier.
+export const CRM_GCLID_PATTERN = /^[A-Za-z0-9_-]{1,512}(?![\s\S])/;
+export const CRM_GCLID_DESCRIPTION = 'Recorded Google click ID from Twenty gclidGoogleAds on the same mirrored lead. Preserved exactly; null when missing or unsupported (see field_evidence.gclid). Presence does not verify campaign attribution or a conversion.';
 
 export type CrmLeadSource = typeof CRM_LEAD_SOURCES[number];
 export type CrmLeaseDuration = typeof CRM_LEASE_DURATIONS[number];
@@ -53,6 +57,7 @@ export type CrmRecordedValue = {
 
 export type RichCrmFields = {
   lead_source: CrmLeadSource | null;
+  gclid: string | null;
   lease_duration: CrmLeaseDuration | null;
   industry_verticals: CrmIndustry[] | null;
   occupancy_timelines: CrmOccupancyTimeline[] | null;
@@ -239,6 +244,7 @@ function recordedValue(microsValue: unknown, currencyValue: unknown): CrmRecorde
 export function richCrmFields(row: Record<string, unknown>): RichCrmFields {
   const fields = {
     lead_source: enumValue(row.lead_source, CRM_LEAD_SOURCES),
+    gclid: typeof row.gclid === 'string' && CRM_GCLID_PATTERN.test(row.gclid) ? row.gclid : null,
     lease_duration: enumValue(row.lease_duration, CRM_LEASE_DURATIONS),
     industry_verticals: enumArray(row.industry_verticals, CRM_INDUSTRIES),
     occupancy_timelines: enumArray(row.occupancy_timelines, CRM_OCCUPANCY_TIMELINES),
@@ -248,7 +254,7 @@ export function richCrmFields(row: Record<string, unknown>): RichCrmFields {
     recorded_value: recordedValue(row.amount_micros, row.amount_currency),
   };
   return { ...fields, field_evidence: {
-    ...Object.fromEntries(['lead_source', 'lease_duration', 'industry_verticals', 'occupancy_timelines', 'preferred_languages', 'repeat_client'].map(field =>
+    ...Object.fromEntries(['lead_source', 'gclid', 'lease_duration', 'industry_verticals', 'occupancy_timelines', 'preferred_languages', 'repeat_client'].map(field =>
       [field, evidence(row[field], fields[field as keyof typeof fields] !== null)])),
     budget: evidence(row.budget, fields.budget !== null && fields.budget.kind !== 'unknown', true),
     recorded_value: evidence(row.amount_micros, fields.recorded_value !== null),

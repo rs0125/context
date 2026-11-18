@@ -343,14 +343,14 @@ describe.skipIf(process.env.CONTEXT_LIVE_CRM_QUERY_TEST !== '1')('synthetic CRM 
 
   const structuredRows = [
     record(101, '2026-09-20T00:00:00Z', { last_note_at: '2026-09-20T01:00:00Z', last_task_at: '2026-09-20T02:00:00Z', data: {
-      requirementInSft: '40,000', microMarket: 'North', leadSource: 'OUTREACH', duration: 'LONG_TERM',
+      requirementInSft: '40,000', microMarket: 'North', leadSource: 'OUTREACH', gclidGoogleAds: 'Cj0KCQ_test-12345678901234567890', duration: 'LONG_TERM',
       industryVertical: ['FMCG', 'MANUFACTURING'], repeatClient: ['OPTION1'], occupancyTimeline: ['WITHIN_30_DAYS'], preferredLanguage: ['ENGLISH'],
       budget: 'INR 20-25 per sqft per month', amount: { amountMicros: '123456789', currencyCode: 'INR' }, followupcount: '2',
       pocPhone: '9876543210', notes: 'private@example.test',
     } }),
     record(102, '2026-09-20T00:00:00Z', { data: { microMarket: 'North, South', leadSource: 'BROKER', duration: 'SHORT_TERM', industryVertical: ['FMCG'], repeatClient: ['NO'] } }),
     record(103, '2026-09-20T00:00:00Z', { data: { microMarket: 'North, 9876543210', leadSource: 'private@example.test', duration: 'whatsapp', industryVertical: ['FMCG', 'private@example.test'], repeatClient: ['OPTION1', 'NO'] } }),
-    record(104, '2026-09-20T00:00:00Z', { data: { industryVertical: 'FMCG', repeatClient: 'NO' } }),
+    record(104, '2026-09-20T00:00:00Z', { data: { gclidGoogleAds: 12345, industryVertical: 'FMCG', repeatClient: 'NO' } }),
     record(105, '2026-09-20T00:00:00Z', { data: { industryVertical: [], repeatClient: [] } }),
     record(106, '2026-09-20T00:00:00Z', { data: { industryVertical: ['FMCG', 12], repeatClient: ['NO', null] } }),
     record(107, '2026-09-20T00:00:00Z', { data: { industryVertical: Array(CRM_ENUM_ARRAY_LIMIT + 1).fill('FMCG'), repeatClient: Array(CRM_ENUM_ARRAY_LIMIT + 1).fill('NO') } }),
@@ -370,7 +370,8 @@ describe.skipIf(process.env.CONTEXT_LIVE_CRM_QUERY_TEST !== '1')('synthetic CRM 
     expect(search.items[0]).not.toHaveProperty('description');
     const briefing = await getMyBriefing(fixture, principal, structuredScope);
     expect(briefing.priorities.find(item => item.id === id(101))).toMatchObject(search.items[0]);
-    expect(direct).toMatchObject({ id: id(101), stage: 'NEW_LEAD', requirement_sqft: 40000, lead_source: 'OUTREACH', lease_duration: 'LONG_TERM',
+    expect(direct).toMatchObject({ id: id(101), stage: 'NEW_LEAD', requirement_sqft: 40000, lead_source: 'OUTREACH', gclid: 'Cj0KCQ_test-12345678901234567890', lease_duration: 'LONG_TERM',
+      field_evidence: { gclid: { state: 'parsed', source: null } },
       industry_verticals: ['FMCG', 'MANUFACTURING'], repeat_client: true, occupancy_timelines: ['WITHIN_30_DAYS'], preferred_languages: ['ENGLISH'],
       recorded_follow_up_count: 2, source_updated_at: '2026-09-20T00:00:00.000Z',
       last_note_at: '2026-09-20T01:00:00.000Z', last_task_at: '2026-09-20T02:00:00.000Z',
@@ -378,6 +379,12 @@ describe.skipIf(process.env.CONTEXT_LIVE_CRM_QUERY_TEST !== '1')('synthetic CRM 
       recorded_value: { amount_micros: '123456789', amount: '123.456789', currency_code: 'INR', verification_required: true },
     });
     expect(JSON.stringify(search)).not.toMatch(/9876543210|private@example|pocPhone|notes/);
+    expect(await getOpportunity(fixture, principal, id(102), structuredScope)).toMatchObject({
+      gclid: null, field_evidence: { gclid: { state: 'missing', source: null } },
+    });
+    expect(await getOpportunity(fixture, principal, id(104), structuredScope)).toMatchObject({
+      gclid: null, field_evidence: { gclid: { state: 'unsupported' } },
+    });
     expect(await getOpportunity(fixture, principal, id(110), structuredScope)).toBeNull();
     expect(await getOpportunity(fixture, principal, id(111), all)).toBeNull();
   }, 20000);

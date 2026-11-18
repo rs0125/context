@@ -12,10 +12,10 @@ const UNKNOWN_BUDGET = {
 describe('recorded CRM classifications', () => {
   it('leaves missing fields unknown instead of inventing defaults', () => {
     expect(richCrmFields({})).toEqual({
-      lead_source: null, lease_duration: null, industry_verticals: null,
+      lead_source: null, gclid: null, lease_duration: null, industry_verticals: null,
       occupancy_timelines: null, preferred_languages: null, repeat_client: null,
       budget: null, recorded_value: null,
-      field_evidence: Object.fromEntries(['lead_source', 'lease_duration', 'industry_verticals', 'occupancy_timelines', 'preferred_languages', 'repeat_client', 'budget', 'recorded_value', 'recorded_currency'].map(field => [field, { state: 'missing', source: null }])),
+      field_evidence: Object.fromEntries(['lead_source', 'gclid', 'lease_duration', 'industry_verticals', 'occupancy_timelines', 'preferred_languages', 'repeat_client', 'budget', 'recorded_value', 'recorded_currency'].map(field => [field, { state: 'missing', source: null }])),
     });
   });
 
@@ -89,6 +89,28 @@ describe('recorded CRM classifications', () => {
     expect(result.field_evidence.repeat_client).toMatchObject({ state: 'unsupported', source: { text: 'OPTION1, NO' } });
     expect(result.field_evidence.preferred_languages).toEqual({ state: 'missing', source: null });
     expect(JSON.stringify(result)).not.toContain('9876543210');
+  });
+});
+
+describe('recorded Google click IDs', () => {
+  it.each(['Cj0KCQ_test-9876543210_aZ', '001234567890', 'A', 'a'.repeat(512)])('preserves an opaque ID exactly: %s', gclid => {
+    const result = richCrmFields({ gclid });
+    expect(result.gclid).toBe(gclid);
+    expect(result.field_evidence.gclid).toEqual({ state: 'parsed', source: null });
+  });
+
+  it.each([undefined, null, '', '   '])('reports a missing click ID without inferring it from lead source: %j', gclid => {
+    const result = richCrmFields({ gclid, lead_source: 'WEBSITE_GOOGLE_ADS' });
+    expect(result.gclid).toBeNull();
+    expect(result.field_evidence.gclid).toEqual({ state: 'missing', source: null });
+  });
+
+  it.each([1234567890, false, { value: 'test-click' }, ['test-click'], 'a'.repeat(513),
+    'test click', ' test-click', 'test-click ', 'test-click\n', 'test-click\r\n',
+    'test\u200bclick', 'https://example.test/?gclid=test', 'test@example.test', 'ｔｅｓｔ'])('withholds malformed IDs without coercing, trimming or truncating: %j', gclid => {
+    const result = richCrmFields({ gclid });
+    expect(result.gclid).toBeNull();
+    expect(result.field_evidence.gclid.state).toBe('unsupported');
   });
 });
 

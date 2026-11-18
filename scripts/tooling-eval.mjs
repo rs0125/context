@@ -63,6 +63,7 @@ export const LEADS = Object.freeze([
   last_note_at: null, last_task_at: null, recorded_follow_up_count: index === 4 ? null : index,
   requirement_sqft: [20000, 50000, 10000, 80000, null][index], micro_market: ['North, East', 'South', 'North', 'North', null][index],
   lead_source: ['WEBSITE_SEO', 'WEBSITE_SEO', 'BROKER', 'EXISTING_CLIENT', null][index],
+  gclid: index === 0 ? 'synthetic-gclid_Az-01234' : null,
   lease_duration: ['LONG_TERM', 'LONG_TERM', 'SHORT_TERM', 'LONG_TERM', null][index],
   industry_verticals: [['OPT3PL_LOGISTICS', 'FMCG'], ['FMCG'], ['D2C_E_COMMERCE'], ['MANUFACTURING'], null][index],
   occupancy_timelines: index === 0 ? ['WITHIN_30_DAYS'] : null, preferred_languages: index === 4 ? null : ['ENGLISH'],
@@ -72,7 +73,7 @@ export const LEADS = Object.freeze([
 };
   record.ownership.assigned_to = { state: 'present', values: [['ALEX', 'SAM'], ['SAM'], ['ALEX', 'TAYLOR'], ['ALEX'], ['ALEX']][index], redacted: false };
   record.ownership.secondary_assignee = maskedText(['SAM', null, 'JORDAN', 'SAM', null][index]);
-  record.field_evidence = Object.fromEntries(['lead_source', 'lease_duration', 'industry_verticals', 'occupancy_timelines', 'preferred_languages', 'repeat_client', 'budget', 'recorded_value'].map(field => [field, { state: record[field] === null ? 'missing' : 'parsed', source: null }]));
+  record.field_evidence = Object.fromEntries(['lead_source', 'gclid', 'lease_duration', 'industry_verticals', 'occupancy_timelines', 'preferred_languages', 'repeat_client', 'budget', 'recorded_value'].map(field => [field, { state: record[field] === null ? 'missing' : 'parsed', source: null }]));
   record.field_evidence.requirement_sqft = { state: record.requirement_sqft === null ? 'missing' : 'parsed', source: null, kind: record.requirement_sqft === null ? 'unknown' : 'exact', value: record.requirement_sqft, min: null, max: null, verification_required: true };
   record.verification_required = record.field_evidence.requirement_sqft.state !== 'missing' || record.budget !== null || record.recorded_value !== null || Object.values(record.field_evidence).some(field => field.state === 'unsupported');
   return record;

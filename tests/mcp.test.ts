@@ -37,10 +37,10 @@ const ownership = {
 const richLead = {
   close_date: null, ownership, verification_required: true,
   id: '77777777-7777-4777-8777-777777777777', name: 'Synthetic Logistics', stage: 'NEW_LEAD', stage_entered_at: now.toISOString(), source_created_at: now.toISOString(),
-  lead_source: 'WEBSITE_SEO', lease_duration: 'LONG_TERM', industry_verticals: ['FMCG'], occupancy_timelines: null, preferred_languages: ['ENGLISH'], repeat_client: false,
+  lead_source: 'WEBSITE_SEO', gclid: 'Cj0KCQ_test-9876543210_aZ', lease_duration: 'LONG_TERM', industry_verticals: ['FMCG'], occupancy_timelines: null, preferred_languages: ['ENGLISH'], repeat_client: false,
   budget: { kind: 'exact', value: 25, min: null, max: null, currency: null, period: null, area_basis: null, verification_required: true },
   recorded_value: { amount_micros: '0', amount: '0', currency_code: null, verification_required: true },
-  last_note_at: null, last_task_at: now.toISOString(), recorded_follow_up_count: 0, field_evidence: { budget: { state: 'parsed', source: null } },
+  last_note_at: null, last_task_at: now.toISOString(), recorded_follow_up_count: 0, field_evidence: { budget: { state: 'parsed', source: null }, gclid: { state: 'parsed', source: null } },
 };
 function key(scopes: KeyRegistration['scopes'] = ['knowledge:read', 'warehouses:read', 'crm:read']): KeyRegistration {
   return { employeeId: employee.id, id: randomUUID(), hash: 'a'.repeat(64), employeeEmail: employee.email, scopes, expiresAt: '2099-01-01T00:00:00Z' };
@@ -143,6 +143,8 @@ describe('MCP read-only protocol', () => {
     const briefing = result.tools.find((tool: { name: string }) => tool.name === 'crm_briefing');
     for (const lead of [crm.outputSchema.properties.data.properties.items.items, leadDetail.outputSchema.properties.data,
       briefing.outputSchema.properties.data.properties.priorities.items]) {
+      expect(lead.required).toContain('gclid');
+      expect(lead.properties.gclid.description).toContain('gclidGoogleAds');
       expect(lead.properties.ownership.required).toContain('secondary_assignee');
       expect(lead.properties.ownership.properties.secondary_assignee.required)
         .toEqual(expect.arrayContaining(['state', 'text', 'redacted', 'truncated']));
@@ -441,6 +443,8 @@ describe('MCP read-only protocol', () => {
     expect(document.components.schemas.Warehouse.properties.uploaded_by).toMatchObject({ type: ['string', 'null'], maxLength: 80 });
     expect(crm.map(parameter => parameter.name)).toEqual(expect.arrayContaining(['q', 'date_field', 'period', 'date_from', 'date_to', 'sort', 'follow_up_status', 'requirement_sqft_min', 'requirement_sqft_max', 'micro_market', 'lead_source', 'lease_duration', 'industry', 'repeat_client']));
     expect(document.components.schemas.Opportunity.properties).toHaveProperty('source_created_at');
+    expect(document.components.schemas.Opportunity.required).toContain('gclid');
+    expect(document.components.schemas.Opportunity.properties.gclid).toMatchObject({ type: ['string', 'null'], maxLength: 512 });
     expect(Object.keys(document.components.schemas.Opportunity.properties)).toEqual(expect.arrayContaining(['budget', 'recorded_value', 'lead_source', 'lease_duration', 'industry_verticals', 'occupancy_timelines', 'preferred_languages', 'repeat_client', 'last_note_at', 'last_task_at', 'recorded_follow_up_count']));
     expect(document.components.schemas.CrmBudget.properties.currency.enum).toContain(null);
     expect(document.components.schemas.CrmBudget.properties.verification_required.const).toBe(true);

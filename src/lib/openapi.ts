@@ -5,7 +5,7 @@ import { WAREHOUSE_RECORDED_FIELD_NAMES } from './warehouse-recorded-context';
 import { WAREHOUSE_FILTER_CATALOG, WAREHOUSE_NUMERIC_FIELDS, WAREHOUSE_SUMMARY_CATALOG } from "./warehouse-fields";
 import { ALL_STAGES, CRM_DATE_FIELDS, CRM_SORTS, CRM_FOLLOW_UP, CRM_SUMMARY_GROUPS } from "./data";
 import { DATE_PERIODS } from "./query-time";
-import { CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS, CRM_INDUSTRIES, CRM_OCCUPANCY_TIMELINES, CRM_LANGUAGES } from "./crm-fields";
+import { CRM_GCLID_DESCRIPTION, CRM_GCLID_PATTERN, CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS, CRM_INDUSTRIES, CRM_OCCUPANCY_TIMELINES, CRM_LANGUAGES } from "./crm-fields";
 import { z } from "zod";
 import { SCOPES } from "./auth";
 import { ga4ToolInput, searchConsoleToolInput, analyticsQueryParameters, analyticsReportOutput, analyticsCapabilitiesOutput, analyticsCapabilitiesInput } from "./analytics-tooling";
@@ -273,7 +273,7 @@ const warehouseSchema = {
 const opportunitySchema = {
   type: "object",
   additionalProperties: false,
-  required: ["id", "name", "stage", "stage_entered_at", "source_created_at", "lead_source", "lease_duration", "industry_verticals", "occupancy_timelines", "preferred_languages", "repeat_client", "budget", "recorded_value", "last_note_at", "last_task_at", "recorded_follow_up_count", "field_evidence", "close_date", "ownership", "verification_required"],
+  required: ["id", "name", "stage", "stage_entered_at", "source_created_at", "lead_source", "gclid", "lease_duration", "industry_verticals", "occupancy_timelines", "preferred_languages", "repeat_client", "budget", "recorded_value", "last_note_at", "last_task_at", "recorded_follow_up_count", "field_evidence", "close_date", "ownership", "verification_required"],
   description: "Allowlisted CRM mirror facts authorized by current Twenty role and creator/assignment relationships. Structured details and lead fields are projected from the same mirrored opportunity row, without per-lead upstream enrichment. Recorded categories may include automation defaults, not confirmed customer statements. Facts retain their mirror timestamps. Null values are unknown, unsupported, conflicting or withheld.",
   properties: {
     id: { type: "string", format: "uuid" },
@@ -285,6 +285,7 @@ const opportunitySchema = {
     requirement_sqft: { ...nullableNumber, description: "Exact parsed requirement area only. Ranges and approximations retain null here; inspect field_evidence.requirement_sqft for the recorded interpretation." },
     micro_market: nullableLabel,
     lead_source: { type: ["string", "null"], enum: [...CRM_LEAD_SOURCES, null], description: "Recorded source category; may be an automation default, not verified attribution." },
+    gclid: { type: ["string", "null"], maxLength: 512, pattern: CRM_GCLID_PATTERN.source, description: CRM_GCLID_DESCRIPTION },
     lease_duration: { type: ["string", "null"], enum: [...CRM_LEASE_DURATIONS, null], description: "Recorded duration category; may be an automation default, not agreed lease terms." },
     industry_verticals: { type: ["array", "null"], items: { type: "string", enum: CRM_INDUSTRIES }, description: "Allowlisted recorded industry categories; no inferred industry." },
     occupancy_timelines: { type: ["array", "null"], items: { type: "string", enum: CRM_OCCUPANCY_TIMELINES }, description: "Recorded occupancy categories, not availability or possession commitments." },

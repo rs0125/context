@@ -16,7 +16,7 @@ import { rateLimit } from './rate-limit';
 import { WAREHOUSE_FILTER_CATALOG, WAREHOUSE_SUMMARY_CATALOG, type WarehouseFilterDefinition } from './warehouse-fields';
 import { ALL_STAGES, CRM_DATE_FIELDS, CRM_SORTS, CRM_FOLLOW_UP, CRM_SUMMARY_GROUPS } from './data';
 import { DATE_PERIODS } from './query-time';
-import { CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS, CRM_INDUSTRIES, CRM_OCCUPANCY_TIMELINES, CRM_LANGUAGES } from './crm-fields';
+import { CRM_GCLID_DESCRIPTION, CRM_GCLID_PATTERN, CRM_LEAD_SOURCES, CRM_LEASE_DURATIONS, CRM_INDUSTRIES, CRM_OCCUPANCY_TIMELINES, CRM_LANGUAGES } from './crm-fields';
 import { compactWarehouseResults, compactWarehouseFilters } from './mcp-results';
 import { WAREHOUSE_RECORDED_FIELD_NAMES } from './warehouse-recorded-context';
 import { ga4ToolInput, searchConsoleToolInput, analyticsReportOutput, analyticsCapabilitiesOutput, analyticsCapabilitiesInput } from './analytics-tooling';
@@ -152,6 +152,7 @@ const opportunity = z.object({
   id: z.string().uuid(), name: z.string().nullable(), stage: z.string().nullable(), source_created_at: z.string().nullable(),
   stage_entered_at: z.string().nullable().describe('Current stage start time. Use it to calculate current-stage TAT; use stage_history.changed_at for previous stage changes.'),
   lead_source: z.enum(CRM_LEAD_SOURCES).nullable(), lease_duration: z.enum(CRM_LEASE_DURATIONS).nullable(),
+  gclid: z.string().max(512).regex(CRM_GCLID_PATTERN).nullable().describe(CRM_GCLID_DESCRIPTION),
   industry_verticals: z.array(z.enum(CRM_INDUSTRIES)).nullable(), occupancy_timelines: z.array(z.enum(CRM_OCCUPANCY_TIMELINES)).nullable(),
   preferred_languages: z.array(z.enum(CRM_LANGUAGES)).nullable(), repeat_client: z.boolean().nullable(), budget, recorded_value: recordedValue,
   field_evidence: z.record(z.string(), crmFieldEvidence),
