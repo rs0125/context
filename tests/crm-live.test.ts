@@ -10,7 +10,7 @@ const principal: Principal = {
 };
 const env = { TWENTY_CRM_BASE_URL: 'https://crm.example.test', TWENTY_CRM_API_KEY: 'test-only-api-key' };
 const member = () => ({ id: MEMBER_ID, userEmail: 'Alex@example.test', name: { firstName: 'Alex', lastName: 'Example' }, deletedAt: null });
-const opportunity = (index: number) => ({ id: opportunityId(index), assignedTo: ['ALEX'], deletedAt: null });
+const opportunity = (index: number) => ({ id: opportunityId(index), primaryAssigneeUserId: MEMBER_ID, secondaryAssigneeUserId: null, deletedAt: null });
 function response(object: string, rows: unknown[], hasNextPage = false, endCursor: string | null = null) {
   return Response.json({ data: { [object]: rows }, pageInfo: { hasNextPage, endCursor } });
 }
@@ -24,6 +24,18 @@ function responses(...pages: Response[]) {
 afterEach(() => vi.useRealTimers());
 
 describe('live CRM authorization', () => {
+  it('uses member IDs when two users have the same name and ignores cleared legacy tags', async () => {
+    const { options } = responses(response('workspaceMembers', [member(),
+      { ...member(), id: OTHER_MEMBER_ID, userEmail: 'another-alex@example.test' }]),
+      response('opportunities', [
+        { ...opportunity(1), primaryAssigneeUserId: null, secondaryAssigneeUserId: MEMBER_ID },
+        { ...opportunity(2), primaryAssigneeUserId: OTHER_MEMBER_ID, assignedTo: ['ALEX'] },
+        { ...opportunity(3), primaryAssigneeUserId: null, assignedTo: ['ALEX'], secondaryAssignee: 'ALEX' },
+      ]));
+    expect(await getLiveCrmAccess(principal, { ...options, view: 'assigned' }))
+      .toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1)] });
+  });
+
   it('returns only verified IDs using fixed read requests and no cache or redirects', async () => {
     const { fetcher, options } = responses(
       response('workspaceMembers', [member()]),
@@ -42,24 +54,24 @@ describe('live CRM authorization', () => {
       expect(init).toMatchObject({ cache: 'no-store', redirect: 'error' });
       expect(init?.headers).toMatchObject({ Authorization: 'Bearer test-only-api-key' });
     }
-    expect((fetcher.mock.calls[1][0] as URL).searchParams.get('filter')).toBe(`or(createdBy.workspaceMemberId[eq]:"${MEMBER_ID}",assignedTo[containsAny]:["ALEX"]),deletedAt[is]:NULL`);
+    expect((fetcher.mock.calls[1][0] as URL).searchParams.get('filter')).toBe(`or(createdBy.workspaceMemberId[eq]:"${MEMBER_ID}",primaryAssigneeUserId[eq]:"${MEMBER_ID}",secondaryAssigneeUserId[eq]:"${MEMBER_ID}"),deletedAt[is]:NULL`);
   });
 
-  it('includes created OR assigned deals and excludes owner-only, secondary-only and deleted records', async () => {
+  it('includes created OR assigned deals and excludes owner-only and deleted records, including secondary user assignments', async () => {
     const { options } = responses(
       response('workspaceMembers', [member()]),
       response('opportunities', [
         opportunity(1),
-        { ...opportunity(2), assignedTo: ['OTHER'], createdBy: { workspaceMemberId: MEMBER_ID } },
-        { ...opportunity(3), assignedTo: [], ownerId: MEMBER_ID, createdBy: { workspaceMemberId: OTHER_MEMBER_ID } },
+        { ...opportunity(2), primaryAssigneeUserId: OTHER_MEMBER_ID, createdBy: { workspaceMemberId: MEMBER_ID } },
+        { ...opportunity(3), primaryAssigneeUserId: null, ownerId: MEMBER_ID, createdBy: { workspaceMemberId: OTHER_MEMBER_ID } },
         { ...opportunity(4), deletedAt: '2026-09-25T00:00:00Z' },
-        { ...opportunity(5), assignedTo: null, createdBy: { workspaceMemberId: MEMBER_ID } },
-        { ...opportunity(6), assignedTo: ['ALEX', 7] },
-        { ...opportunity(7), assignedTo: ['alex'] },
-        { ...opportunity(8), assignedTo: ['OTHER'], secondaryAssignee: 'ALEX', createdBy: { workspaceMemberId: OTHER_MEMBER_ID } },
+        { ...opportunity(5), primaryAssigneeUserId: null, createdBy: { workspaceMemberId: MEMBER_ID } },
+        { ...opportunity(6), primaryAssigneeUserId: 7 },
+        { ...opportunity(7), primaryAssigneeUserId: 'alex' },
+        { ...opportunity(8), primaryAssigneeUserId: OTHER_MEMBER_ID, secondaryAssigneeUserId: MEMBER_ID, createdBy: { workspaceMemberId: OTHER_MEMBER_ID } },
       ]),
     );
-    expect(await getLiveCrmAccess(principal, options)).toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1), opportunityId(2), opportunityId(5)] });
+    expect(await getLiveCrmAccess(principal, options)).toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1), opportunityId(2), opportunityId(5), opportunityId(8)] });
   });
 
   it('fully paginates before returning identifiers', async () => {
@@ -74,9 +86,9 @@ describe('live CRM authorization', () => {
 
   describe('exact opportunity authorization', () => {
     it.each([
-      { view: 'accessible' as const, row: opportunity(1001), filter: `or(createdBy.workspaceMemberId[eq]:"${MEMBER_ID}",assignedTo[containsAny]:["ALEX"])` },
-      { view: 'created' as const, row: { ...opportunity(1001), assignedTo: ['OTHER'], createdBy: { workspaceMemberId: MEMBER_ID } }, filter: `createdBy.workspaceMemberId[eq]:"${MEMBER_ID}"` },
-      { view: 'assigned' as const, row: opportunity(1001), filter: 'assignedTo[containsAny]:["ALEX"]' },
+      { view: 'accessible' as const, row: opportunity(1001), filter: `or(createdBy.workspaceMemberId[eq]:"${MEMBER_ID}",primaryAssigneeUserId[eq]:"${MEMBER_ID}",secondaryAssigneeUserId[eq]:"${MEMBER_ID}")` },
+      { view: 'created' as const, row: { ...opportunity(1001), primaryAssigneeUserId: OTHER_MEMBER_ID, createdBy: { workspaceMemberId: MEMBER_ID } }, filter: `createdBy.workspaceMemberId[eq]:"${MEMBER_ID}"` },
+      { view: 'assigned' as const, row: opportunity(1001), filter: `or(primaryAssigneeUserId[eq]:"${MEMBER_ID}",secondaryAssigneeUserId[eq]:"${MEMBER_ID}")` },
     ])('checks only the requested ID while retaining $view constraints', async ({ view, row, filter }) => {
       const { fetcher, options } = responses(response('workspaceMembers', [member()]), response('opportunities', [row]));
       const result = await getLiveCrmAccess(principal, { ...options, view, opportunityId: opportunityId(1001) });
@@ -122,9 +134,9 @@ describe('live CRM authorization', () => {
       { rows: [opportunity(1)], more: true },
       { rows: [{ ...opportunity(1), deletedAt: '2026-09-25T00:00:00Z' }] },
       { rows: [{ ...opportunity(1), deletedAt: undefined }] },
-      { rows: [{ ...opportunity(1), assignedTo: ['OTHER'], ownerId: MEMBER_ID }] },
-      { rows: [{ ...opportunity(1), assignedTo: ['ALEX', 7] }] },
-      { rows: [{ ...opportunity(1), assignedTo: null, createdBy: { workspaceMemberId: OTHER_MEMBER_ID } }] },
+      { rows: [{ ...opportunity(1), primaryAssigneeUserId: OTHER_MEMBER_ID, ownerId: MEMBER_ID }] },
+      { rows: [{ ...opportunity(1), primaryAssigneeUserId: 7 }] },
+      { rows: [{ ...opportunity(1), primaryAssigneeUserId: null, createdBy: { workspaceMemberId: OTHER_MEMBER_ID } }] },
     ])('fails closed on a malformed, misfiltered, or incomplete exact result (%#)', async ({ rows, more }) => {
       const { fetcher, options } = responses(response('workspaceMembers', [member()]),
         response('opportunities', rows, more ?? false, more ? 'unexpected-more' : null));
@@ -135,7 +147,7 @@ describe('live CRM authorization', () => {
 
     it('does not let created ownership satisfy an assigned-only exact read', async () => {
       const { options } = responses(response('workspaceMembers', [member()]), response('opportunities', [
-        { ...opportunity(1), assignedTo: ['OTHER'], createdBy: { workspaceMemberId: MEMBER_ID } },
+        { ...opportunity(1), primaryAssigneeUserId: OTHER_MEMBER_ID, createdBy: { workspaceMemberId: MEMBER_ID } },
       ]));
       await expect(getLiveCrmAccess(principal, { ...options, view: 'assigned', opportunityId: opportunityId(1) }))
         .rejects.toMatchObject({ status: 503, code: 'CRM_AUTHORIZATION_UNAVAILABLE' });
@@ -144,7 +156,7 @@ describe('live CRM authorization', () => {
     it('still permits an exact creator-only read with ambiguous assignment names', async () => {
       const { options } = responses(response('workspaceMembers', [member(), {
         ...member(), id: OTHER_MEMBER_ID, userEmail: 'other@example.test',
-      }]), response('opportunities', [{ ...opportunity(1), assignedTo: null, createdBy: { workspaceMemberId: MEMBER_ID } }]));
+      }]), response('opportunities', [{ ...opportunity(1), primaryAssigneeUserId: null, createdBy: { workspaceMemberId: MEMBER_ID } }]));
       expect(await getLiveCrmAccess(principal, { ...options, view: 'created', opportunityId: opportunityId(1) }))
         .toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1)] });
     });
@@ -189,11 +201,11 @@ describe('live CRM authorization', () => {
 
   it('keeps an Analyst assigned-only view narrower than their default access', async () => {
     const { fetcher, options } = responses(response('workspaceMembers', [member()]), response('opportunities', [
-      opportunity(1), { ...opportunity(2), assignedTo: ['OTHER'], createdBy: { workspaceMemberId: MEMBER_ID } },
+      opportunity(1), { ...opportunity(2), primaryAssigneeUserId: OTHER_MEMBER_ID, createdBy: { workspaceMemberId: MEMBER_ID } },
     ]));
     expect(await getLiveCrmAccess({ ...principal, isAnalyst: true }, { ...options, view: 'assigned' }))
       .toEqual({ mode: 'related', memberId: MEMBER_ID, ids: [opportunityId(1)] });
-    expect((fetcher.mock.calls[1][0] as URL).searchParams.get('filter')).toBe('assignedTo[containsAny]:["ALEX"],deletedAt[is]:NULL');
+    expect((fetcher.mock.calls[1][0] as URL).searchParams.get('filter')).toBe(`or(primaryAssigneeUserId[eq]:"${MEMBER_ID}",secondaryAssigneeUserId[eq]:"${MEMBER_ID}"),deletedAt[is]:NULL`);
   });
 
   it('rejects a stale all-lead result and requires crm:read even for Analysts', async () => {
@@ -209,7 +221,7 @@ describe('live CRM authorization', () => {
         { ...member(), id: OTHER_MEMBER_ID, userEmail: 'another-alex@example.test' },
       ]),
       response('opportunities', [
-        { ...opportunity(1), assignedTo: ['OTHER'], createdBy: { workspaceMemberId: MEMBER_ID } },
+        { ...opportunity(1), primaryAssigneeUserId: OTHER_MEMBER_ID, createdBy: { workspaceMemberId: MEMBER_ID } },
         { ...opportunity(2), createdBy: { workspaceMemberId: OTHER_MEMBER_ID } },
         { ...opportunity(3), ownerId: MEMBER_ID },
       ]),
@@ -223,8 +235,6 @@ describe('live CRM authorization', () => {
     [{ ...member(), userEmail: 'other@example.test' }],
     [{ ...member(), id: OTHER_MEMBER_ID }],
     [{ ...member(), deletedAt: '2026-09-25T00:00:00Z' }],
-    [{ ...member(), name: { firstName: 'Alex Name' } }],
-    [member(), { ...member(), id: OTHER_MEMBER_ID, userEmail: 'other@example.test' }],
     [member(), { ...member(), id: OTHER_MEMBER_ID, name: { firstName: 'Other' } }],
     [member(), { ...member(), name: { firstName: 'Other' }, userEmail: 'other@example.test' }],
   ].map((members) => [members] as const))('denies missing, mismatched, and ambiguous identity mappings (%#)', async (members) => {

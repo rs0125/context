@@ -8,6 +8,14 @@ import { CRM_DATE_FIELDS, CRM_SORTS, getCrmFilterOptions, getMyBriefing, getOppo
 import { CRM_ENUM_ARRAY_LIMIT } from '../src/lib/crm-fields';
 
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, '0')}`;
+function users(primary: unknown = null, secondary: unknown = null) {
+  const relation = (name: unknown, slot: number) => ({ id: id(900000 + slot), deletedAt: null,
+    name: { firstName: name, lastName: '' } });
+  return { primaryAssigneeUserId: primary === null ? null : id(900010),
+    primaryAssigneeUser: primary === null ? null : relation(primary, 10),
+    secondaryAssigneeUserId: secondary === null ? null : id(900020),
+    secondaryAssigneeUser: secondary === null ? null : relation(secondary, 20) };
+}
 const principal: Principal = { isAnalyst: true, employeeId: 900001, email: 'synthetic@example.test', keyId: 'synthetic-query-fixture', scopes: ['crm:read'], twentyUserId: id(900001) };
 const related: CrmAccess = { mode: 'related', memberId: principal.twentyUserId!, ids: [1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12].map(id) };
 const all: CrmAccess = { mode: 'all', memberId: principal.twentyUserId! };
@@ -142,18 +150,18 @@ describe.skipIf(process.env.CONTEXT_LIVE_CRM_QUERY_TEST !== '1')('synthetic CRM 
 
   it('discovers scoped assignees and counts primary or secondary matches once without malformed primary matches', async () => {
     const fixture = fixtureFor([
-      record(1, '2026-09-01T00:00:00Z', { data: { assignedTo: [' ALEX ', 'SAM', 'ALEX'], secondaryAssignee: 'ALEX' } }),
-      record(2, '2026-09-02T00:00:00Z', { data: { assignedTo: ['SAM'] } }),
-      record(3, null, { deleted_at: '2026-09-24T00:00:00Z', data: { assignedTo: ['ALEX', 'DELETED_ONLY'] } }),
-      record(4, null, { data: { assignedTo: ['TAYLOR'], secondaryAssignee: 'ALEX', supplyLead: ['SUPPLY_ONLY'] } }),
-      record(5, null, { data: { assignedTo: 'ALEX' } }),
-      record(6, null, { data: { assignedTo: { name: 'ALEX' } } }),
-      record(7, null, { data: { assignedTo: ['ALEX', 123] } }),
-      record(8, null, { data: { assignedTo: ['HIDDEN'] } }),
-      record(9, null, { data: { assignedTo: ['ALEX', 'private@example.test'] } }),
-      record(10, null, { data: { assignedTo: [] } }),
-      record(11, null, { data: { assignedTo: ['ALEXA'] } }),
-      record(12, null, { data: { assignedTo: Array(33).fill('ALEX') } }),
+      record(1, '2026-09-01T00:00:00Z', { data: users(' ALEX ', 'SAM') }),
+      record(2, '2026-09-02T00:00:00Z', { data: users('SAM') }),
+      record(3, null, { deleted_at: '2026-09-24T00:00:00Z', data: users('ALEX', 'DELETED_ONLY') }),
+      record(4, null, { data: { ...users('TAYLOR', 'ALEX'), supplyLead: ['SUPPLY_ONLY'] } }),
+      record(5, null, { data: { assignedTo: ['ALEX'] } }),
+      record(6, null, { data: users({ name: 'ALEX' }) }),
+      record(7, null, { data: users(['ALEX', 123]) }),
+      record(8, null, { data: users('HIDDEN') }),
+      record(9, null, { data: users('private@example.test') }),
+      record(10, null, { data: users() }),
+      record(11, null, { data: users('ALEXA') }),
+      record(12, null, { data: { ...users('ALEX'), primaryAssigneeUserId: id(999999) } }),
     ]);
     const options = await getCrmFilterOptions(fixture, principal, new URLSearchParams(), related);
     expect(options).toMatchObject({ assignees: ['ALEX', 'ALEXA', 'SAM', 'TAYLOR'], assignees_truncated: false });
@@ -182,22 +190,22 @@ describe.skipIf(process.env.CONTEXT_LIVE_CRM_QUERY_TEST !== '1')('synthetic CRM 
 
   it('includes complete secondary labels with independent validation, deduplication and unchanged employee access', async () => {
     const fixture = fixtureFor([
-      record(101, null, { data: { secondaryAssignee: ' CASEY ' } }),
-      record(102, null, { data: { assignedTo: ['CASEY', 'CASEY'], secondaryAssignee: 'CASEY' } }),
-      record(103, null, { stage: 'FOLLOW_UP', data: { assignedTo: ['SAM'], secondaryAssignee: 'CASEY' } }),
-      record(104, null, { stage: 'SITE_VISIT', data: { assignedTo: { name: 'CASEY' }, secondaryAssignee: 'CASEY' } }),
-      record(105, null, { data: { assignedTo: ['CASEY'], secondaryAssignee: ['CASEY'] } }),
-      record(106, null, { data: { assignedTo: ['SAM'], secondaryAssignee: ['CASEY'] } }),
-      record(107, null, { data: { assignedTo: ['SAM'], secondaryAssignee: { name: 'CASEY' } } }),
-      record(108, null, { data: { assignedTo: ['SAM'], secondaryAssignee: 123 } }),
-      record(109, null, { data: { assignedTo: ['SAM'], secondaryAssignee: null } }),
-      record(110, null, { data: { assignedTo: ['SAM'], secondaryAssignee: 'CASEY 9876543210' } }),
-      record(111, null, { data: { assignedTo: ['SAM'], secondaryAssignee: 'CASEY, TAYLOR' } }),
-      record(112, null, { data: { assignedTo: [], secondaryAssignee: ' ', supplyLead: ['CASEY'] } }),
-      record(113, null, { deleted_at: '2026-09-24T00:00:00Z', data: { secondaryAssignee: 'CASEY' } }),
-      record(114, null, { data: { secondaryAssignee: 'CASEY' } }),
-      record(115, null, { data: { secondaryAssignee: 'SECONDARY_HIDDEN' } }),
-      record(116, null, { data: { secondaryAssignee: 'ONLY_SECONDARY' } }),
+      record(101, null, { data: { secondaryAssigneeUserId: id(900020), secondaryAssigneeUser: { id: id(900020), deletedAt: null, name: { firstName: ' CASEY ', lastName: '' } } } }),
+      record(102, null, { data: { ...users('CASEY', 'CASEY') } }),
+      record(103, null, { stage: 'FOLLOW_UP', data: { ...users('SAM'), secondaryAssigneeUserId: id(900020), secondaryAssigneeUser: { id: id(900020), deletedAt: null, name: { firstName: 'CASEY', lastName: '' } } } }),
+      record(104, null, { stage: 'SITE_VISIT', data: { ...users({ name: 'CASEY' }, 'CASEY') } }),
+      record(105, null, { data: { ...users('CASEY'), secondaryAssigneeUserId: id(900020), secondaryAssigneeUser: { id: id(900020), deletedAt: null, name: { firstName: ['CASEY'], lastName: '' } } } }),
+      record(106, null, { data: { ...users('SAM'), secondaryAssigneeUserId: id(900020), secondaryAssigneeUser: { id: id(900020), deletedAt: null, name: { firstName: ['CASEY'], lastName: '' } } } }),
+      record(107, null, { data: { ...users('SAM'), secondaryAssigneeUserId: id(900020), secondaryAssigneeUser: { id: id(900020), deletedAt: null, name: { firstName: { name: 'CASEY' }, lastName: '' } } } }),
+      record(108, null, { data: { ...users('SAM'), secondaryAssigneeUserId: id(900020), secondaryAssigneeUser: { id: id(900020), deletedAt: null, name: { firstName: 123, lastName: '' } } } }),
+      record(109, null, { data: { ...users('SAM'), secondaryAssigneeUserId: id(900020), secondaryAssigneeUser: { id: id(900020), deletedAt: null, name: { firstName: null, lastName: '' } } } }),
+      record(110, null, { data: { ...users('SAM'), secondaryAssigneeUserId: id(900020), secondaryAssigneeUser: { id: id(900020), deletedAt: null, name: { firstName: 'CASEY 9876543210', lastName: '' } } } }),
+      record(111, null, { data: { ...users('SAM'), secondaryAssigneeUserId: id(900020), secondaryAssigneeUser: { id: id(900020), deletedAt: null, name: { firstName: 'CASEY, TAYLOR', lastName: '' } } } }),
+      record(112, null, { data: { ...users(), secondaryAssigneeUserId: id(900020), secondaryAssigneeUser: { id: id(900020), deletedAt: null, name: { firstName: ' ', lastName: '' } }, supplyLead: ['CASEY'] } }),
+      record(113, null, { deleted_at: '2026-09-24T00:00:00Z', data: { secondaryAssigneeUserId: id(900020), secondaryAssigneeUser: { id: id(900020), deletedAt: null, name: { firstName: 'CASEY', lastName: '' } } } }),
+      record(114, null, { data: { secondaryAssigneeUserId: id(900020), secondaryAssigneeUser: { id: id(900020), deletedAt: null, name: { firstName: 'CASEY', lastName: '' } } } }),
+      record(115, null, { data: { secondaryAssigneeUserId: id(900020), secondaryAssigneeUser: { id: id(900020), deletedAt: null, name: { firstName: 'SECONDARY_HIDDEN', lastName: '' } } } }),
+      record(116, null, { data: { secondaryAssigneeUserId: id(900020), secondaryAssigneeUser: { id: id(900020), deletedAt: null, name: { firstName: 'ONLY_SECONDARY', lastName: '' } } } }),
     ]);
     const employee = { ...principal, isAnalyst: false };
     const scoped: CrmAccess = { ...related, ids: [...Array.from({ length: 13 }, (_, i) => id(101 + i)), id(116)] };
@@ -228,7 +236,7 @@ describe.skipIf(process.env.CONTEXT_LIVE_CRM_QUERY_TEST !== '1')('synthetic CRM 
 
   it('caps dynamically discovered assignee options independently of city options', async () => {
     const fixture = fixtureFor(Array.from({ length: 102 }, (_, index) => record(index + 1, null,
-      { data: index % 2 === 0 ? { assignedTo: [`TEAM_${String(index).padStart(3, '0')}`] } : { secondaryAssignee: `TEAM_${String(index).padStart(3, '0')}` } })));
+      { data: index % 2 === 0 ? users(`TEAM_${String(index).padStart(3, '0')}`) : users(null, `TEAM_${String(index).padStart(3, '0')}`) })));
     const options = await getCrmFilterOptions(fixture, principal, new URLSearchParams(), all);
     expect(options.assignees).toHaveLength(100);
     expect(options.assignees[0]).toBe('TEAM_000');

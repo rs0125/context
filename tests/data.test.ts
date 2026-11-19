@@ -159,7 +159,7 @@ describe('employee-scoped CRM reads', () => {
     for (const db of [list, detail, briefing]) {
       expect(db.query).toHaveBeenCalledTimes(1);
       expect(db.query.mock.calls[0][0]).toContain("o.data->'gclidGoogleAds' AS gclid");
-      expect(db.query.mock.calls[0][0]).toContain("o.data->'secondaryAssignee' AS secondary_assignee");
+      expect(db.query.mock.calls[0][0]).toContain("o.data->>'secondaryAssigneeUserId'");
       expect(db.query.mock.calls[0][0]).not.toMatch(/JOIN|last_note_text|pocPhone|SELECT\s+o\.data\s*[,\s]/);
     }
     expect(JSON.stringify(listed)).not.toMatch(/Private raw|9876543210|private@example/);

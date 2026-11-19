@@ -305,9 +305,21 @@ CRM reads backed by the mirror fail with `503` and error code `CRM_SOURCE_STALE`
 
 CRM mirror responses include `read_consistency`: `database_snapshot: "repeatable_read"`, `transaction_started_at`, `lead_fields: "same_row"` and `cross_request_snapshot: false`. The mirrored lead rows, aggregates and checkpoint markers within a response use one bounded, read-only repeatable-read database transaction. Related responses add related_sources_atomic: false; their live records are not part of that database snapshot. This prevents a poll arriving between statements from mixing newer stream metadata with older lead facts, or newer briefing counts with older priorities. It does not synchronise independently polled source streams, and live Twenty permission checks remain separate from that database snapshot. A subsequent detail read or pagination request takes a new snapshot and may observe newer records. Keep source timestamps with answers; do not treat response time as source freshness.
 
-CRM search results, lead details and briefing priorities include `ownership.secondary_assignee`, projected from `opportunities.data.secondaryAssignee` in the same mirrored row. It uses the existing text envelope (`state`, `text`, `redacted`, `truncated`), bounded to 160 characters under the current CRM presentation policy. Absent, null and blank values are `missing`; unsupported types are withheld. Primary demand assignees (`assigned_to`), secondary assignee and supply owners remain distinct. Secondary assignment alone does not grant lead access or change primary-assignee briefing ownership. CRM Automations refreshes this field each cycle even when Twenty's parent `updatedAt` is unchanged; use `last_polled_at` with `source_updated_at` when comparing observations. This projection needs no database migration.
+CRM search results, lead details and briefing priorities project assignment display names from
+`primaryAssigneeUser` and `secondaryAssigneeUser` in the same mirrored row. The compatible
+`ownership.assigned_to` array contains the primary member's full name, and
+`ownership.secondary_assignee` uses the existing text envelope. Both user-relation IDs grant
+assigned-lead access and participate in CRM Automations briefings/reminders. Supply owners
+remain separate. Clearing a new relation takes effect even if a retired dropdown still
+contains a name. CRM Automations refreshes relation snapshots every cycle.
 
-To query a named assignee, call `crm_filters` (REST: `GET /api/v1/crm/filters`) and copy an exact value from `assignees` into the `assignee` parameter of `search_crm_leads` or `crm_summary`. For example, if discovery returns `ALEX`, use `GET /api/v1/crm/opportunities?assignee=ALEX&active_only=true` or `GET /api/v1/crm/summary?assignee=ALEX&group_by=stage`. Matching checks each member of Twenty's primary `assignedTo` multiselect OR the complete `secondaryAssignee` text, case-sensitively after trimming spaces. Secondary text is one recorded label, never split into inferred names. A deal counts once even when the person appears in both roles. Options come dynamically from both fields on permitted nondeleted mirrored leads in the requested `view`, capped at 100 with `assignees_truncated`; they do not include unused configured dropdown choices. Missing/malformed fields are excluded independently, so a valid value in the other field can still match. The filter narrows existing access and combines with other filters; it does not impersonate that assignee or include supply assignments. `view=assigned` and the REST alias `assigned_to=me` still mean the current employee's assigned leads under existing live permissions; secondary assignment alone does not grant access. Keep the same `assignee` when following `nextCursor`. No migration or hardcoded employee list is needed.
+To query a named assignee, call `crm_filters` and copy an exact full-name option from
+`assignees` into the `assignee` parameter. Matching checks either user relation, with each
+deal counted once. Labels are case-sensitive after trimming; they never establish identity
+or expand access. A name is projected only when its relation object matches the stored
+Workspace Member ID. Options are scoped to permitted nondeleted leads, capped at 100.
+`view=assigned` (or the REST alias `assigned_to=me`) uses live primary OR secondary member
+IDs. Retired `assignedTo`/`secondaryAssignee` fields are not consulted.
 
 Relevant HTTP statuses are `400` or `422` for invalid inputs, `401` for invalid credentials, `403` for unavailable scope or inactive employees, `404` for unavailable records, `405` for unsupported methods, `414` for request URLs longer than 4,096 characters, `429` for request limits, and `503` for temporary service, freshness, or database failures. Errors return `{ "error": { "code": "ERROR_CODE", "message": "Explanation" }, "meta": { "requestId": "...", "generatedAt": "..." } }`. Authenticated responses use private, no-store cache controls.
 
@@ -327,7 +339,7 @@ The server validates the API key, its expiry, and the employee's active, unique 
 
 Manage **Analyst access** in the **main Wareongo dashboard → Admin Panel → employee Access columns**. Admins inherit it, displayed as **via admin**. It does not grant dashboard access, reviewer access, or admin editing. An explicit Analyst grant remains independent of admin inheritance: removing admin access preserves Analyst access only if its separate flag is true. Twenty role labels or membership do not grant this application permission.
 
-For a standard employee, CRM visibility remains the union of `createdBy.workspaceMemberId` and explicit `assignedTo` matching their unique assignment token. A creator retains access after reassignment. A separate `ownerId` is not evidence of creation. These checks require a unique active Twenty member matching the roster email and member ID. Their default view and explicit `created`/`assigned` views use bounded live reads; incomplete identity or assignment results fail closed.
+For a standard employee, CRM visibility remains the union of `createdBy.workspaceMemberId` and `primaryAssigneeUserId` or `secondaryAssigneeUserId` matching their Workspace Member UUID. A creator retains access after reassignment. A separate `ownerId` is not evidence of creation. These checks require a unique active Twenty member matching the roster email and member ID. Their default view and explicit `created`/`assigned` views use bounded live reads; incomplete identity or assignment results fail closed.
 
 For Analysts, `view=accessible` permits all non-deleted mirrored leads without a Twenty account or source-role lookup. Explicit `created` and `assigned` views still require a linked, live-verified Twenty identity and remain personal. The mirror freshness guard, redaction, deletion filters, field allowlists, and scope checks apply to all roles. Current Analyst permission is checked again after upstream reads, including related context and cached analytics, so a stale all-leads authorization result cannot survive revocation during a request.
 
@@ -450,3 +462,11 @@ Pool limits of 1–2 sockets and local request queues apply to each Node instanc
 After deployment, refresh the connector's tool definitions or reconnect if the harness caches schemas. Restart any in-progress query carrying an old cursor. Employee keys and connected OAuth grants remain valid. MCP citation paths retain the endpoint and filters but omit pagination cursors; assessment citations also omit employee-supplied criteria, which remain in the structured result. Record IDs and `meta.requestId` identify the returned evidence.
 
 CRM deletion: `delete_crm_rfq` moves the current employee’s agent-created opportunity to CRM trash after an explicit request and fresh version check, including after prior Ramesh edits. `delete_crm_note` only recovers existing deletion receipts; new note trash is unavailable because the provider cannot atomically protect separate deal links. Existing domain grants and `CONTEXT_CRM_DELETES_ENABLED=true` still gate these tools. See [RFQ deletion](docs/crm-rfq-writes.md#explicit-opportunity-deletion) and [note recovery](docs/crm-notes.md#explicit-deletion).
+
+### Assignment migration validation (19 November 2026)
+
+Full regression suite, TypeScript checks, and the synthetic PostgreSQL query suite cover
+both user roles, duplicate display names, stale legacy tags, cleared assignments, scoped
+search, deduplication, and malformed relation data. Public response aliases are retained so
+Ramesh and existing MCP/REST clients continue working. Creator and Analyst access retain
+their existing rules; owner-only access is not introduced.

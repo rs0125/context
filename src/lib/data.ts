@@ -81,6 +81,18 @@ const OPPORTUNITY_FIELDS = [
 const crmScalar = (field: string) => `CASE WHEN jsonb_typeof(o.data->'${field}') IN ('string', 'number') THEN to_jsonb(o.data->>'${field}') ELSE o.data->'${field}' END`;
 // Project only named business fields from the very same mirrored row. Never
 // hydrate arbitrary JSON, contacts, notes or a differently cached lead here.
+// Only a name attached to the same user-relation ID is a display/filter label.
+// These aliases keep the public connector response compatible; authorization uses IDs.
+function assigneeNameSql(field: 'primaryAssigneeUser' | 'secondaryAssigneeUser') {
+  return `CASE WHEN o.data->>'${field}Id' ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+    AND lower(o.data->>'${field}Id') = lower(o.data#>>'{${field},id}')
+    AND o.data#>>'{${field},deletedAt}' IS NULL
+    AND jsonb_typeof(o.data#>'{${field},name,firstName}') = 'string'
+    AND jsonb_typeof(o.data#>'{${field},name,lastName}') = 'string'
+    THEN NULLIF(btrim(concat_ws(' ',o.data#>>'{${field},name,firstName}',o.data#>>'{${field},name,lastName}')),'') END`;
+}
+const PRIMARY_ASSIGNEE_NAME = assigneeNameSql('primaryAssigneeUser');
+const SECONDARY_ASSIGNEE_NAME = assigneeNameSql('secondaryAssigneeUser');
 const OPPORTUNITY_JSON_FIELDS = {
   requirement_sqft: crmScalar('requirementInSft'), micro_market: "o.data->'microMarket'",
   lead_source: "o.data->'leadSource'", gclid: "o.data->'gclidGoogleAds'", lease_duration: "o.data->'duration'",
@@ -88,8 +100,8 @@ const OPPORTUNITY_JSON_FIELDS = {
   preferred_languages: "o.data->'preferredLanguage'", repeat_client: "o.data->'repeatClient'",
   budget: crmScalar('budget'), amount_micros: "CASE WHEN jsonb_typeof(o.data->'amount'->'amountMicros') IN ('string', 'number') THEN to_jsonb(o.data->'amount'->>'amountMicros') ELSE o.data->'amount'->'amountMicros' END",
   amount_currency: "o.data->'amount'->>'currencyCode'", recorded_follow_up_count: crmScalar('followupcount'),
-  close_date: "o.data->'closeDate'", assigned_to: "o.data->'assignedTo'", supply_owners: "o.data->'supplyLead'",
-  secondary_assignee: "o.data->'secondaryAssignee'",
+  close_date: "o.data->'closeDate'", assigned_to: `CASE WHEN (${PRIMARY_ASSIGNEE_NAME}) IS NOT NULL THEN jsonb_build_array(${PRIMARY_ASSIGNEE_NAME}) ELSE '[]'::jsonb END`, supply_owners: "o.data->'supplyLead'",
+  secondary_assignee: `to_jsonb(${SECONDARY_ASSIGNEE_NAME})`,
   owner_workspace_member_id: "o.data->>'ownerId'", creator_id: "o.data->'createdBy'->>'workspaceMemberId'",
   creator_name: "o.data->'createdBy'->'name'", creator_source: "o.data->'createdBy'->'source'",
   updater_id: "o.data->'updatedBy'->>'workspaceMemberId'", updater_name: "o.data->'updatedBy'->'name'", updater_source: "o.data->'updatedBy'->'source'",
@@ -171,7 +183,7 @@ function sqlText(value: string) { return `'${value.replaceAll("'", "''")}'`; }
  * grammar accepts ordinary company/location labels and rejects contacts before
  * matching or aggregation; sanitizeLabel remains the final output boundary.
  */
-function safeCrmLabelSql(column: 'o.name' | 'o.company_name' | 'o.city' | "o.data->>'microMarket'" | "o.data->>'secondaryAssignee'" | "assignment.value #>> '{}'", maximum = 100) {
+function safeCrmLabelSql(column: string, maximum = 100) {
   const raw = `btrim(${column})`;
   const allowed = sqlText(`^[A-Za-z0-9 .,'()&/_–—-]{1,${maximum}}$`);
   const contacts = sqlText('https?:|www[.]|mailto:|tel:|wa[.]me|whatsapp|contact[[:space:]]*(me|us|number)|call[[:space:]]*(me|us|on)');
@@ -184,20 +196,11 @@ const SAFE_NAME = safeCrmLabelSql('o.name');
 const SAFE_COMPANY = safeCrmLabelSql('o.company_name');
 const SAFE_CITY = safeCrmLabelSql('o.city', 80);
 const SAFE_MICRO_MARKET = safeCrmLabelSql("o.data->>'microMarket'");
-const SAFE_ASSIGNEE_LABEL = safeCrmLabelSql("assignment.value #>> '{}'", 80);
-// Keep malformed multiselects out of both discovery and filtering. The nested
-// CASE prevents array operations on scalars; names never establish access.
-const SAFE_PRIMARY_ASSIGNEES = `CASE WHEN jsonb_typeof(o.data->'assignedTo') = 'array' THEN CASE
-  WHEN jsonb_array_length(o.data->'assignedTo') BETWEEN 1 AND ${CRM_ENUM_ARRAY_LIMIT}
-    AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(o.data->'assignedTo') AS assignment(value)
-      WHERE jsonb_typeof(assignment.value) <> 'string' OR (${SAFE_ASSIGNEE_LABEL}) IS NULL)
-  THEN o.data->'assignedTo' ELSE '[]'::jsonb END ELSE '[]'::jsonb END`;
-const SAFE_SECONDARY_ASSIGNEE = safeCrmLabelSql("o.data->>'secondaryAssignee'", 80);
-// Secondary assignment is a single recorded text value, not another multiselect.
-// Validate each field independently so a malformed primary does not hide a valid
-// secondary (or vice versa). EXISTS below counts shared/duplicate roles once.
-const SAFE_ASSIGNEES = `(${SAFE_PRIMARY_ASSIGNEES}) || CASE
-  WHEN jsonb_typeof(o.data->'secondaryAssignee') = 'string' AND (${SAFE_SECONDARY_ASSIGNEE}) IS NOT NULL
+const SAFE_PRIMARY_ASSIGNEE = safeCrmLabelSql(`(${PRIMARY_ASSIGNEE_NAME})`, 80);
+const SAFE_SECONDARY_ASSIGNEE = safeCrmLabelSql(`(${SECONDARY_ASSIGNEE_NAME})`, 80);
+const SAFE_ASSIGNEES = `CASE WHEN (${SAFE_PRIMARY_ASSIGNEE}) IS NOT NULL
+  THEN jsonb_build_array(${SAFE_PRIMARY_ASSIGNEE}) ELSE '[]'::jsonb END ||
+  CASE WHEN (${SAFE_SECONDARY_ASSIGNEE}) IS NOT NULL
   THEN jsonb_build_array(${SAFE_SECONDARY_ASSIGNEE}) ELSE '[]'::jsonb END`;
 const enumSql = (expression: string, allowed: readonly string[]) =>
   `CASE WHEN ${expression} IN (${allowed.map(sqlText).join(', ')}) THEN ${expression} END`;
@@ -383,7 +386,7 @@ export async function getCrmFilterOptions(client: PoolClient, principal: Princip
     assignees: assignments.rows.slice(0, 100).map(row => sanitizeLabel(row.assignee, 80)).filter((value): value is string => value !== null), assignees_truncated: assignments.rows.length > 100,
     stages: ALL_STAGES, views: ['accessible', 'created', 'assigned'], date_fields: CRM_DATE_FIELDS, periods: DATE_PERIODS, sorts: CRM_SORTS, follow_up_statuses: CRM_FOLLOW_UP,
     summary_groups: CRM_SUMMARY_GROUPS, lead_sources: CRM_LEAD_SOURCES, lease_durations: CRM_LEASE_DURATIONS, industries: CRM_INDUSTRIES,
-    filter_guidance: 'assignees lists primary assignedTo multiselect members and complete secondaryAssignee text values observed on permitted mirrored leads in this view, not every configured Twenty dropdown option. Copy one exact value into assignee for search or summary; matching is case-sensitive after trimming spaces and checks either assignment field. Secondary text is one complete label, never split into inferred names. Each matching lead counts once, even when the person appears in both roles. assignee narrows the current access scope and can combine with view; it does not select another employee identity or match supply owners. Missing or malformed fields do not match; a valid value in the other assignment field can still match. A truncated list is incomplete. requirement_sqft_min/max match parsed square-foot requirements, including shorthand and ranges by overlap. Approximate/range candidates need verification; requirement_sqft is populated only for an exact interpretation. Missing or unsupported areas do not match. micro_market matches the complete recorded label, case-insensitively, without splitting commas. industry matches one valid recorded category. repeat_client matches an unambiguous recorded flag. Enum options describe supported values, not populated inventory. No budget/value filters because units and provenance need verification.',
+    filter_guidance: 'assignees lists primary and secondary Workspace Member names observed on permitted mirrored leads in this view, not every configured Twenty dropdown option. Copy one exact value into assignee for search or summary; matching is case-sensitive after trimming spaces and checks either assignment field. Names are display labels from user relations; live access is checked by Workspace Member ID. Each matching lead counts once, even when the person appears in both roles. assignee narrows the current access scope and can combine with view; it does not select another employee identity or match supply owners. Missing or malformed fields do not match; a valid value in the other assignment field can still match. A truncated list is incomplete. requirement_sqft_min/max match parsed square-foot requirements, including shorthand and ranges by overlap. Approximate/range candidates need verification; requirement_sqft is populated only for an exact interpretation. Missing or unsupported areas do not match. micro_market matches the complete recorded label, case-insensitively, without splitting commas. industry matches one valid recorded category. repeat_client matches an unambiguous recorded flag. Enum options describe supported values, not populated inventory. No budget/value filters because units and provenance need verification.',
     field_semantics: CRM_FIELD_GUIDANCE, date_semantics: CRM_DATE_GUIDANCE, search_guidance: 'q searches permitted lead and company labels only; labels containing contacts or unsupported characters do not participate in text search. City matches a comma-separated member, with Bangalore/Bengaluru and Gurgaon/Gurugram aliases. All filters combine with AND. active_only=true excludes closed, lost, on-hold and irrelevant stages. Follow-ups become overdue on the next India calendar day. No contacts or note-text search.' };
 }
 

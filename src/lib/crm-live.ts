@@ -100,16 +100,6 @@ function employeeMember(principal: Principal, members: Row[]) {
   return member;
 }
 
-function assignmentToken(member: Row, members: Row[]) {
-  if (!record(member.name) || typeof member.name.firstName !== 'string') identityUnavailable();
-  const token = member.name.firstName.trim().toUpperCase();
-  if (!/^[A-Z]{1,64}$/.test(token)) identityUnavailable();
-  const sameToken = members.filter((candidate) => record(candidate.name)
-    && typeof candidate.name.firstName === 'string' && candidate.name.firstName.trim().toUpperCase() === token);
-  if (sameToken.length !== 1) identityUnavailable();
-  return token;
-}
-
 /** Validate access again at each data boundary, using the current principal.
  * A stale all-leads result cannot outlive Analyst revocation. Personal views
  * remain bound to the live Twenty identity and its verified record IDs. */
@@ -174,11 +164,11 @@ export async function getLiveCrmAccess(principal: Principal, options: Options = 
     if (members.hasNextPage) unavailable();
     const member = employeeMember(principal, members.rows);
     const memberId = (member.id as string).toLowerCase();
-    // Creator-only reads are independent of first-name assignment ambiguity.
-    const token = view === 'created' ? null : assignmentToken(member, members.rows);
     const creatorFilter = `createdBy.workspaceMemberId[eq]:${JSON.stringify(memberId)}`;
-    const assignedFilter = `assignedTo[containsAny]:${JSON.stringify([token])}`;
-    const filter = view === 'created' ? creatorFilter : view === 'assigned' ? assignedFilter : `or(${creatorFilter},${assignedFilter})`;
+    const primaryFilter = `primaryAssigneeUserId[eq]:${JSON.stringify(memberId)}`;
+    const secondaryFilter = `secondaryAssigneeUserId[eq]:${JSON.stringify(memberId)}`;
+    const assignedFilter = `or(${primaryFilter},${secondaryFilter})`;
+    const filter = view === 'created' ? creatorFilter : view === 'assigned' ? assignedFilter : `or(${creatorFilter},${primaryFilter},${secondaryFilter})`;
     const opportunityFilter = `${targetId ? `id[eq]:${JSON.stringify(targetId)},` : ''}${filter},deletedAt[is]:NULL`;
     const ids = new Set<string>();
     const seenRecordIds = new Set<string>();
@@ -197,8 +187,8 @@ export async function getLiveCrmAccess(principal: Principal, options: Options = 
         seenRecordIds.add(id);
         const created = record(opportunity.createdBy) && typeof opportunity.createdBy.workspaceMemberId === 'string'
           && opportunity.createdBy.workspaceMemberId.toLowerCase() === memberId;
-        const assigned = token !== null && Array.isArray(opportunity.assignedTo)
-          && opportunity.assignedTo.every((value) => typeof value === 'string') && opportunity.assignedTo.includes(token);
+        const assigned = ['primaryAssigneeUserId', 'secondaryAssigneeUserId'].some(field =>
+          typeof opportunity[field] === 'string' && opportunity[field].toLowerCase() === memberId);
         const permitted = view === 'created' ? created : view === 'assigned' ? assigned : created || assigned;
         if (targetId && (opportunity.deletedAt !== null || !permitted)) unavailable();
         if (opportunity.deletedAt === null && permitted) {

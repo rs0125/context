@@ -25,7 +25,7 @@ describe('CRM task queries', () => {
     const [sql, values] = db.query.mock.calls[0];
     expect(sql).toContain('o.twenty_created_at >= $2::timestamptz');
     expect(sql).toContain('o.twenty_created_at < $3::timestamptz');
-    expect(sql).not.toMatch(/o\.created_at|first_seen_at|o\.data\b[^-]/);
+    expect(sql).not.toMatch(/o\.created_at|first_seen_at|o\.data\b[^-#]/);
     expect(values).toEqual([[id, id2], '2026-08-31T18:30:00.000Z', '2026-09-30T18:30:00.000Z', 11]);
     expect(result.items[0].source_created_at).toBe('2026-09-04T00:00:00.000Z');
     expect(result.query_context).toMatchObject({ date_field: 'created', returned_count: 1, has_more: false });
@@ -89,7 +89,7 @@ describe('CRM task queries', () => {
       expect(sql).toContain('o.opportunity_id = ANY($1::text[])');
       expect(sql).not.toContain("O'Hare, North");
       expect(sql).toContain("jsonb_typeof(o.data->'industryVertical') = 'array'");
-      expect(sql).toContain('NOT EXISTS');
+      expect(sql).not.toContain("o.data->'assignedTo'");
       expect(sql).toContain('= $8::boolean');
       expect(sql).not.toMatch(/regexp_split_to_table\([^)]*microMarket/);
     }
@@ -236,9 +236,9 @@ describe('named primary and secondary CRM assignees', () => {
       const [sql, values] = db.query.mock.calls[0];
       expect(sql).toContain('o.opportunity_id = ANY($1::text[])');
       expect(sql).toContain("btrim(assignment.value #>> '{}') = $2");
-      expect(sql).toContain("jsonb_typeof(o.data->'assignedTo') = 'array'");
-      expect(sql).toContain("jsonb_typeof(o.data->'secondaryAssignee') = 'string'");
-      expect(sql).toContain('NOT EXISTS');
+      expect(sql).toContain("o.data->>'primaryAssigneeUserId'");
+      expect(sql).toContain("o.data->>'secondaryAssigneeUserId'");
+      expect(sql).not.toContain("o.data->'assignedTo'");
       expect(sql).not.toContain(assignee);
       expect(values.slice(0, 3)).toEqual([[id, id2], assignee, 'NEW_LEAD']);
       expect(result.query_context.assignee).toBe(assignee);
