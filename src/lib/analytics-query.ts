@@ -10,7 +10,7 @@ export function validateAnalyticsCapabilities(query: URLSearchParams): Analytics
 }
 
 export const ANALYTICS_PERIODS = ['today', 'yesterday', 'last_7_days', 'last_28_days', 'this_month', 'last_month'] as const;
-export const GA4_REPORT_PRESETS = ['overview', 'daily', 'acquisition', 'landing_pages', 'pages', 'devices', 'countries', 'events', 'warehouse_interest', 'lead_sources', 'first_visits', 'form_submissions', 'form_performance', 'ads_costs', 'ads_campaigns', 'ads_keywords', 'ads_queries'] as const;
+export const GA4_REPORT_PRESETS = ['overview', 'daily', 'acquisition', 'landing_pages', 'pages', 'devices', 'countries', 'events', 'warehouse_interest', 'lead_sources', 'section_reach', 'first_visits', 'form_submissions', 'form_performance', 'ads_costs', 'ads_campaigns', 'ads_keywords', 'ads_queries'] as const;
 export const SEARCH_CONSOLE_GROUPS = ['summary', 'date', 'query', 'page', 'query_page', 'country', 'device'] as const;
 const COMMON = ['period', 'date_from', 'date_to', 'limit', 'cursor', 'compare_to', 'device', 'country'] as const;
 export const GA4_QUERY_PARAMETER_NAMES = ['report', 'event_name', 'landing_page_contains', 'page_path_contains', 'channel', 'source', 'campaign_id', ...COMMON] as const;
@@ -82,8 +82,8 @@ export function validateGa4Query(query: URLSearchParams): Ga4Query {
   if (report === 'form_submissions' && event !== null && !['form_submit', 'generate_lead'].includes(event)) {
     invalidAnalyticsQuery('form_submissions supports form_submit or generate_lead; omit event_name to report both separately.');
   }
-  if (query.has('page_path_contains') && !['pages', 'events', 'form_submissions'].includes(report)) {
-    invalidAnalyticsQuery('page_path_contains filters recorded event page context and is available only for pages, events and form_submissions.');
+  if (query.has('page_path_contains') && !['pages', 'events', 'form_submissions', 'section_reach'].includes(report)) {
+    invalidAnalyticsQuery('page_path_contains filters recorded event page context and is available only for pages, events, form_submissions and section_reach.');
   }
   if (report === 'overview' && base.cursor) invalidAnalyticsQuery('overview has one aggregate row and does not support cursors.');
   const compare_to = comparison(query, report === 'overview');

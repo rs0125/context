@@ -27,6 +27,11 @@ export const ANALYTICS_EVENT_DEFINITIONS: EventDefinition[] = [
     meaning: 'A tracked form attempt, including attempts that fail browser or custom validation.',
     limitations: ['Not a successful submission, unique person or exactly one event per button click.',
       'Historical tracking and an ordered relationship to success events have not been verified.'] },
+  { event_name: 'section_view', definition_basis: 'website_source_review',
+    meaning: 'A marked page block (section_id) was at least half on screen, or filled half the viewport, for one continuous second in a foreground tab. At most once per block per page view.',
+    limitations: ['Seen is not read, clicked or understood.',
+      'Blocks hidden in a device layout never report, so mobile and desktop section sets can differ.',
+      'Source code describes intended collection; this report does not verify deployed or historical coverage.'] },
   { event_name: 'contact_click', definition_basis: 'website_source_review',
     meaning: 'A tracked click on a phone, email or WhatsApp link.',
     limitations: ['Not evidence of an answered call, sent message, conversation or CRM lead.',
@@ -41,6 +46,8 @@ export const ANALYTICS_DIMENSION_DEFINITIONS: Record<string, string> = {
   sessionSourceMedium: 'Source and medium for this session, not lifetime first-touch attribution.',
   'customEvent:lead_type': 'Recorded form category, not a marketing acquisition channel or qualified CRM lead type.',
   'customEvent:origin_placement': 'Recorded CTA placement where supplied, not a visitor first-touch source.',
+  'customEvent:page_type': 'Website page template recorded with custom events, such as home, blog or listings. Automatic page_view events do not carry it.',
+  'customEvent:section_id': 'Stable website block id such as hero, faq or footer; the same id means the same role on every page type.',
 };
 
 export function ga4EventNames(query: Ga4Query): string[] {
@@ -48,6 +55,7 @@ export function ga4EventNames(query: Ga4Query): string[] {
   if (query.report === 'form_performance') return ['form_submit', 'generate_lead'];
   if (query.report === 'form_submissions') return query.event_name ? [query.event_name] : ['form_submit', 'generate_lead'];
   if (query.report === 'lead_sources') return ['generate_lead'];
+  if (query.report === 'section_reach') return ['section_view'];
   if (query.report === 'warehouse_interest') return [query.event_name ?? 'view_listing'];
   return query.event_name ? [query.event_name] : [];
 }
@@ -57,7 +65,7 @@ export function analyticsInterpretation(query: Ga4Query | SearchConsoleQuery,
   const ga = 'report' in query;
   const eventNames = ga ? [...new Set([...ga4EventNames(query), ...items.map(x => x.dimensions.eventName).filter((x): x is string => !!x)])] : [];
   const firstVisits = ga && (query.report === 'first_visits' || query.event_name === 'first_visit');
-  const pageBasis = ga && (['pages', 'form_submissions'].includes(query.report) || query.page_path_contains)
+  const pageBasis = ga && (['pages', 'form_submissions', 'section_reach'].includes(query.report) || query.page_path_contains)
     ? 'recorded_event_page' as const : ga && (['landing_pages', 'first_visits', 'form_performance'].includes(query.report) || query.landing_page_contains)
       ? 'session_entry' as const : 'none' as const;
   const acquisitionBasis = firstVisits ? 'first_visit_events_only' as const

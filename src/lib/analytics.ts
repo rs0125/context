@@ -54,7 +54,7 @@ const METRICS: Record<string, { unit: string; definition?: string; calculation?:
 // the same validated aggregate row and do not add Google requests or metrics.
 const GA_CORE = ['activeUsers', 'totalUsers', 'sessions', 'engagedSessions', 'screenPageViews', 'eventCount', 'keyEvents',
   'engagementRate', 'userEngagementDuration', 'averageSessionDuration'];
-const STATIC_PRESETS: Record<Exclude<Ga4Query['report'], 'warehouse_interest' | 'lead_sources'>, { dimensions: string[]; metrics: string[] }> = {
+const STATIC_PRESETS: Record<Exclude<Ga4Query['report'], CustomReport>, { dimensions: string[]; metrics: string[] }> = {
   overview: { dimensions: [], metrics: GA_CORE }, daily: { dimensions: ['date'], metrics: GA_CORE },
   acquisition: { dimensions: ['sessionDefaultChannelGroup', 'sessionSourceMedium'], metrics: GA_CORE },
   landing_pages: { dimensions: ['landingPage'], metrics: GA_CORE },
@@ -71,7 +71,15 @@ const STATIC_PRESETS: Record<Exclude<Ga4Query['report'], 'warehouse_interest' | 
 };
 const CUSTOM_WAREHOUSE = ['warehouse_city', 'warehouse_state', 'market_slug'];
 const CUSTOM_LEADS = ['lead_type', 'origin_placement'];
-const CUSTOM_ALLOWED = [...CUSTOM_WAREHOUSE, ...CUSTOM_LEADS].map(x => `customEvent:${x}`);
+const CUSTOM_SECTIONS = ['page_type', 'section_id'];
+type CustomReport = 'warehouse_interest' | 'lead_sources' | 'section_reach';
+const CUSTOM_REPORTS: Record<CustomReport, { names: string[]; required: string | null }> = {
+  warehouse_interest: { names: CUSTOM_WAREHOUSE, required: null }, lead_sources: { names: CUSTOM_LEADS, required: null },
+  // Page types alone would only restate where section views happened.
+  section_reach: { names: CUSTOM_SECTIONS, required: 'section_id' },
+};
+const isCustomReport = (report: Ga4Query['report']): report is CustomReport => report in CUSTOM_REPORTS;
+const CUSTOM_ALLOWED = [...CUSTOM_WAREHOUSE, ...CUSTOM_LEADS, ...CUSTOM_SECTIONS].map(x => `customEvent:${x}`);
 const INT = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const SHORT = z.string().max(4096);
 const RAW_VALUE = z.object({ value: SHORT });
@@ -223,10 +231,10 @@ async function gaConfiguration(property: string, signal: AbortSignal) {
     source_fetched_at: metadata.source_fetched_at < timezone.source_fetched_at ? metadata.source_fetched_at : timezone.source_fetched_at };
 }
 function preset(query: Ga4Query, available: string[]) {
-  if (query.report === 'warehouse_interest' || query.report === 'lead_sources') {
-    const names = query.report === 'warehouse_interest' ? CUSTOM_WAREHOUSE : CUSTOM_LEADS;
+  if (isCustomReport(query.report)) {
+    const { names, required } = CUSTOM_REPORTS[query.report];
     const dimensions = names.map(x => `customEvent:${x}`).filter(x => available.includes(x));
-    if (!dimensions.length) throw new HttpError(400, 'ANALYTICS_REPORT_UNAVAILABLE', 'This report requires registered GA4 custom dimensions. Check analytics capabilities for available reports.');
+    if (!dimensions.length || (required && !available.includes(`customEvent:${required}`))) throw new HttpError(400, 'ANALYTICS_REPORT_UNAVAILABLE', 'This report requires registered GA4 custom dimensions. Check analytics capabilities for available reports.');
     return { dimensions, metrics: ['eventCount', 'totalUsers'],
       events: ga4EventNames(query),
       missing: names.filter(x => !available.includes(`customEvent:${x}`)) };
@@ -306,11 +314,16 @@ async function readGa4Report(query: Ga4Query, property: string, config: Awaited<
   if (dates.includes_recent_days) warn(result.data.quality, 'Recent GA4 dates are still processing and may change. Fetch time is not a data-completeness timestamp.');
   if (selected.missing.length) warn(result.data.quality, `Unregistered dimensions omitted: ${selected.missing.join(', ')}.`);
   if (selected.metrics.includes('keyEvents')) warn(result.data.quality, 'Key events use the property configuration; they are not necessarily sales leads.');
-  if (['events', 'lead_sources', 'warehouse_interest', 'first_visits', 'form_submissions'].includes(query.report)) warn(result.data.quality, 'Event counts are recorded website actions, not a sequential conversion funnel, unique CRM leads, or closed revenue.');
+  if (['events', 'lead_sources', 'warehouse_interest', 'section_reach', 'first_visits', 'form_submissions'].includes(query.report)) warn(result.data.quality, 'Event counts are recorded website actions, not a sequential conversion funnel, unique CRM leads, or closed revenue.');
   if (query.report === 'first_visits') warn(result.data.quality, 'This reports first_visit events by the entry page of that session. It does not link those visitors to later visits, enquiries or pipeline.');
   if (query.report === 'form_submissions') warn(result.data.quality, 'form_submit and generate_lead may describe the same attempt. Keep event types separate; differences do not prove over- or under-firing. Recorded page context can be the page where the form opened.');
   if (query.report === 'lead_sources') warn(result.data.quality, 'Lead sources here means recorded form type and originating placement, not marketing channel attribution. Use acquisition for session channel/source.');
   if (query.report === 'warehouse_interest') warn(result.data.quality, 'Warehouse geography describes tracked property or search context, not the visitor location.');
+  if (query.report === 'section_reach') {
+    warn(result.data.quality, 'A section view means the block was seen (at least half on screen, or filling half the viewport, for one continuous second in a foreground tab), counted at most once per block per page view. It is not reading, clicking or intent.');
+    warn(result.data.quality, 'Automatic page_view events do not carry page_type, so no page-view denominator is returned. Compare sections within one page_type, for example against its first block (usually hero); raw counts across page types reflect their traffic.');
+    warn(result.data.quality, 'Section views exist only from the website release that introduced them. Dates before it have no rows, which is not zero reach.');
+  }
   if (query.report === 'pages') warn(result.data.quality, 'Pages reports activity on each visited path. Landing pages reports the entry path of a session; these are different questions.');
   if (selected.metrics.includes('userEngagementDuration')) warn(result.data.quality, 'Engagement time measures recorded foreground activity. Session duration is a separate metric; averages and rates must not be summed or averaged across report rows.');
   if (query.report === 'pages') warn(result.data.quality, 'Page engagement time per active user describes activity on that visited path, not the duration of a whole session.');

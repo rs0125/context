@@ -12,7 +12,7 @@ vi.mock('../src/lib/analytics-google', async importOriginal => ({
 }));
 import { analyticsCapabilities, ga4Report, searchConsoleReport } from '../src/lib/analytics';
 
-const CUSTOM = ['warehouse_city', 'warehouse_state', 'market_slug', 'lead_type', 'origin_placement'];
+const CUSTOM = ['warehouse_city', 'warehouse_state', 'market_slug', 'lead_type', 'origin_placement', 'page_type', 'section_id'];
 const DEFAULT_TIMING: Record<string, string> = { engagementRate: '0.6', userEngagementDuration: '120.5', averageSessionDuration: '24.25' };
 const gaResponse = (body: Body, dimensionValues?: string[], metricValues?: string[]) => ({
   dimensionHeaders: (body.dimensions as { name: string }[] | undefined ?? []).map(x => ({ name: x.name })),
@@ -150,6 +150,35 @@ describe('bounded GA4 presets and source semantics', () => {
     expect(actualGaCall()![1].dimensions).toEqual([{ name: 'customEvent:lead_type' }, { name: 'customEvent:origin_placement' }]);
     expect(actualGaCall()![1].dimensionFilter.filter.stringFilter.value).toBe('generate_lead');
     expect(leads.quality.warnings.join(' ')).toContain('not marketing channel attribution');
+  });
+  it('reports section reach by page type and section from section_view only', async () => {
+    const base = responseFactory;
+    responseFactory = (read, body) => read.kind === 'ga4_report' && body.dimensions?.length ? gaResponse(body, ['blog', 'article_end'], ['40', '31']) : base(read, body);
+    const report = await ga4Report(new URLSearchParams({ report: 'section_reach', page_path_contains: '/blogs/' }));
+    const body = actualGaCall()![1];
+    expect(body.dimensions).toEqual([{ name: 'customEvent:page_type' }, { name: 'customEvent:section_id' }]);
+    expect(body.metrics.map((metric: { name: string }) => metric.name)).toEqual(['eventCount', 'totalUsers']);
+    expect(body.dimensionFilter).toEqual({ andGroup: { expressions: [
+      { filter: { fieldName: 'eventName', stringFilter: { matchType: 'EXACT', value: 'section_view', caseSensitive: true } } },
+      { filter: { fieldName: 'pagePath', stringFilter: { matchType: 'CONTAINS', value: '/blogs/', caseSensitive: true } } },
+    ] } });
+    expect(report.items[0]).toMatchObject({ dimensions: { page_type: 'blog', section_id: 'article_end' }, metrics: { eventCount: 40, totalUsers: 31 } });
+    expect(report.query_context.event_name).toBe('section_view');
+    expect(report.interpretation.page_basis).toBe('recorded_event_page');
+    expect(report.interpretation.event_definitions.map(x => x.event_name)).toEqual(['section_view']);
+    const warnings = report.quality.warnings.join(' ');
+    expect(warnings).toContain('no page-view denominator');
+    expect(warnings).toContain('not zero reach');
+    expect(report.columns.find(x => x.name === 'section_id')?.definition).toContain('same role on every page type');
+  });
+  it('requires a registered section_id for section reach, and rejects a custom event name', async () => {
+    const base = responseFactory;
+    responseFactory = (read, body) => read.kind === 'ga4_metadata' ? { dimensions: [{ apiName: 'customEvent:page_type' }], metrics: [] } : base(read, body);
+    const capabilities = await analyticsCapabilities('ga4');
+    expect(capabilities.ga4!.reports.find(x => x.name === 'section_reach')).toMatchObject({ available: false });
+    await expect(ga4Report(new URLSearchParams('report=section_reach'))).rejects.toMatchObject({ status: 400, code: 'ANALYTICS_REPORT_UNAVAILABLE' });
+    await expect(ga4Report(new URLSearchParams('report=section_reach&event_name=page_view'))).rejects.toMatchObject({ status: 400, code: 'INVALID_QUERY' });
+    expect(actualGaCall()).toBeUndefined();
   });
   it('queries only registered custom dimensions and describes missing ones', async () => {
     const base = responseFactory;
@@ -316,7 +345,7 @@ describe('GA4 engagement metric semantics', () => {
     expect(report.items[0].metrics).not.toHaveProperty('bounceRate');
     expect(report.quality.warnings.join(' ')).toContain('not the duration of a whole session');
   });
-  it.each(['events', 'warehouse_interest', 'lead_sources'])('keeps %s as an event-count report', async reportName => {
+  it.each(['events', 'warehouse_interest', 'lead_sources', 'section_reach'])('keeps %s as an event-count report', async reportName => {
     const report = await ga4Report(new URLSearchParams({ report: reportName }));
     expect(actualGaCall()![1].metrics.map((metric: { name: string }) => metric.name)).toEqual(['eventCount', 'totalUsers']);
     expect(Object.keys(report.items[0].metrics)).toEqual(['eventCount', 'totalUsers']);
